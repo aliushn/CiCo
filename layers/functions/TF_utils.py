@@ -92,7 +92,7 @@ def generate_candidate(predictions):
             candidate_cur['conf'] = conf_data[:, keep].t()
             candidate_cur['box'] = decoded_boxes[keep, :]
             candidate_cur['mask_coeff'] = predictions['mask_coeff'][i][keep, :]
-            candidate_cur['track'] = predictions['track'][i][keep, :] if cfg.train_track else None
+            candidate_cur['track'] = predictions['track'][i]
             if cfg.train_centerness:
                 candidate_cur['centerness'] = predictions['centerness'][i][keep].view(-1)
 
@@ -114,28 +114,5 @@ def merge_candidates(candidate, ref_candidate_clip_shift):
 
     return merged_candidate
 
-
-def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta, add_bbox_dummy=False, bbox_dummy_iou=0,
-                        match_coeff=None):
-    # compute comprehensive matching score based on matchig likelihood,
-    # bbox confidence, and ious
-    if add_bbox_dummy:
-        bbox_iou_dummy = torch.ones(bbox_ious.size(0), 1,
-                                    device=torch.cuda.current_device()) * bbox_dummy_iou
-        bbox_ious = torch.cat((bbox_iou_dummy, bbox_ious), dim=1)
-        mask_ious = torch.cat((bbox_iou_dummy, mask_ious), dim=1)
-        label_dummy = torch.ones(bbox_ious.size(0), 1,
-                                 device=torch.cuda.current_device())
-        label_delta = torch.cat((label_dummy, label_delta), dim=1)
-
-    if match_coeff is None:
-        return match_ll
-    else:
-        # match coeff needs to be length of 4
-        assert (len(match_coeff) == 4)
-        return match_ll + match_coeff[0] * bbox_scores \
-               + match_coeff[1] * mask_ious \
-               + match_coeff[2] * bbox_ious \
-               + match_coeff[3] * label_delta
 
 

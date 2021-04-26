@@ -1,8 +1,10 @@
 import torch
 import torch.nn.functional as F
+import torch.distributions as dist
 from ..box_utils import jaccard,  mask_iou
+from ..track_utils import generate_track_gaussian, compute_comp_scores, display_association_map
 from ..mask_utils import generate_mask
-from .TF_utils import CandidateShift, compute_comp_scores
+from .TF_utils import CandidateShift
 from utils import timer
 
 from datasets import cfg
@@ -60,19 +62,17 @@ class Track_TF(object):
             det_bbox = candidate['box']
             det_score, det_labels = candidate['conf'][:, 1:].max(1)  # class
             det_masks_coeff = candidate['mask_coeff']
-            if cfg.train_track:
-                det_track_embed = F.normalize(candidate['track'], dim=1)
-            else:
-                det_track_embed = F.normalize(det_masks_coeff, dim=1)
             proto_data = candidate['proto']
+            # det_track_embed = F.normalize(candidate['track'], dim=-1)
+            det_track_embed = candidate['track']
+            det_track_mu, det_track_var = generate_track_gaussian(det_track_embed, det_bbox)
+            candidate['track_mu'] = det_track_mu
+            candidate['track_var'] = det_track_var
+            del candidate['track']
 
             n_dets = det_bbox.size(0)
             # get masks
-            det_masks = generate_mask(proto_data,
-                                      cfg.mask_proto_coeff_activation(det_masks_coeff),
-                                      det_bbox,
-                                      cfg.mask_proto_mask_activation,
-                                      cfg.use_sipmask)
+            det_masks = generate_mask(proto_data, cfg.mask_proto_coeff_activation(det_masks_coeff), det_bbox)
             det_masks = det_masks.gt(0.5).float()
 
             # compared bboxes in current frame with bboxes in previous frame to achieve tracking
@@ -94,24 +94,33 @@ class Track_TF(object):
 
                 n_prev = self.prev_candidate['conf'].size(0)
                 # only support one image at a time
-                cos_sim = det_track_embed @ F.normalize(self.prev_candidate['track'], dim=1).t()
-                cos_sim = torch.cat([torch.zeros(n_dets, 1), cos_sim], dim=1)
-                cos_sim = (cos_sim + 1) / 2  # [0, 1]
+                prev_track_mu = self.prev_candidate['track_mu']
+                prev_track_var = self.prev_candidate['track_var']
+
+                # save_dir = 'weights/OVIS/weights_r50_kl'
+                # display_association_map(det_track_embed, prev_track_mu, prev_track_var, save_dir,
+                #                         video_id=img_meta['video_id'], frame_id=img_meta['frame_id'])
+
+                first_term = torch.sum(prev_track_var.log(), dim=-1).unsqueeze(0) \
+                             - torch.sum(det_track_var.log(), dim=-1).unsqueeze(1) - det_track_mu.size(1)
+                # ([1, n, c] - [n, 1, c]) * [1, n, c] => [n, n] sec_kj = \sum_{i=1}^C (mu_ij-mu_ik)^2 * sigma_i^{-1}
+                second_term = torch.sum((prev_track_mu.unsqueeze(0) - det_track_mu.unsqueeze(1)) ** 2 / prev_track_var.unsqueeze(0), dim=-1)
+                third_term = torch.mm(det_track_var, 1. / prev_track_var.t())  # [n, n]
+                kl_divergence = 0.5 * (first_term + second_term+third_term)  # [1, +infinite]
+                sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 1e-3  # threshold for kl_divergence = 5
+                sim = torch.cat([sim_dummy, torch.exp(-kl_divergence)], dim=-1)
 
                 bbox_ious = jaccard(det_bbox, prev_candidate_shift['box'])
                 prev_masks_shift = generate_mask(proto_data,
                                                  cfg.mask_proto_coeff_activation(prev_candidate_shift['mask_coeff']),
-                                                 prev_candidate_shift['box'],
-                                                 cfg.mask_proto_mask_activation,
-                                                 cfg.use_sipmask)
+                                                 prev_candidate_shift['box'])
 
                 mask_ious = mask_iou(det_masks, prev_masks_shift)  # [n_dets, n_prev]
-                # print(img_meta['video_id'], img_meta['frame_id'], cos_sim[:, 1:], mask_ious)
 
                 # compute comprehensive score
                 prev_det_score, prev_det_labels = self.prev_candidate['conf'][:, 1:].max(1)  # class
                 label_delta = (prev_det_labels == det_labels.view(-1, 1)).float()
-                comp_scores = compute_comp_scores(cos_sim,
+                comp_scores = compute_comp_scores(sim,
                                                   det_score.view(-1, 1),
                                                   bbox_ious,
                                                   mask_ious,
@@ -161,9 +170,7 @@ class Track_TF(object):
             det_obj_ids = torch.arange(self.prev_candidate['box'].size(0))
             det_masks_out = generate_mask(proto_data,
                                           cfg.mask_proto_coeff_activation(self.prev_candidate['mask_coeff']),
-                                          self.prev_candidate['box'],
-                                          cfg.mask_proto_mask_activation,
-                                          cfg.use_sipmask)
+                                          self.prev_candidate['box'])
 
             # whether add some tracked masks
             cond1 = self.prev_candidate['tracked_mask'] <= 5
@@ -180,7 +187,6 @@ class Track_TF(object):
                 det_score, det_labels = self.prev_candidate['conf'][keep, 1:].max(1)
                 detection = {'box': self.prev_candidate['box'][keep],
                              'mask_coeff': self.prev_candidate['mask_coeff'][keep],
-                             'track': self.prev_candidate['track'][keep],
                              'class': det_labels+1, 'score': det_score,
                              'centerness': self.prev_candidate['centerness'][keep], 'proto': proto_data,
                              'box_ids': det_obj_ids[keep], 'mask': det_masks_out[keep]}

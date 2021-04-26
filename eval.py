@@ -1,8 +1,6 @@
 from datasets import *
 from STMask import STMask
-from utils.augmentations import BaseTransform, FastBaseTransform, Resize
 from utils.functions import MovingAverage, ProgressBar
-from layers.box_utils import jaccard, center_size
 from utils import timer
 from utils.functions import SavePath
 from layers.output_utils import postprocess_ytbvis, undo_image_transformation, display_fpn_outs
@@ -10,11 +8,9 @@ from layers.output_utils import postprocess_ytbvis, undo_image_transformation, d
 from datasets import get_dataset, prepare_data
 import mmcv
 import math
-import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 import torch.utils.data as data
-from torch.autograd import Variable
 import argparse
 import random
 import os
@@ -24,6 +20,8 @@ from layers.eval_utils import bbox2result_with_id, results2json_videoseg, ytvos_
 import matplotlib.pyplot as plt
 import cv2
 from torch.utils.tensorboard import SummaryWriter
+
+
 
 def str2bool(v):
     if v.lower() in ('yes', 'true', 't', 'y', '1'):
@@ -117,7 +115,8 @@ def parse_args(argv=None):
     parser.add_argument('--emulate_playback', default=False, dest='emulate_playback', action='store_true',
                         help='When saving a video, emulate the framerate that you\'d get running in real-time mode.')
     parser.add_argument('--eval_types', type=str, nargs='+', choices=['bbox', 'segm'], help='eval types')
-    parser.set_defaults(no_bar=False, display=False, resume=False, output_coco_json=False, output_web_json=False, shuffle=False,
+    parser.set_defaults(no_bar=False, display=False, resume=False, output_coco_json=False, output_web_json=False,
+                        shuffle=False,
                         benchmark=False, no_sort=False, no_hash=False, mask_proto_debug=False, crop=True, detect=False,
                         display_fps=False, emulate_playback=False)
 
@@ -126,7 +125,7 @@ def parse_args(argv=None):
 
     if args.output_web_json:
         args.output_coco_json = True
-    
+
     if args.seed is not None:
         random.seed(args.seed)
 
@@ -137,7 +136,8 @@ coco_cats_inv = {}
 color_cache = defaultdict(lambda: {})
 
 
-def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_transform=True, mask_alpha=0.45, fps_str=''):
+def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_transform=True, mask_alpha=0.45,
+                 fps_str=''):
     """
     Note: If undo_transform=False then im_h and im_w are allowed to be None.
     -- display_model: 'train', 'test', 'None' means groundtruth results
@@ -149,19 +149,20 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
     else:
         img_gpu = img / 255.0
         pad_h, pad_w, _ = img.shape
+    ori_h, ori_w, _ = img_meta['ori_shape']
 
     # if img_gpu is None:
     # img_gpu = torch.tensor(np.zeros(img_gpu.size(), np.uint8)).cuda()
 
     with timer.env('Postprocess'):
         cfg.mask_proto_debug = args.mask_proto_debug
-        cfg.preserve_aspect_ratio = False
+        # cfg.preserve_aspect_ratio = False
         dets_out = postprocess_ytbvis(dets_out, pad_h, pad_w, img_meta, display_mask=True,
-                                      visualize_lincomb = args.display_lincomb,
-                                      crop_masks        = args.crop,
-                                      score_threshold   = cfg.eval_conf_thresh,
-                                      img_ids           = img_ids,
-                                      mask_det_file     = args.mask_det_file)
+                                      visualize_lincomb=args.display_lincomb,
+                                      crop_masks=args.crop,
+                                      score_threshold=cfg.eval_conf_thresh,
+                                      img_ids=img_ids,
+                                      mask_det_file=args.mask_det_file)
         torch.cuda.synchronize()
         scores = dets_out['score'][:args.top_k].detach().cpu().numpy()
         boxes = dets_out['box'][:args.top_k].detach().cpu().numpy()
@@ -190,34 +191,35 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
     if args.display_masks and cfg.eval_mask_branch:
         # After this, mask is of size [num_dets, h, w, 1]
         masks = masks[:num_dets_to_consider, :, :, None]
-        
+
         # Prepare the RGB images for each mask given their color (size [num_dets, h, w, 1])
-        colors = torch.cat([get_color(j, color_type, on_gpu=img_gpu.device.index, undo_transform=undo_transform).view(1, 1, 1, 3)
-                            for j in range(num_dets_to_consider)], dim=0)
+        colors = torch.cat(
+            [get_color(j, color_type, on_gpu=img_gpu.device.index, undo_transform=undo_transform).view(1, 1, 1, 3)
+             for j in range(num_dets_to_consider)], dim=0)
         masks_color = masks.repeat(1, 1, 1, 3) * colors * mask_alpha
 
         # This is 1 everywhere except for 1-mask_alpha where the mask is
         inv_alph_masks = masks * (-mask_alpha) + 1
-        
+
         # I did the math for this on pen and paper. This whole block should be equivalent to:
         #    for j in range(num_dets_to_consider):
         #        img_gpu = img_gpu * inv_alph_masks[j] + masks_color[j]
         masks_color_summand = masks_color[0]
         if num_dets_to_consider > 1:
-            inv_alph_cumul = inv_alph_masks[:(num_dets_to_consider-1)].cumprod(dim=0)
+            inv_alph_cumul = inv_alph_masks[:(num_dets_to_consider - 1)].cumprod(dim=0)
             masks_color_cumul = masks_color[1:] * inv_alph_cumul
             masks_color_summand += masks_color_cumul.sum(dim=0)
         img_gpu = img_gpu * inv_alph_masks.prod(dim=0) + masks_color_summand
-        
+
     if args.display_fps:
-            # Draw the box for the fps on the GPU
+        # Draw the box for the fps on the GPU
         font_face = cv2.FONT_HERSHEY_DUPLEX
         font_scale = 0.6
         font_thickness = 1
 
         text_w, text_h = cv2.getTextSize(fps_str, font_face, font_scale, font_thickness)[0]
 
-        img_gpu[0:text_h+8, 0:text_w+8] *= 0.6 # 1 - Box alpha
+        img_gpu[0:text_h + 8, 0:text_w + 8] *= 0.6  # 1 - Box alpha
 
     # Then draw the stuff that needs to be done on the cpu
     # Note, make sure this is a uint8 tensor or opencv will not anti alias text for whatever reason
@@ -250,7 +252,7 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
                 priors = dets_out['priors'].view(-1, 4).detach().cpu().numpy()
                 if j < dets_out['priors'].size(0):
                     cpx, cpy, pw, ph = priors[j, :] * [w, h, w, h]
-                    px1, py1 = cpx - pw/2.0, cpy - ph/2.0
+                    px1, py1 = cpx - pw / 2.0, cpy - ph / 2.0
                     px2, py2 = cpx + pw / 2.0, cpy + ph / 2.0
                     px1, py1, px2, py2 = int(px1), int(py1), int(px2), int(py2)
                     pcolor = [255, 0, 255]
@@ -262,8 +264,10 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
             # fx2, fy2 = cpx + pred_scales[p - 3] / 2, cpy + pred_scales[p - 3] / 2
             # fx1, fy1, fx2, fy2 = int(fx1), int(fy1), int(fx2), int(fy2)
             # fcolor = [255, 128, 0]
-            x = torch.clamp(torch.tensor([x1, x2]), min=2, max=pad_w).tolist(),
-            y = torch.clamp(torch.tensor([y1, y2]), min=2, max=pad_h).tolist(),
+            max_w = ori_w if cfg.preserve_aspect_ratio else pad_w
+            max_h = ori_h if cfg.preserve_aspect_ratio else pad_h
+            x = torch.clamp(torch.tensor([x1, x2]), min=2, max=max_w).tolist(),
+            y = torch.clamp(torch.tensor([y1, y2]), min=2, max=max_h).tolist(),
             x, y = x[0], y[0]
 
             score = scores[j]
@@ -276,10 +280,10 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
                 # cv2.rectangle(img_numpy, (x[4], y[4]), (x[5], y[5]), fcolor, 2)
 
             if args.display_text:
-                if classes[j]-1 < 0:
+                if classes[j] - 1 < 0:
                     _class = 'None'
                 else:
-                    _class = cfg.classes[classes[j]-1]
+                    _class = cfg.classes[classes[j] - 1]
 
                 if score is not None:
                     # if cfg.use_maskiou and not cfg.rescore_bbox:
@@ -291,7 +295,7 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
                     else:
 
                         text_str = '%s: %.2f: %s' % (
-                        _class, score, str(color_type[j].cpu().numpy())) if args.display_scores else _class
+                            _class, score, str(color_type[j].cpu().numpy())) if args.display_scores else _class
                 else:
                     text_str = '%s' % _class
 
@@ -304,8 +308,9 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
                 text_pt = (max(x1, 10), max(y1 - 3, 10))
                 text_color = [255, 255, 255]
                 cv2.rectangle(img_numpy, (max(x1, 10), max(y1, 10)), (x1 + text_w, y1 - text_h - 4), color, -1)
-                cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness, cv2.LINE_AA)
-    
+                cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness,
+                            cv2.LINE_AA)
+
     return img_numpy
 
 
@@ -313,7 +318,7 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
 # Also keeps track of a per-gpu color cache for maximum speed
 def get_color(j, color_type, on_gpu=None, undo_transform=True):
     global color_cache
-    color_idx = ( color_type[j] * 5 ) % len(cfg.COLORS)
+    color_idx = (color_type[j] * 5) % len(cfg.COLORS)
 
     if on_gpu is not None and color_idx in color_cache[on_gpu]:
         return color_cache[on_gpu][color_idx]
@@ -487,12 +492,13 @@ def prep_display_single(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None
 
 class CustomDataParallel(torch.nn.DataParallel):
     """ A Custom Data Parallel class that properly gathers lists of dictionaries. """
+
     def gather(self, outputs, output_device):
         # Note that I don't actually want to convert everything to the output_device
         return sum(outputs, [])
 
 
-def validation(net:STMask, valid_data=False, output_metrics_file=None):
+def validation(net: STMask, valid_data=False, output_metrics_file=None):
     cfg.mask_proto_debug = args.mask_proto_debug
     if not valid_data:
         cfg.valid_sub_dataset.test_mode = True
@@ -502,7 +508,8 @@ def validation(net:STMask, valid_data=False, output_metrics_file=None):
         dataset = get_dataset(cfg.valid_dataset)
 
     frame_times = MovingAverage()
-    dataset_size = math.ceil(len(dataset)/args.batch_size) if args.max_images < 0 else min(args.max_images, len(dataset))
+    dataset_size = math.ceil(len(dataset) / args.batch_size) if args.max_images < 0 else min(args.max_images,
+                                                                                             len(dataset))
     progress_bar = ProgressBar(30, dataset_size)
 
     print()
@@ -516,7 +523,8 @@ def validation(net:STMask, valid_data=False, output_metrics_file=None):
         for it, data_batch in enumerate(data_loader):
             timer.reset()
             with timer.env('Load Data'):
-                images, images_meta, ref_images, ref_images_meta = prepare_data(data_batch, is_cuda=True, train_mode=False)
+                images, images_meta, ref_images, ref_images_meta = prepare_data(data_batch, is_cuda=True,
+                                                                                train_mode=False)
                 pad_h, pad_w = images.size()[2:4]
 
             with timer.env('Network Extra'):
@@ -539,7 +547,7 @@ def validation(net:STMask, valid_data=False, output_metrics_file=None):
             if it > 1:
                 if batch_size == 0:
                     batch_size = 1
-                frame_times.add(timer.total_time()/batch_size)
+                frame_times.add(timer.total_time() / batch_size)
 
             if it > 1 and frame_times.get_avg() > 0:
                 fps = 1 / frame_times.get_avg()
@@ -566,12 +574,13 @@ def validation(net:STMask, valid_data=False, output_metrics_file=None):
         print('Stopping...')
 
 
-def evaluate(net:STMask, dataset):
+def evaluate(net: STMask, dataset):
     net.detect.use_fast_nms = args.fast_nms
     cfg.mask_proto_debug = args.mask_proto_debug
 
     frame_times = MovingAverage()
-    dataset_size = math.ceil(len(dataset) / args.batch_size) if args.max_images < 0 else min(args.max_images, len(dataset))
+    dataset_size = math.ceil(len(dataset) / args.batch_size) if args.max_images < 0 else min(args.max_images,
+                                                                                             len(dataset))
     progress_bar = ProgressBar(30, dataset_size)
 
     print()
@@ -587,14 +596,15 @@ def evaluate(net:STMask, dataset):
             timer.reset()
 
             with timer.env('Load Data'):
-                images, images_meta, ref_images, ref_images_meta = prepare_data(data_batch, is_cuda=True, train_mode=False)
+                images, images_meta, ref_images, ref_images_meta = prepare_data(data_batch, is_cuda=True,
+                                                                                train_mode=False)
             pad_h, pad_w = images.size()[2:4]
 
             with timer.env('Network Extra'):
                 preds = net(images, img_meta=images_meta, ref_x=ref_images, ref_imgs_meta=ref_images_meta)
 
             # Perform the meat of the operation here depending on our mode.
-            if it == dataset_size-1:
+            if it == dataset_size - 1:
                 batch_size = len(dataset) % args.batch_size
             else:
                 batch_size = images.size(0)
@@ -635,7 +645,7 @@ def evaluate(net:STMask, dataset):
                 # Since that's technically initialization, don't include those in the FPS calculations.
                 if it > 1:
                     frame_times.add(timer.total_time() / batch_size)
-            
+
                 if args.display and not cfg.display_mask_single:
                     if it > 1:
                         print('Avg FPS: %.4f' % (1 / frame_times.get_avg()))
@@ -650,12 +660,14 @@ def evaluate(net:STMask, dataset):
                     plt.clf()
                     # plt.show()
                 elif not args.no_bar:
-                    if it > 1: fps = 1 / frame_times.get_avg()
-                    else: fps = 0
-                    progress = (it+1) / dataset_size * 100
-                    progress_bar.set_val(it+1)
+                    if it > 1:
+                        fps = 1 / frame_times.get_avg()
+                    else:
+                        fps = 0
+                    progress = (it + 1) / dataset_size * 100
+                    progress_bar.set_val(it + 1)
                     print('\rProcessing Images  %s %6d / %6d (%5.2f%%)    %5.2f fps        '
-                        % (repr(progress_bar), it+1, dataset_size, progress, fps), end='')
+                          % (repr(progress_bar), it + 1, dataset_size, progress, fps), end='')
 
         if not args.display and not args.benchmark:
             print()
@@ -681,35 +693,69 @@ def evaluate(net:STMask, dataset):
             print('Stats for the last frame:')
             timer.print_stats()
             avg_seconds = frame_times.get_avg()
-            print('Average: %5.2f fps, %5.2f ms' % (1 / frame_times.get_avg(), 1000*avg_seconds))
+            print('Average: %5.2f fps, %5.2f ms' % (1 / frame_times.get_avg(), 1000 * avg_seconds))
 
     except KeyboardInterrupt:
         print('Stopping...')
 
 
-def evaluate_single(net:STMask, im_path=None, save_path=None):
-        im = mmcv.imread(im_path)
-        ori_shape = im.shape
-        im, w_scale, h_scale = mmcv.imresize(im, (640, 360), return_scale=True)
-        img_shape = im.shape
-        im = mmcv.imnormalize(im, np.array([123.675, 116.28, 103.53], dtype=np.float32),
-                              np.array([58.395, 57.12, 57.375], dtype=np.float32), to_rgb=True)
-        im = mmcv.impad_to_multiple(im, 32)
-        pad_shape = im.shape
-        im = torch.tensor(im).permute(2, 0, 1).contiguous().unsqueeze(0).cuda()
-        pad_h, pad_w = im.size()[2:4]
-        preds = net(im)
-        preds[0]['detection']['box_ids'] = torch.arange(preds[0]['detection']['box'].size(0))
-        img_meta = {'ori_shape': ori_shape, 'img_shape': img_shape, 'pad_shape': pad_shape}
-        cfg.preserve_aspect_ratio = True
-        img_numpy = prep_display(preds[0], im[0], pad_h, pad_w, img_meta=img_meta,
-                                 img_ids=(0, 0))
-        if save_path is None:
-            plt.imshow(img_numpy)
-            plt.axis('off')
-            plt.show()
-        else:
-            cv2.imwrite(save_path, img_numpy)
+def evaluate_single(net: STMask, im_path=None, save_path=None, idx=None):
+    im = mmcv.imread(im_path)
+    ori_shape = im.shape
+    im, w_scale, h_scale = mmcv.imresize(im, (640, 360), return_scale=True)
+    img_shape = im.shape
+
+    if cfg.backbone.transform.normalize:
+        im = (im - MEANS) / STD
+    elif cfg.backbone.transform.subtract_means:
+        im = (im - MEANS)
+    elif cfg.backbone.transform.to_float:
+        im = im / 255.
+    im = mmcv.impad_to_multiple(im, 32)
+    pad_shape = im.shape
+    im = torch.tensor(im).permute(2, 0, 1).contiguous().unsqueeze(0).float().cuda()
+    pad_h, pad_w = im.size()[2:4]
+    img_meta = {'ori_shape': ori_shape, 'img_shape': img_shape, 'pad_shape': pad_shape}
+    if idx is not None:
+        img_meta['frame_id'] = idx
+    if idx is None or idx == 0:
+        img_meta['is_first'] = True
+    else:
+        img_meta['is_first'] = False
+
+    preds = net(im, img_meta=[img_meta])
+    preds[0]['detection']['box_ids'] = torch.arange(preds[0]['detection']['box'].size(0))
+    cfg.preserve_aspect_ratio = True
+    img_numpy = prep_display(preds[0], im[0], pad_h, pad_w, img_meta=img_meta, img_ids=(0, idx))
+    if save_path is None:
+        plt.imshow(img_numpy)
+        plt.axis('off')
+        plt.show()
+    else:
+        cv2.imwrite(save_path, img_numpy)
+
+
+def evalimages(net: STMask, input_folder: str, output_folder: str):
+    if not os.path.exists(output_folder):
+        os.mkdir(output_folder)
+
+    print()
+    path_list = os.listdir(input_folder)
+    path_list.sort(key=lambda x:int(x[:-4]))
+    for idx, p in enumerate(path_list):
+        path = str(p)
+        name = os.path.basename(path)
+        name = '.'.join(name.split('.')[:-1]) + '.png'
+        out_path = os.path.join(output_folder, name)
+        in_path = os.path.join(input_folder, path)
+
+        evaluate_single(net, in_path, out_path, idx)
+        print(path + ' -> ' + out_path)
+    print('Done.')
+
+
+def evalvideo(net: STMask, input_folder: str, output_folder: str):
+    return
 
 
 if __name__ == '__main__':
@@ -733,7 +779,7 @@ if __name__ == '__main__':
     if args.detect:
         cfg.eval_mask_branch = False
 
-    if args.image is None:
+    if args.image is None and args.images is None:
         if args.eval_dataset is not None:
             set_dataset(args.eval_dataset, 'eval')
 
@@ -771,7 +817,26 @@ if __name__ == '__main__':
         if args.cuda:
             net = net.cuda()
 
-        if args.image is None:
+        if args.image is not None:
+            save_path = os.path.join(os.path.split(args.image[0]), 'out')
+            evaluate_single(net, args.image, save_path)
+
+        elif args.images is not None:
+            if ':' in args.images:
+                inp, out = args.images.split(':')
+                evalimages(net, inp, out)
+            else:
+                out = args.images + '_out'
+                evalimages(net, args.images, out)
+
+        elif args.video is not None:
+            if ':' in args.video:
+                inp, out = args.video.split(':')
+                evalvideo(net, inp, out)
+            else:
+                evalvideo(net, args.video)
+
+        else:
             if cfg.only_calc_metrics:
                 print('calculate evaluation metrics ...')
                 ann_file = cfg.valid_sub_dataset.ann_file
@@ -786,9 +851,5 @@ if __name__ == '__main__':
                     writer.add_scalar('valid_metrics/' + metrics_name[i_m], metrics[i_m], 1)
             else:
                 evaluate(net, val_dataset)
-        else:
-            im_path = 'results/Jie/53_2.tif'
-            save_path = 'results/Jie/53_2_mask.png'
-            evaluate_single(net, im_path, save_path)
 
 

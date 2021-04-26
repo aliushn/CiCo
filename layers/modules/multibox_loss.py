@@ -2,8 +2,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributions as dist
 from torch.autograd import Variable
 from ..box_utils import match, log_sum_exp, decode, center_size, crop, crop_sipmask, jaccard, point_form
+from ..mask_utils import generate_mask
 from .track_to_segment_head import bbox_feat_extractor
 from ..track_utils import mask_iou
 
@@ -115,7 +117,8 @@ class MultiBoxLoss(nn.Module):
             losses.update(losses_shift)
 
         if cfg.train_track:
-            losses['T'] = self.track_loss(pos_weights_per_img, track_data, conf_t, ids_t)
+            losses['T'] = self.track_loss(pos_weights_per_img, track_data, gt_bboxes_fold, loc_data, priors, conf_t,
+                                          gt_ids_fold, ids_t)
 
         for k in losses:
             if torch.isinf(losses[k]) or torch.isnan(losses[k]):
@@ -253,13 +256,14 @@ class MultiBoxLoss(nn.Module):
                               priors, gt_bboxes, gt_ids, gt_masks, interpolation_mode='bilinear'):
         loss_B_shift, loss_mask_shift = torch.zeros(1), torch.zeros(1)
         bs = loc_ref.size(0)
-        n_pos = 0
         for i in range(bs):
-            ids_t_ref_cur = ids_t_ref[i].clone()
+
             # select instances that exists in both two frames
             gt_ids_ref = gt_ids[i][0]
             gt_ids_next = gt_ids[i][1]
             gt_bboxes_reg = torch.zeros_like(loc_ref[i])
+            ids_t_ref_cur = ids_t_ref[i].clone()
+
             for j, id in enumerate(gt_ids_ref):
                 if id in gt_ids_next:
                     keep_inst = ids_t_ref_cur == id
@@ -269,24 +273,23 @@ class MultiBoxLoss(nn.Module):
                     gt_bboxes_reg_cur = torch.cat([(gt_bbox_next[:, :2] - gt_bbox_ref[:, :2]) / gt_bbox_ref[:, 2:],
                                                    (gt_bbox_next[:, 2:] / gt_bbox_ref[:, 2:]).log()           ], dim=1)
                     gt_bboxes_reg[keep_inst] = gt_bboxes_reg_cur.repeat(keep_inst.sum(), 1)
+
                 else:
                     ids_t_ref_cur[ids_t_ref[i] == id] = 0
 
-            gt_bboxes_reg = Variable(gt_bboxes_reg, requires_grad=False)
             pos = ids_t_ref_cur > 0
+            n_pos = pos.sum()
 
-            if pos.sum() == 0:
+            if n_pos == 0:
                 continue
 
-            n_pos += pos.sum()
+            # extract features on the predicted bbox
             loc_p = loc_ref[i][pos].view(-1, 4).detach()
             priors_p = priors[pos].view(-1, 4)
             bbox_p = decode(loc_p, priors_p, cfg.use_yolo_regressors)
             bbox_p_c = center_size(bbox_p)
             bbox_p_crop = point_form(torch.cat([bbox_p_c[:, :2],
-                                     torch.clamp(bbox_p_c[:, 2:] * 1.2, min=0, max=1)], dim=1))
-
-            # extract features on the predicted bbox
+                                                torch.clamp(bbox_p_c[:, 2:] * 1.2, min=0, max=1)], dim=1))
             bbox_feats = bbox_feat_extractor(concat_feat[i].unsqueeze(0), bbox_p_crop, 7)
             bbox_reg, shift_mask_coeff = net.TemporalNet(bbox_feats)
             pre_loss_B = F.smooth_l1_loss(bbox_reg, gt_bboxes_reg[pos], reduction='none').sum(1)
@@ -301,27 +304,15 @@ class MultiBoxLoss(nn.Module):
                 if cfg.mask_proto_binarize_downsampled_gt:
                     mask_t_next = mask_t_next.gt(0.5).float()
 
-                tar_mask_coeff = cfg.mask_proto_coeff_activation(mask_data_ref[i, pos] + shift_mask_coeff)
                 # generate mask coeff shift mask: \sum coeff_tar * proto_ref
-                if cfg.use_sipmask:
-                    pred_masks00 = cfg.mask_proto_mask_activation(proto_data_next[i] @ tar_mask_coeff[:, :32].t())
-                    pred_masks01 = cfg.mask_proto_mask_activation(proto_data_next[i] @ tar_mask_coeff[:, 32:64].t())
-                    pred_masks10 = cfg.mask_proto_mask_activation(proto_data_next[i] @ tar_mask_coeff[:, 64:96].t())
-                    pred_masks11 = cfg.mask_proto_mask_activation(proto_data_next[i] @ tar_mask_coeff[:, 96:128].t())
-                    pred_masks = crop_sipmask(pred_masks00, pred_masks01, pred_masks10, pred_masks11, bbox_t_next)
-                else:
-                    pred_masks = proto_data_next[i] @ tar_mask_coeff.t()  # [mask_h, mask_w, n_pos]
-                    pred_masks = cfg.mask_proto_mask_activation(pred_masks)
-                    _, pred_masks = crop(pred_masks, bbox_t_next)
+                tar_mask_coeff = cfg.mask_proto_coeff_activation(mask_data_ref[i, pos] + shift_mask_coeff)
+                pred_masks = generate_mask(proto_data_next[i], tar_mask_coeff, bbox_t_next)
 
                 mask_gt_h, mask_gt_w = mask_t_next.size()[:2]
-                upsampled_pred_masks = F.interpolate(pred_masks.permute(2, 0, 1).contiguous().unsqueeze(0).float(),
+                upsampled_pred_masks = F.interpolate(pred_masks.unsqueeze(0).float(),
                                                      (mask_gt_h, mask_gt_w),
                                                      mode=interpolation_mode, align_corners=False).squeeze(0)
                 upsampled_pred_masks = upsampled_pred_masks.permute(1, 2, 0).contiguous()  # [mask_h, mask_w, n_pos]
-
-                if cfg.mask_proto_crop:
-                    _, upsampled_pred_masks = crop(upsampled_pred_masks, bbox_t_next)
 
                 if cfg.mask_proto_mask_activation == activation_func.sigmoid:
                     pre_loss = F.binary_cross_entropy(torch.clamp(upsampled_pred_masks, 0, 1), mask_t_next,
@@ -331,8 +322,8 @@ class MultiBoxLoss(nn.Module):
 
                 if cfg.mask_proto_crop:
                     pos_get_csize = center_size(bbox_t_next)
-                    gt_box_width = pos_get_csize[:, 2] * mask_gt_w
-                    gt_box_height = pos_get_csize[:, 3] * mask_gt_h
+                    gt_box_width = torch.clamp(pos_get_csize[:, 2], min=1e-4, max=1) * mask_gt_w
+                    gt_box_height = torch.clamp(pos_get_csize[:, 3], min=1e-4, max=1) * mask_gt_h
                     pre_loss = pre_loss.sum(dim=(0, 1)) / gt_box_width / gt_box_height
                     loss_mask_shift += torch.mean(pre_loss)
                 else:
@@ -344,30 +335,70 @@ class MultiBoxLoss(nn.Module):
 
         return losses
 
-    def track_loss(self, pos_weights_per_img, track_data, conf_t, ids_t=None):
-        pos = conf_t > 0  # [2, n]
+    def track_loss(self, pos_weights_per_img, track_data, gt_bboxes, loc_data, priors, conf_t, gt_ids_fold, ids_t=None):
+        bs, h, w, c = track_data.size()
+        mu, var = [], []
 
-        pos_track_data = track_data[pos]
-        pos_ids_t = ids_t[pos]
-        cos_sim = pos_track_data @ pos_track_data.t()  # [n_pos, n_ref_pos]
+        for i in range(bs):
+            if cfg.track_crop_with_pred_box:
+                pos = conf_t[i] > 0  # [2, n]
+                n_pos = pos.sum()
+                pos_bboxes_t = decode(loc_data[i, pos], priors[i, pos], cfg.use_yolo_regressors)
+            else:
+                pos_bboxes_t = gt_bboxes[i]
+                n_pos = len(gt_bboxes[i])
+
+            pos_c_bboxes_t = center_size(pos_bboxes_t)
+            # only use the center region to evaluate multi-vairants Gaussian distribution
+            pos_c_bboxes_t[:, 2:] = pos_c_bboxes_t[:, 2:] * 0.75
+            crop_mask, cropped_track_data = crop(track_data[i].unsqueeze(-1).repeat(1, 1, 1, n_pos),
+                                                 point_form(pos_c_bboxes_t))
+            crop_mask = crop_mask.reshape(h * w, c, -1)
+            cropped_track_data = cropped_track_data.reshape(h * w, c, -1)
+            mu_cur = cropped_track_data.sum(0) / crop_mask.sum(0)  # [c, n_pos]
+            var.append(torch.sum((cropped_track_data - mu_cur.unsqueeze(0)) ** 2, dim=0))  # [c, n_pos]
+            mu.append(mu_cur)
+
+        mu = torch.cat(mu, dim=-1)
+        var = torch.cat(var, dim=-1)
+
+        # n_total = mu.size(1)
+        # temp = torch.zeros(n_total, n_total, device=mu.device)
+        # for j in range(n_total):
+        #     p = dist.MultivariateNormal(mu[:, j], torch.diag(var[:, j]))
+        #     for k in range(n_total):
+        #         q = dist.MultivariateNormal(mu[:, k], torch.diag(var[:, k]))
+        #         temp[j, k] = dist.kl_divergence(p, q)
+        # temp = temp + 1 + 1e-5
+
+        # kl_divergence for two Gaussian distributions, where k is the dim of variables
+        # D_kl(p||q) = 0.5(log(torch.norm(Sigma_q) / torch.norm(Sigma_p)) - k
+        #                  + (mu_p-mu_q)^T * torch.inverse(Sigma_q) * (mu_p-mu_q))
+        #                  + torch.trace(torch.inverse(Sigma_q) * Sigma_p))
+        first_term = torch.sum(torch.log(var).t(), dim=-1).unsqueeze(0)-torch.sum(torch.log(var).t(), dim=-1).unsqueeze(1) -c
+        third_term = torch.mm(var.t(), 1./var)  # [n, n]
+        # ([1, n, c] - [n, 1, c]) * [1, n, c] => [n, n] sec_kj = \sum_{i=1}^C (mu_ij-mu_ik)^2 * sigma_i^{-1}
+        second_term = torch.sum((mu.t().unsqueeze(0) - mu.t().unsqueeze(1))**2 / var.t().unsqueeze(0), dim=-1)
+        kl_divergence = 0.5 * (first_term + second_term + third_term) + 1 + 1e-5  # [1, +infinite]
+
+        # We hope the kl_divergence between same instance ids is small, otherwise the kl_divergence is large.
+        if cfg.track_crop_with_pred_box:
+            pos_ids_t = ids_t[conf_t > 0]
+            cur_weights = torch.cat(pos_weights_per_img)
+        else:
+            pos_ids_t = torch.cat(gt_ids_fold, dim=0)
+            cur_weights = torch.ones(pos_ids_t.size(0))
+
         inst_eq = (pos_ids_t.view(-1, 1) == pos_ids_t.view(1, -1)).float()
-        cur_weights = torch.cat(pos_weights_per_img)
         loss_weights = cur_weights.view(-1, 1) @ cur_weights.view(1, -1)
-        loss_weights.triu_(diagonal=1)
-
-        # Rescale to be between 0 and 1
-        cos_sim = (cos_sim + 1) / 2
-        cos_sim.triu_(diagonal=1)
+        loss_weights = torch.triu(loss_weights, diagonal=1) + torch.triu(loss_weights.t(), diagonal=1).t()
 
         # If they are the same instance, use cosine distance, else use consine similarity
-        # loss += ((1 - cos_sim) * inst_eq + cos_sim * (1 - inst_eq)).sum() / (cos_sim.size(0) * cos_sim.size(1))
-        # pos: -log(cos_sim), neg: -log(1-cos_sim)
-        cos_sim_diff = torch.clamp(1 - cos_sim, min=1e-10)
-        loss_m = -1*(inst_eq * torch.clamp(cos_sim, min=1e-10).log() + (1 - inst_eq) * cos_sim_diff.log())
-        loss_m.triu_(diagonal=1)
-        loss = (loss_m * loss_weights).sum()
+        # pos: log(kl_divergence), neg: exp(-2*kl_divergence)
+        loss_m = inst_eq * kl_divergence.log() + (1. - inst_eq) * torch.exp(-1*kl_divergence.sqrt())
+        loss = (loss_m * loss_weights).sum() / loss_weights.sum()
 
-        return loss * cfg.track_alpha / loss_weights.sum()
+        return loss * cfg.track_alpha
 
     def instance_conf_loss(self, pos_weights_per_img, ref_pos_weights_per_img, conf_data, ref_conf_data,
                            conf_t, ref_conf_t, ids_t, ref_ids_t):
@@ -611,20 +642,9 @@ class MultiBoxLoss(nn.Module):
                     loss_d += self.coeff_diversity_loss(weights_clip, proto_coef_clip, pos_ids_clip)
                     proto_coef_clip, pos_ids_clip, weights_clip = [], [], []
 
-            if cfg.use_sipmask:
-                pred_masks00 = cfg.mask_proto_mask_activation(proto_masks @ proto_coef[:, :32].t())
-                pred_masks01 = cfg.mask_proto_mask_activation(proto_masks @ proto_coef[:, 32:64].t())
-                pred_masks10 = cfg.mask_proto_mask_activation(proto_masks @ proto_coef[:, 64:96].t())
-                pred_masks11 = cfg.mask_proto_mask_activation(proto_masks @ proto_coef[:, 96:128].t())
-                pred_masks = crop_sipmask(pred_masks00, pred_masks01, pred_masks10, pred_masks11, pos_gt_box_t)
-            else:
-                pred_masks = proto_masks @ proto_coef.t()  # [mask_h, mask_w, n_pos]
-                pred_masks = cfg.mask_proto_mask_activation(pred_masks)
-                _, pred_masks = crop(pred_masks, pos_gt_box_t)
-
-
+            pred_masks = generate_mask(proto_masks, proto_coef, pos_gt_box_t)
             mask_gt_h, mask_gt_w = mask_t.size()[:2]
-            upsampled_pred_masks = F.interpolate(pred_masks.permute(2, 0, 1).contiguous().unsqueeze(0).float(),
+            upsampled_pred_masks = F.interpolate(pred_masks.unsqueeze(0).float(),
                                                  (mask_gt_h, mask_gt_w),
                                                  mode=interpolation_mode, align_corners=False).squeeze(0)
             upsampled_pred_masks = upsampled_pred_masks.permute(1, 2, 0).contiguous()  # [mask_h, mask_w, n_pos]

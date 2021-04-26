@@ -51,7 +51,7 @@ class PredictionModule_FC(nn.Module):
         self.num_heads = cfg.num_heads
 
         if cfg.use_sipmask:
-            self.mask_dim = self.mask_dim * self.sipmask_head
+            self.mask_dim = self.mask_dim * cfg.sipmask_head
 
         if parent is None:
             if cfg.extra_head_net is None:
@@ -60,7 +60,7 @@ class PredictionModule_FC(nn.Module):
                 self.upfeature, self.out_channels = make_net(in_channels, cfg.extra_head_net)
 
             # init single or multi kernel prediction modules
-            self.bbox_layer, self.track_layer, self.mask_layer = nn.ModuleList([]), nn.ModuleList([]), nn.ModuleList([])
+            self.bbox_layer, self.mask_layer = nn.ModuleList([]), nn.ModuleList([])
 
             if cfg.train_centerness:
                 self.centerness_layer = nn.ModuleList([])
@@ -89,16 +89,6 @@ class PredictionModule_FC(nn.Module):
                         self.conf_layer.append(nn.Conv2d(self.out_channels, self.num_priors * self.num_classes,
                                                          **cfg.head_layer_params[k]))
 
-                if cfg.train_track:
-                    if cfg.use_dcn_track:
-                        self.track_layer.append(FeatureAlign(self.out_channels,
-                                                             self.num_priors * self.embed_dim,
-                                                             kernel_size=kernel_size,
-                                                             deformable_groups=self.deform_groups,
-                                                             use_pred_offset=cfg.use_pred_offset))
-                    else:
-                        self.track_layer.append(nn.Conv2d(self.out_channels, self.num_priors*self.embed_dim,
-                                                          **cfg.head_layer_params[k]))
                 if cfg.use_dcn_mask:
                     self.mask_layer.append(FeatureAlign(self.out_channels,
                                                         self.num_priors * self.mask_dim,
@@ -120,8 +110,6 @@ class PredictionModule_FC(nn.Module):
                         nn.ReLU(inplace=True)
                     ] for _ in range(num_layers)], []))
 
-            if cfg.train_track:
-                self.track_extra = make_extra(cfg.extra_layers[2], self.out_channels)
             if cfg.train_class:
                 self.conf_extra = make_extra(cfg.extra_layers[0], self.out_channels)
             self.bbox_extra, self.mask_extra = [make_extra(x, self.out_channels) for x in cfg.extra_layers[:2]]
@@ -150,8 +138,6 @@ class PredictionModule_FC(nn.Module):
             conf_x = src.conf_extra(x)
         bbox_x = src.bbox_extra(x)
         mask_x = src.mask_extra(x)
-        if cfg.train_track:
-            track_x = src.track_extra(x)
 
         conf, bbox, centerness_data, mask, track = [], [], [], [], []
         for k in range(len(cfg.head_layer_params)):
@@ -169,13 +155,6 @@ class PredictionModule_FC(nn.Module):
                     conf_cur = src.conf_layer[k](conf_x)
                 conf.append(conf_cur.permute(0, 2, 3, 1).contiguous())
 
-            if cfg.train_track:
-                if cfg.use_dcn_track:
-                    track_emb = src.track_layer[k](track_x, bbox_cur.detach())
-                else:
-                    track_emb = src.track_layer[k](track_x)
-                track.append(track_emb.permute(0, 2, 3, 1).contiguous())
-
             if cfg.use_dcn_mask:
                 mask_cur = src.mask_layer[k](mask_x, bbox_cur.detach())
             else:
@@ -190,8 +169,6 @@ class PredictionModule_FC(nn.Module):
             centerness_data = torch.tanh(centerness_data)
         if cfg.train_class:
             conf = torch.cat(conf, dim=-1).view(x.size(0), -1, src.num_classes)
-        if cfg.train_track:
-            track = torch.cat(track, dim=-1).view(x.size(0), -1, src.embed_dim)
         mask = torch.cat(mask, dim=-1).view(x.size(0), -1, src.mask_dim)
         # mask = cfg.mask_proto_coeff_activation(mask)
 
@@ -216,9 +193,6 @@ class PredictionModule_FC(nn.Module):
 
         if cfg.train_class:
             preds['conf'] = conf
-
-        if cfg.train_track:
-            preds['track'] = F.normalize(track, dim=-1)
 
         return preds
 

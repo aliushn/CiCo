@@ -323,24 +323,31 @@ def crop(masks, boxes, padding:int=1):
     Vectorized by Chong (thanks Chong).
 
     Args:
-        - masks should be a size [h, w, n] tensor of masks
+        - masks should be a size [h, w, c, n] tensor of masks
         - boxes should be a size [n, 4] tensor of bbox coords in relative point form [x1,y1,x2,y2]
     """
-    h, w, n = masks.size()
+    d_masks = len(masks.size())
+    if d_masks == 3:
+        masks = masks.unsqueeze(2)
+    h, w, c, n = masks.size()
     x1, x2 = sanitize_coordinates(boxes[:, 0], boxes[:, 2], w, padding, cast=False)
     y1, y2 = sanitize_coordinates(boxes[:, 1], boxes[:, 3], h, padding, cast=False)
 
-    rows = torch.arange(w, device=masks.device, dtype=x1.dtype).view(1, -1, 1).expand(h, w, n)
-    cols = torch.arange(h, device=masks.device, dtype=x1.dtype).view(-1, 1, 1).expand(h, w, n)
+    rows = torch.arange(w, device=masks.device, dtype=x1.dtype).view(1, -1, 1, 1).expand(h, w, c, n)
+    cols = torch.arange(h, device=masks.device, dtype=x1.dtype).view(-1, 1, 1, 1).expand(h, w, c, n)
     
-    masks_left  = rows >= x1.view(1, 1, -1)
-    masks_right = rows <  x2.view(1, 1, -1)
-    masks_up    = cols >= y1.view(1, 1, -1)
-    masks_down  = cols <  y2.view(1, 1, -1)
+    masks_left  = rows >= x1.view(1, 1, 1, -1)
+    masks_right = rows <  x2.view(1, 1, 1, -1)
+    masks_up    = cols >= y1.view(1, 1, 1, -1)
+    masks_down  = cols <  y2.view(1, 1, 1, -1)
     
     crop_mask = (masks_left * masks_right * masks_up * masks_down).float()
+    cropped_mask = masks * crop_mask
+    if d_masks == 3:
+        crop_mask = crop_mask.squeeze(2)
+        cropped_mask = cropped_mask.squeeze(2)
     
-    return crop_mask, masks * crop_mask
+    return crop_mask, cropped_mask
 
 
 def crop_sipmask(masks00, masks01, masks10, masks11, boxes, padding:int=1):
@@ -351,7 +358,6 @@ def crop_sipmask(masks00, masks01, masks10, masks11, boxes, padding:int=1):
         - masks should be a size [h, w, n] tensor of masks
         - boxes should be a size [n, 4] tensor of bbox coords in relative point form
     """
-
     h, w, n = masks00.size()
     x1, x2 = sanitize_coordinates(boxes[:, 0], boxes[:, 2], w, padding, cast=False)
     y1, y2 = sanitize_coordinates(boxes[:, 1], boxes[:, 3], h, padding, cast=False)

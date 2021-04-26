@@ -208,7 +208,7 @@ def train():
             args.start_iter = SavePath.from_str(args.resume).iteration
     else:
         print('Initializing weights based COCO ...')
-        STMask_net.init_weights(backbone_path='weights/' + cfg.backbone.path)
+        STMask_net.init_weights(backbone_path='weights/pretrained_models_coco/' + cfg.backbone.path)
 
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
 
@@ -350,7 +350,7 @@ def train():
 
                     log.log_gpu_stats = args.log_gpu
 
-                if iteration % args.save_interval == 0 and epoch >= 7:
+                if iteration % args.save_interval == 0 and iteration > 0: # epoch >= 7:
                     if args.keep_latest:
                         latest = SavePath.get_latest(args.save_folder, cfg.name)
 
@@ -364,7 +364,7 @@ def train():
 
                 # This is done per epoch
                 if args.validation_epoch > 0:
-                    if iteration % args.save_interval == 0 and epoch >= 7:
+                    if iteration % args.save_interval == 0 and iteration > 0:  # epoch >= 7:
                         setup_eval()
                         save_path_valid_metrics = save_path(epoch, iteration).replace('.pth', '.txt')
                         # valid datasets

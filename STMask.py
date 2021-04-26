@@ -58,6 +58,7 @@ class STMask(nn.Module):
 
             # The include_last_relu=false here is because we might want to change it to another function
             self.proto_net, cfg.mask_dim = make_net(in_channels, cfg.mask_proto_net, include_last_relu=False)
+            self.track_net, cfg.track_dim = make_net(in_channels, cfg.track_net, include_last_relu=False)
 
             if cfg.mask_proto_bias:
                 cfg.mask_dim += 1
@@ -216,7 +217,7 @@ class STMask(nn.Module):
 
         proto_out = None
         if cfg.mask_type == mask_type.lincomb and cfg.eval_mask_branch:
-            with timer.env('proto'):
+            with timer.env('proto + track'):
                 if self.proto_src is None:
                     proto_x = x
                 else:
@@ -241,6 +242,8 @@ class STMask(nn.Module):
                     bias_shape[1] = 1
                     proto_out = torch.cat([proto_out, torch.ones(*bias_shape)], 1)
 
+                track_out = self.track_net(proto_x).permute(0, 2, 3, 1).contiguous()
+
         with timer.env('pred_heads'):
             pred_outs = {'mask_coeff': [], 'priors': []}
 
@@ -253,9 +256,6 @@ class STMask(nn.Module):
 
             if cfg.train_class:
                 pred_outs['conf'] = []
-
-            if cfg.train_track:
-                pred_outs['track'] = []
 
             for idx, pred_layer in zip(self.selected_layers, self.prediction_layers):
                 pred_x = fpn_outs[idx]
@@ -278,6 +278,7 @@ class STMask(nn.Module):
 
         if proto_out is not None:
             pred_outs['proto'] = proto_out
+            pred_outs['track'] = track_out
 
         return fpn_outs, pred_outs
 

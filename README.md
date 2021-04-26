@@ -1,4 +1,4 @@
-# STMask
+# OSTMask
 
 The code is implmented for our paper in CVPR2021:
  - [STMask: Spatial Feature Calibration and Temporal Fusion for Effective One-stage Video Instance Segmentation](http://www4.comp.polyu.edu.hk/~cslzhang/papers.htm)
