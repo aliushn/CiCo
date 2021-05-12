@@ -23,7 +23,7 @@ class Detect_TF(object):
             raise ValueError('nms_threshold must be non negative.')
         self.conf_thresh = conf_thresh
 
-        self.use_cross_class_nms = True
+        self.use_cross_class_nms = False
         self.use_fast_nms = True
 
     def __call__(self, net, candidate, is_output_candidate=False):

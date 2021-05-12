@@ -135,7 +135,7 @@ dataset_base = Config({
 
 train_YouTube_VOS_dataset = dataset_base.copy({
     'img_prefix': '../datasets/YouTube_VOS2019/train/JPEGImages',
-    'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/valid_sub.json',
+    'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/train_sub.json',
     # 'extra_aug': dict(random_crop=dict(min_ious=(0.1, 0.3, 0.5, 0.7, 0.9), min_crop_size=0.3)),
     # 'extra_aug': dict(expand=dict(mean=(123.675, 116.28, 103.53), to_rgb=True, ratio_range=(1, 3))),
 })
@@ -184,7 +184,6 @@ test_YouTube_VOS2021_dataset = dataset_base.copy({
 
     'img_prefix': '../datasets/YouTube_VOS2021/test/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2021/test/instances.json',
-    'has_gt': False,
 })
 
 
@@ -279,7 +278,8 @@ resnet101_gn_backbone = backbone_base.copy({
 
 resnet101_dcn_inter3_backbone = resnet101_backbone.copy({
     'name': 'ResNet101_DCN_Interval3',
-    'path': 'yolact_plus_base_54_800000.pth',
+    'path': 'STMask_plus_base_kl_YTVIS2019.pth',
+    # 'path': 'yolact_plus_base_54_800000.pth',
     'args': ([3, 4, 23, 3], [0, 4, 23, 3], 3),
 })
 
@@ -679,7 +679,7 @@ STMask_base_config = YouTube_VOS_base_config.copy({
     # Track settings
     'train_track': True,
     'match_coeff': [0, 0.7, 0.3, 0],   # scores, mask_iou, box_iou, label
-    'track_net': [(256, 3, {'padding': 1})] * 2 + [(3, 1, {})],
+    'track_net': [(256, 3, {'padding': 1})] * 2 + [(128, 1, {})],
     'track_crop_with_pred_box': False,
 
     # temporal fusion module settings
@@ -721,6 +721,7 @@ STMask_base_config = YouTube_VOS_base_config.copy({
     'add_missed_masks': False,
     'use_train_sub': False,
     'use_valid_sub': False,
+    'use_test': True,
     'only_calc_metrics': False,
     'only_count_classes': False,
     'use_DIoU_in_comp_scores': False,
@@ -820,8 +821,11 @@ STMask_darknet53_config = STMask_base_config.copy({
     }),
 })
 
-STMask_plus_base_config_OVIS = STMask_plus_base_config.copy({
-    'name': 'STMask_plus_base_config_OVIS',
+STMask_plus_base_OVIS_config = STMask_plus_base_config.copy({
+    'name': 'STMask_plus_base_OVIS',
+    # Training params
+    'lr_steps': (100000, 150000),
+    'max_iter': 200000,
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
@@ -832,8 +836,11 @@ STMask_plus_base_config_OVIS = STMask_plus_base_config.copy({
     'classes': OVIS_CLASSES,
 })
 
-STMask_plus_base_ada_config_OVIS = STMask_plus_base_ada_config.copy({
-    'name': 'STMask_plus_base_ada_config_OVIS',
+STMask_plus_base_ada_OVIS_config = STMask_plus_base_ada_config.copy({
+    'name': 'STMask_plus_base_ada_OVIS',
+    # Training params
+    'lr_steps': (100000, 150000),
+    'max_iter': 200000,
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
@@ -844,8 +851,11 @@ STMask_plus_base_ada_config_OVIS = STMask_plus_base_ada_config.copy({
     'classes': OVIS_CLASSES,
 })
 
-STMask_plus_resnet50_config_OVIS = STMask_plus_resnet50_config.copy({
-    'name': 'STMask_plus_resnet50_config_OVIS',
+STMask_plus_resnet50_OVIS_config = STMask_plus_resnet50_config.copy({
+    'name': 'STMask_plus_resnet50_OVIS',
+    # Training params
+    'lr_steps': (100000, 150000),
+    'max_iter': 200000,
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
@@ -856,8 +866,11 @@ STMask_plus_resnet50_config_OVIS = STMask_plus_resnet50_config.copy({
     'classes': OVIS_CLASSES,
 })
 
-STMask_plus_resnet50_ada_config_OVIS = STMask_plus_resnet50_ada_config.copy({
-    'name': 'STMask_plus_resnet50_ada_config_OVIS',
+STMask_plus_resnet50_ada_OVIS_config = STMask_plus_resnet50_ada_config.copy({
+    'name': 'STMask_plus_resnet50_ada_OVIS',
+    # Training params
+    'lr_steps': (100000, 150000),
+    'max_iter': 200000,
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
@@ -869,8 +882,8 @@ STMask_plus_resnet50_ada_config_OVIS = STMask_plus_resnet50_ada_config.copy({
 })
 
 
-STMask_plus_base_config_YTVIS2021 = STMask_plus_base_config.copy({
-    'name': 'STMask_plus_base_config_YTVIS2021',
+STMask_plus_base_YTVIS2021_config = STMask_plus_base_config.copy({
+    'name': 'STMask_plus_base_YTVIS2021',
     # Training params
     'lr_steps': (150000, 250000, 300000),
     'max_iter': 350000,
@@ -884,8 +897,8 @@ STMask_plus_base_config_YTVIS2021 = STMask_plus_base_config.copy({
     'classes': YouTube_VOS2021_CLASSES,
 })
 
-STMask_plus_base_ada_config_YTVIS2021 = STMask_plus_base_ada_config.copy({
-    'name': 'STMask_plus_base_ada_config_YTVIS2021',
+STMask_plus_base_ada_YTVIS2021_config = STMask_plus_base_ada_config.copy({
+    'name': 'STMask_plus_base_ada_YTVIS2021',
     # Training params
     'lr_steps': (150000, 250000, 300000),
     'max_iter': 350000,
@@ -899,8 +912,8 @@ STMask_plus_base_ada_config_YTVIS2021 = STMask_plus_base_ada_config.copy({
     'classes': YouTube_VOS2021_CLASSES,
 })
 
-STMask_plus_resnet50_config_YTVIS2021 = STMask_plus_resnet50_config.copy({
-    'name': 'STMask_plus_resnet50_config_YTVIS2021',
+STMask_plus_resnet50_YTVIS2021_config = STMask_plus_resnet50_config.copy({
+    'name': 'STMask_plus_resnet50_YTVIS2021',
     # Training params
     'lr_steps': (150000, 250000, 300000),
     'max_iter': 350000,
@@ -914,8 +927,8 @@ STMask_plus_resnet50_config_YTVIS2021 = STMask_plus_resnet50_config.copy({
     'classes': YouTube_VOS2021_CLASSES,
 })
 
-STMask_plus_resnet50_ada_config_YTVIS2021 = STMask_plus_resnet50_ada_config.copy({
-    'name': 'STMask_plus_resnet50_ada_config_YTVIS2021',
+STMask_plus_resnet50_ada_YTVIS2021_config = STMask_plus_resnet50_ada_config.copy({
+    'name': 'STMask_plus_resnet50_ada_YTVIS2021',
     # Training params
     'lr_steps': (150000, 250000, 300000),
     'max_iter': 350000,

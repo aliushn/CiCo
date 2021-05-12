@@ -791,6 +791,10 @@ if __name__ == '__main__':
             print('load valid_sub dataset')
             cfg.valid_sub_dataset.test_mode = True
             val_dataset = get_dataset(cfg.valid_sub_dataset)
+        elif cfg.use_test:
+            print('load test dataset')
+            cfg.test_dataset.test_mode = True
+            val_dataset = get_dataset(cfg.test_dataset)
         else:
             print('load valid dataset')
             val_dataset = get_dataset(cfg.valid_dataset)
