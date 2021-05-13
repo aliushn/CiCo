@@ -135,7 +135,7 @@ dataset_base = Config({
 
 train_YouTube_VOS_dataset = dataset_base.copy({
     'img_prefix': '../datasets/YouTube_VOS2019/train/JPEGImages',
-    'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/train_sub.json',
+    'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/valid_sub.json',
     # 'extra_aug': dict(random_crop=dict(min_ious=(0.1, 0.3, 0.5, 0.7, 0.9), min_crop_size=0.3)),
     # 'extra_aug': dict(expand=dict(mean=(123.675, 116.28, 103.53), to_rgb=True, ratio_range=(1, 3))),
 })
@@ -278,8 +278,8 @@ resnet101_gn_backbone = backbone_base.copy({
 
 resnet101_dcn_inter3_backbone = resnet101_backbone.copy({
     'name': 'ResNet101_DCN_Interval3',
-    'path': 'STMask_plus_base_kl_YTVIS2019.pth',
-    # 'path': 'yolact_plus_base_54_800000.pth',
+    # 'path': 'STMask_plus_base_kl_YTVIS2019.pth',
+    'path': 'yolact_plus_base_54_800000.pth',
     'args': ([3, 4, 23, 3], [0, 4, 23, 3], 3),
 })
 
@@ -691,6 +691,10 @@ STMask_base_config = YouTube_VOS_base_config.copy({
     'maskshift_alpha': 6.125,
     'maskshift_loss': True,
 
+    # FEELVOS settings
+    'use_FEELVOS': False,
+    'VOS_head': [(256, 3, {'padding': 1})] * 3 + [(1, 1, {})],
+
     # FCB settings
     # FCB_ada set 'use_pred_offset' as True, FCB_ali set 'use_pred_offset' as False
     'use_pred_offset': False,
@@ -721,7 +725,7 @@ STMask_base_config = YouTube_VOS_base_config.copy({
     'add_missed_masks': False,
     'use_train_sub': False,
     'use_valid_sub': False,
-    'use_test': True,
+    'use_test': False,
     'only_calc_metrics': False,
     'only_count_classes': False,
     'use_DIoU_in_comp_scores': False,

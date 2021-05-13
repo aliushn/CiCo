@@ -188,9 +188,6 @@ class PredictionModule_FC(nn.Module):
         if cfg.train_centerness:
             preds['centerness'] = centerness_data
 
-        if cfg.temporal_fusion_module:
-            preds['T2S_feat'] = x
-
         if cfg.train_class:
             preds['conf'] = conf
 

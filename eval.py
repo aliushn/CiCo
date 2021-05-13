@@ -528,7 +528,8 @@ def validation(net: STMask, valid_data=False, output_metrics_file=None):
                 pad_h, pad_w = images.size()[2:4]
 
             with timer.env('Network Extra'):
-                preds = net(images, img_meta=images_meta, ref_x=ref_images, ref_imgs_meta=ref_images_meta)
+                key_frame = 1 if images_meta[0]['frame_id'] % 2 == 0 else 0
+                preds = net(images, img_meta=images_meta, key_frame=key_frame)
 
                 if it == dataset_size - 1:
                     batch_size = len(dataset) % args.batch_size
@@ -601,7 +602,8 @@ def evaluate(net: STMask, dataset):
             pad_h, pad_w = images.size()[2:4]
 
             with timer.env('Network Extra'):
-                preds = net(images, img_meta=images_meta, ref_x=ref_images, ref_imgs_meta=ref_images_meta)
+                key_frame = 1 if images_meta[0]['frame_id'] % 2 == 0 else 0
+                preds = net(images, img_meta=images_meta, key_frame=key_frame)
 
             # Perform the meat of the operation here depending on our mode.
             if it == dataset_size - 1:

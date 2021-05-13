@@ -39,7 +39,7 @@ class TemporalNet(nn.Module):
         return x_reg, x_coeff
 
 
-def correlate(x1, x2, patch_size=11, dilation_patch=1):
+def correlate(x1, x2, patch_size=11, kernel_size=1, dilation_patch=1):
     """
     :param x1: features 1
     :param x2: features 2
@@ -54,10 +54,10 @@ def correlate(x1, x2, patch_size=11, dilation_patch=1):
     # to get the right parameters for FlowNetC, you would have
     out_corr = spatial_correlation_sample(x1,
                                           x2,
-                                          kernel_size=1,
+                                          kernel_size=kernel_size,
                                           patch_size=patch_size,
                                           stride=1,
-                                          padding=0,
+                                          padding=int((kernel_size - 1)/2),
                                           dilation_patch=dilation_patch)
     b, ph, pw, h, w = out_corr.size()
     out_corr = out_corr.view(b, ph*pw, h, w) / x1.size(1)

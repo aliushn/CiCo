@@ -6,7 +6,7 @@ import torch.distributions as dist
 from torch.autograd import Variable
 from ..box_utils import match, log_sum_exp, decode, center_size, crop, crop_sipmask, jaccard, point_form
 from ..mask_utils import generate_mask
-from .track_to_segment_head import bbox_feat_extractor
+from .track_to_segment_head import bbox_feat_extractor, correlate
 from ..track_utils import mask_iou
 
 from datasets import cfg, mask_type, activation_func
@@ -106,14 +106,33 @@ class MultiBoxLoss(nn.Module):
                                                                                gt_bboxes_fold, gt_labels_fold,
                                                                                gt_masks_fold, gt_ids_fold)
 
-        if cfg.temporal_fusion_module:
-            loc_data_ref = loc_data[::2].detach()
-            ids_t_ref = ids_t[::2]
-            mask_coeff_ref = mask_coeff[::2].detach()
-            proto_data_next = proto_data[1::2].detach()
-            losses_shift = self.track_to_segment_loss(net, predictions['T2S_concat_feat'],
-                                                      loc_data_ref, ids_t_ref, mask_coeff_ref, proto_data_next,
-                                                      priors[0], gt_bboxes, gt_ids, gt_masks)
+        if cfg.temporal_fusion_module or cfg.use_FEELVOS:
+            bb_feat_ref = predictions['fpn_feat'][::2].contiguous()
+            bb_feat_next = predictions['fpn_feat'][1::2].contiguous()
+            corr = correlate(bb_feat_ref, bb_feat_next, patch_size=cfg.correlation_patch_size, kernel_size=3)
+
+            if cfg.temporal_fusion_module:
+                loc_data_ref = loc_data[::2].detach()
+                ids_t_ref = ids_t[::2]
+                mask_coeff_ref = mask_coeff[::2].detach()
+                proto_data_next = proto_data[1::2].detach()
+                t2s_in_feats = torch.cat((corr, bb_feat_ref, bb_feat_next), dim=1)
+                losses_shift = self.track_to_segment_loss(net, t2s_in_feats,
+                                                          loc_data_ref, ids_t_ref, mask_coeff_ref, proto_data_next,
+                                                          priors[0], gt_bboxes, gt_ids, gt_masks)
+
+            else:
+                gt_masks_next = gt_masks_fold[1::2]
+                gt_ids_next = gt_ids_fold[1::2]
+                conf_t_ref = conf_t[::2].detach()
+                idx_t_ref = idx_t[::2]
+                ids_t_ref = ids_t[::2]
+                mask_coeff_ref = mask_coeff[::2].detach()
+                proto_data_ref = proto_data[::2].detach()
+                gt_bboxes_ref = gt_bboxes_fold[::2]
+                losses_shift = self.VOS_loss(net, bb_feat_next, gt_masks_next, gt_ids_next, corr, conf_t_ref, idx_t_ref,
+                                             ids_t_ref, proto_data_ref, mask_coeff_ref, gt_bboxes_ref)
+
             losses.update(losses_shift)
 
         if cfg.train_track:
@@ -251,6 +270,53 @@ class MultiBoxLoss(nn.Module):
         DIoU = IoU - d2/c2
 
         return DIoU
+
+    def VOS_loss(self, net, bb_feat_next, gt_masks_next, gt_ids_next, corr, conf_t_ref, idx_t_ref, ids_t_ref,
+                 proto_data_ref, mask_coeff_ref, gt_bboxes_ref):
+        loss = 0
+        bs = bb_feat_next.size(0)
+        pos = conf_t_ref[0] > 0
+        bbox_t_ref = gt_bboxes_ref[0][idx_t_ref[0, pos]]
+        pred_masks_ref = generate_mask(proto_data_ref[0], mask_coeff_ref[0, pos], bbox_t_ref)
+        mask_pred_h, mask_pred_w = pred_masks_ref.size()[1:]
+        mask_gt_h, mask_gt_w = gt_masks_next[0][0].size()
+        upsampled_bb_feat_next = F.interpolate(bb_feat_next.float(), (mask_pred_h, mask_pred_w),
+                                               mode='bilinear', align_corners=False)
+        upsampled_corr = F.interpolate(corr.float(), (mask_pred_h, mask_pred_w),
+                                       mode='bilinear', align_corners=False)
+
+        for i in range(bs):
+            pos = conf_t_ref[i] > 0
+            pos_idx_ref = idx_t_ref[i, pos]
+            pos_ids_ref = ids_t_ref[i, pos]
+            bbox_t_ref = gt_bboxes_ref[i][pos_idx_ref]
+
+            # if an instance disappears in the next frame, we hope the vos head can output a mask with all 0
+            masks_t_next = torch.zeros((pos.sum(), mask_gt_h, mask_gt_w), device=idx_t_ref.device)
+            for id in pos_ids_ref.unique():
+                if id in gt_ids_next[i]:
+                    idx_next = torch.where(gt_ids_next[i] == id)[0]
+                    masks_t_next[pos_ids_ref == id] = gt_masks_next[i][idx_next].float()
+
+            pred_masks_ref = generate_mask(proto_data_ref[i], mask_coeff_ref[i, pos], bbox_t_ref)
+            pred_masks_ref = pred_masks_ref.gt(0.5).float()
+            pred_masks_next = []
+            for j in range(pos.sum()):
+                vos_feat = torch.cat([upsampled_bb_feat_next[i], upsampled_corr[i], pred_masks_ref[j].unsqueeze(0)], dim=0)
+                pred_masks_next.append(net.VOS_head(vos_feat.unsqueeze(0)))
+            pred_masks_next = torch.cat(pred_masks_next, dim=1)
+            upsampled_pred_masks_next = F.interpolate(pred_masks_next.float(), (mask_gt_h, mask_gt_w),
+                                                      mode='bilinear', align_corners=False).squeeze(0)
+            upsampled_pred_masks_next = cfg.mask_proto_mask_activation(upsampled_pred_masks_next)
+
+            if cfg.mask_proto_mask_activation == activation_func.sigmoid:
+                pre_loss = F.binary_cross_entropy(torch.clamp(upsampled_pred_masks_next, 0, 1), masks_t_next, reduction='mean')
+            else:
+                pre_loss = F.smooth_l1_loss(upsampled_pred_masks_next, masks_t_next, reduction='mean')
+
+            loss += pre_loss
+
+        return {'M_shift': cfg.maskshift_alpha * loss / bs}
 
     def track_to_segment_loss(self, net, concat_feat, loc_ref, ids_t_ref, mask_data_ref, proto_data_next,
                               priors, gt_bboxes, gt_ids, gt_masks, interpolation_mode='bilinear'):

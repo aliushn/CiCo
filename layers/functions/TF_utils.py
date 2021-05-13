@@ -1,71 +1,73 @@
 import torch
 import torch.nn.functional as F
 from layers.box_utils import jaccard, center_size, point_form, decode, crop, mask_iou
+from layers.mask_utils import generate_mask
 from layers.modules import correlate, bbox_feat_extractor
 from layers.visualization import display_box_shift, display_correlation_map
 from datasets import cfg
 from utils import timer
 
 
-class CandidateShift(object):
-    def __init__(self):
-        self.correlation_patch_size = cfg.correlation_patch_size
-        self.correlation_selected_layer = cfg.correlation_selected_layer
-
-    def __call__(self, net, ref_candidate, box_feat_next, fpn_feat_next, img=None, img_meta=None):
-        # extend the frames from time t to t+1
-        ref_candidate_shift = self.candidate_shift(net, box_feat_next, fpn_feat_next, ref_candidate, img,
-                                                   img_meta=img_meta,
-                                                   correlation_patch_size=self.correlation_patch_size)
-
-        return ref_candidate_shift
-
-    def candidate_shift(self, net, T2S_feat_next, fpn_feat_next, ref_candidate,
-                        img=None, img_meta=None, correlation_patch_size=11):
+def CandidateShift(net, fpn_feat_next, ref_candidate, img=None, img_meta=None):
         """
         The function try to shift the candidates of reference frame to that of target frame.
         The most important step is to shift the bounding box of reference frame to that of target frame
         :param net: network
-        :param T2S_feat_next: features of the last layer to predict bounding box on target frame
         :param ref_candidate: the candidate dictionary that includes 'box', 'conf', 'mask_coeff', 'track' items.
         :param correlation_patch_size: the output size of roialign
         :return: candidates on the target frame
         """
-        ref_candidate_shift = {'T2S_feat': ref_candidate['T2S_feat'].clone(),
-                               'fpn_feat': ref_candidate['fpn_feat'].clone(),
-                               'proto': ref_candidate['proto'].clone()}
+        # ref_candidate_shift = {}
+        # for k, v in ref_candidate.items():
+        #     ref_candidate_shift[k] = v.clone()
 
         if ref_candidate['box'].size(0) == 0:
-            ref_candidate_shift['box'] = torch.tensor([])
-            for k, v in ref_candidate.items():
-                if k not in {'box', 'T2S_feat', 'fpn_feat'}:
-                    ref_candidate_shift[k] = v.clone()
+            ref_candidate_shift = {'box': torch.tensor([])}
+
         else:
             # we only use the features in the P3 layer to perform correlation operation
-            T2S_feat_ref = ref_candidate['T2S_feat']
             fpn_feat_ref = ref_candidate['fpn_feat']
-            x_corr = correlate(fpn_feat_ref, fpn_feat_next, patch_size=correlation_patch_size)
+            corr = correlate(fpn_feat_ref, fpn_feat_next, patch_size=cfg.correlation_patch_size, kernel_size=3)
             # display_correlation_map(fpn_ref, img_meta, idx)
-            concatenated_features = F.relu(torch.cat([x_corr, T2S_feat_ref, T2S_feat_next], dim=1))
 
-            # extract features on the predicted bbox
-            box_ref_c = center_size(ref_candidate['box'])
-            # we use 1.2 box to crop features
-            box_ref_crop = point_form(torch.cat([box_ref_c[:, :2],
-                                                 torch.clamp(box_ref_c[:, 2:] * 1.2, min=0, max=1)], dim=1))
-            bbox_feat_input = bbox_feat_extractor(concatenated_features, box_ref_crop, 7)
-            loc_ref_shift, mask_coeff_shift = net.TemporalNet(bbox_feat_input)
-            box_ref_shift = torch.cat([(loc_ref_shift[:, :2] * box_ref_c[:, 2:] + box_ref_c[:, :2]),
-                                        torch.exp(loc_ref_shift[:, 2:]) * box_ref_c[:, 2:]], dim=1)
-            box_ref_shift = point_form(box_ref_shift)
+            if cfg.temporal_fusion_module:
+                concatenated_features = F.relu(torch.cat([corr, fpn_feat_ref, fpn_feat_next], dim=1))
 
-            ref_candidate_shift['box'] = box_ref_shift.clone()
-            ref_candidate_shift['conf'] = ref_candidate['conf'].clone() * 0.8
-            ref_candidate_shift['mask_coeff'] = ref_candidate['mask_coeff'].clone() + mask_coeff_shift
+                # extract features on the predicted bbox
+                box_ref_c = center_size(ref_candidate['box'])
+                # we use 1.2 box to crop features
+                box_ref_crop = point_form(torch.cat([box_ref_c[:, :2],
+                                                     torch.clamp(box_ref_c[:, 2:] * 1.2, min=0, max=1)], dim=1))
+                bbox_feat_input = bbox_feat_extractor(concatenated_features, box_ref_crop, 7)
+                loc_ref_shift, mask_coeff_shift = net.TemporalNet(bbox_feat_input)
+                box_ref_shift = torch.cat([(loc_ref_shift[:, :2] * box_ref_c[:, 2:] + box_ref_c[:, :2]),
+                                           torch.exp(loc_ref_shift[:, 2:]) * box_ref_c[:, 2:]], dim=1)
+                box_ref_shift = point_form(box_ref_shift)
 
-            for k, v in ref_candidate.items():
-                if k not in {'box', 'conf', 'T2S_feat', 'proto', 'mask_coeff'}:
-                    ref_candidate_shift[k] = v.clone()
+                ref_candidate_shift = {'box': box_ref_shift.clone()}
+                ref_candidate_shift['conf'] = ref_candidate['conf'].clone() * 0.8
+                ref_candidate_shift['mask_coeff'] = ref_candidate['mask_coeff'].clone() + mask_coeff_shift
+
+            else:
+
+                # FEELVOS
+                n_ref = ref_candidate['box'].size(0)
+                proto_ref = ref_candidate['proto']
+                mask_coeff_ref = cfg.mask_proto_coeff_activation(ref_candidate['mask_coeff'])
+                mask_pred_h, mask_pred_w = proto_ref.size()[:2]
+                upsampled_fpn_feat_next = F.interpolate(fpn_feat_next.float(), (mask_pred_h, mask_pred_w),
+                                                        mode='bilinear', align_corners=False)
+                upsampled_corr = F.interpolate(corr.float(), (mask_pred_h, mask_pred_w),
+                                               mode='bilinear', align_corners=False)
+
+                pred_masks_ref = generate_mask(proto_ref, mask_coeff_ref, ref_candidate['box'])
+                pred_masks_ref = pred_masks_ref.gt(0.5).float()
+                pred_masks_next = []
+                for j in range(n_ref):
+                    vos_feat = torch.cat([upsampled_fpn_feat_next, upsampled_corr,
+                                          pred_masks_ref[j].unsqueeze(0).unsqueeze(1)], dim=1)
+                    pred_masks_next.append(net.VOS_head(vos_feat).squeeze(0))  # [1, mask_pred_h, mask_pred_w]
+                ref_candidate_shift = {'mask': cfg.mask_proto_mask_activation(torch.cat(pred_masks_next, dim=0))}
 
         return ref_candidate_shift
 
@@ -78,8 +80,7 @@ def generate_candidate(predictions):
         loc_data = predictions['loc'][i]
         conf_data = predictions['conf'][i]
 
-        candidate_cur = {'T2S_feat': predictions['T2S_feat'][i].unsqueeze(0),
-                         'fpn_feat': predictions['fpn_feat'][i].unsqueeze(0)}
+        candidate_cur = {'fpn_feat': predictions['fpn_feat'][i].unsqueeze(0)}
 
         with timer.env('Detect'):
             decoded_boxes = decode(loc_data, prior_data)
@@ -109,7 +110,7 @@ def merge_candidates(candidate, ref_candidate_clip_shift):
     for ref_candidate in ref_candidate_clip_shift:
         if ref_candidate['box'].nelement() > 0:
             for k, v in merged_candidate.items():
-                if k not in {'proto', 'T2S_feat', 'fpn_feat'}:
+                if k not in {'proto', 'fpn_feat'}:
                     merged_candidate[k] = torch.cat([v.clone(), ref_candidate[k].clone()], dim=0)
 
     return merged_candidate

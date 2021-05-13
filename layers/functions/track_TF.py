@@ -25,9 +25,8 @@ class Track_TF(object):
 
     def __init__(self):
         self.prev_candidate = None
-        self.CandidateShift = CandidateShift()
 
-    def __call__(self, net, candidate, img_meta, img=None):
+    def __call__(self, net, candidate, img_meta, key_frame=1, img=None):
         """
         Args:
              loc_data: (tensor) Loc preds from loc layers
@@ -42,22 +41,34 @@ class Track_TF(object):
 
         with timer.env('Track'):
             # only support batch_size = 1 for video test
-            result = self.track(net, candidate, img_meta, img=img)
+            result, n_prev_inst = self.track(net, candidate, img_meta, key_frame=key_frame, img=img)
             out = [{'detection': result, 'net': net}]
 
-        return out
+        return out, n_prev_inst
 
-    def track(self, net, candidate, img_meta, img=None):
+    def track(self, net, candidate, img_meta, key_frame=1, img=None):
         # only support batch_size = 1 for video test
         is_first = img_meta['is_first']
         if is_first:
             self.prev_candidate = None
 
-        if candidate['box'].nelement() == 0:
-            detection = {'box': torch.Tensor(), 'mask_coeff': torch.Tensor(), 'class': torch.Tensor(),
-                         'score': torch.Tensor(), 'box_ids': torch.Tensor()}
+        if key_frame == 1 or self.prev_candidate is None:
+            if candidate['box'].nelement() == 0:
+                detection = {'box': torch.Tensor(), 'mask_coeff': torch.Tensor(), 'class': torch.Tensor(),
+                             'score': torch.Tensor(), 'box_ids': torch.Tensor()}
+                return detection, 0
+
+        if key_frame == 0 and self.prev_candidate is not None:
+            prev_candidate_shift = CandidateShift(net, candidate['fpn_feat'], self.prev_candidate,
+                                                  img=img, img_meta=[img_meta])
+            for k, v in prev_candidate_shift.items():
+                self.prev_candidate[k] = v.clone()
+            self.prev_candidate['proto'] = candidate['proto']
+            self.prev_candidate['tracked_mask'] = self.prev_candidate['tracked_mask'] + 1
 
         else:
+
+            assert candidate['box'].nelement() > 0
             # get bbox and class after NMS
             det_bbox = candidate['box']
             det_score, det_labels = candidate['conf'][:, 1:].max(1)  # class
@@ -83,13 +94,11 @@ class Track_TF(object):
             else:
 
                 assert self.prev_candidate is not None
-                T2S_feat_next = candidate['T2S_feat']
-                fpn_feat_next = candidate['fpn_feat']
-                prev_candidate_shift = self.CandidateShift(net, self.prev_candidate, T2S_feat_next, fpn_feat_next,
-                                                           img=img, img_meta=[img_meta])
-                self.prev_candidate['box'] = prev_candidate_shift['box'].clone()
-                self.prev_candidate['conf'] = prev_candidate_shift['conf'].clone()
-                self.prev_candidate['mask_coeff'] = prev_candidate_shift['mask_coeff'].clone()
+                prev_candidate_shift = CandidateShift(net, candidate['fpn_feat'], self.prev_candidate,
+                                                      img=img, img_meta=[img_meta])
+                for k, v in prev_candidate_shift.items():
+                    self.prev_candidate[k] = v.clone()
+                self.prev_candidate['proto'] = proto_data
                 self.prev_candidate['tracked_mask'] = self.prev_candidate['tracked_mask'] + 1
 
                 n_prev = self.prev_candidate['conf'].size(0)
@@ -110,11 +119,14 @@ class Track_TF(object):
                 sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 1e-3  # threshold for kl_divergence = 5
                 sim = torch.cat([sim_dummy, torch.exp(-kl_divergence)], dim=-1)
 
-                bbox_ious = jaccard(det_bbox, prev_candidate_shift['box'])
-                prev_masks_shift = generate_mask(proto_data,
-                                                 cfg.mask_proto_coeff_activation(prev_candidate_shift['mask_coeff']),
-                                                 prev_candidate_shift['box'])
-
+                bbox_ious = jaccard(det_bbox, self.prev_candidate['box'])
+                if cfg.temporal_fusion_module:
+                    prev_masks_shift = generate_mask(proto_data,
+                                                     cfg.mask_proto_coeff_activation(self.prev_candidate['mask_coeff']),
+                                                     self.prev_candidate['box'])
+                else:
+                    prev_masks_shift = self.prev_candidate['mask']
+                prev_masks_shift = prev_masks_shift.gt(0.5).float()  # [n_prev, h, w]
                 mask_ious = mask_iou(det_masks, prev_masks_shift)  # [n_dets, n_prev]
 
                 # compute comprehensive score
@@ -140,7 +152,7 @@ class Track_TF(object):
                     if match_id == 0:
                         det_obj_ids[idx] = self.prev_candidate['conf'].size(0)
                         for k, v in self.prev_candidate.items():
-                            if k not in {'proto', 'T2S_feat', 'fpn_feat', 'tracked_mask'}:
+                            if k not in {'proto', 'fpn_feat', 'mask', 'tracked_mask'}:
                                 self.prev_candidate[k] = torch.cat([v, candidate[k][idx][None]], dim=0)
                         self.prev_candidate['tracked_mask'] = torch.cat([self.prev_candidate['tracked_mask'],
                                                                          torch.zeros(1)], dim=0)
@@ -158,37 +170,35 @@ class Track_TF(object):
                             best_match_idx[obj_id] = idx
                             # udpate feature
                             for k, v in self.prev_candidate.items():
-                                if k not in {'proto', 'T2S_feat', 'fpn_feat', 'tracked_mask'}:
+                                if k not in {'proto', 'fpn_feat', 'mask', 'tracked_mask'}:
                                     self.prev_candidate[k][obj_id] = candidate[k][idx]
                             self.prev_candidate['tracked_mask'][obj_id] = 0
 
-                for k, v in self.prev_candidate.items():
-                    if k in {'proto', 'T2S_feat', 'fpn_feat'}:
-                        self.prev_candidate[k] = candidate[k]
+            self.prev_candidate['mask'] = generate_mask(self.prev_candidate['proto'],
+                                                        cfg.mask_proto_coeff_activation(self.prev_candidate['mask_coeff']),
+                                                        self.prev_candidate['box'])
 
-            det_score, _ = self.prev_candidate['conf'][:, 1:].max(1)
-            det_obj_ids = torch.arange(self.prev_candidate['box'].size(0))
-            det_masks_out = generate_mask(proto_data,
-                                          cfg.mask_proto_coeff_activation(self.prev_candidate['mask_coeff']),
-                                          self.prev_candidate['box'])
+        self.prev_candidate['fpn_feat'] = candidate['fpn_feat']
+        # whether add some tracked masks
+        cond1 = self.prev_candidate['tracked_mask'] <= 5
+        # whether tracked masks are greater than a small threshold, which removes some false positives
+        cond2 = self.prev_candidate['mask'].gt_(0.5).sum([1, 2]) > 2
+        # a declining weights (0.8) to remove some false positives that cased by consecutively track to segment
+        det_score, _ = self.prev_candidate['conf'][:, 1:].max(1)
+        cond3 = det_score.clone().detach() > cfg.eval_conf_thresh
+        keep = cond1 & cond2 & cond3
 
-            # whether add some tracked masks
-            cond1 = self.prev_candidate['tracked_mask'] <= 5
-            # whether tracked masks are greater than a small threshold, which removes some false positives
-            cond2 = det_masks_out.gt_(0.5).sum([1, 2]) > 2
-            # a declining weights (0.8) to remove some false positives that cased by consecutively track to segment
-            cond3 = det_score.clone().detach() > cfg.eval_conf_thresh
-            keep = cond1 & cond2 & cond3
+        if keep.sum() == 0:
+            detection = {'box': torch.Tensor(), 'mask_coeff': torch.Tensor(), 'class': torch.Tensor(),
+                         'score': torch.Tensor(), 'box_ids': torch.Tensor()}
+        else:
+            det_obj_ids = torch.arange(self.prev_candidate['conf'].size(0))
+            det_score, det_labels = self.prev_candidate['conf'][keep, 1:].max(1)
+            detection = {'box': self.prev_candidate['box'][keep],
+                         'mask_coeff': self.prev_candidate['mask_coeff'][keep],
+                         'class': det_labels+1, 'score': det_score,
+                         'centerness': self.prev_candidate['centerness'][keep],
+                         'proto': self.prev_candidate['proto'],
+                         'box_ids': det_obj_ids[keep], 'mask': self.prev_candidate['mask'][keep]}
 
-            if keep.sum() == 0:
-                detection = {'box': torch.Tensor(), 'mask_coeff': torch.Tensor(), 'class': torch.Tensor(),
-                             'score': torch.Tensor(), 'box_ids': torch.Tensor()}
-            else:
-                det_score, det_labels = self.prev_candidate['conf'][keep, 1:].max(1)
-                detection = {'box': self.prev_candidate['box'][keep],
-                             'mask_coeff': self.prev_candidate['mask_coeff'][keep],
-                             'class': det_labels+1, 'score': det_score,
-                             'centerness': self.prev_candidate['centerness'][keep], 'proto': proto_data,
-                             'box_ids': det_obj_ids[keep], 'mask': det_masks_out[keep]}
-
-        return detection
+        return detection, keep.sum()
