@@ -1,11 +1,11 @@
 import torch
 import torch.nn.functional as F
-from layers.box_utils import jaccard, center_size, point_form, decode, crop, mask_iou
-from layers.mask_utils import generate_mask
-from layers.modules import correlate, bbox_feat_extractor
-from layers.visualization import display_box_shift, display_correlation_map
+from layers.utils import center_size, point_form, decode, crop, generate_mask, correlate_operator
+from layers.modules import bbox_feat_extractor
 from datasets import cfg
 from utils import timer
+import matplotlib.pyplot as plt
+import os
 
 
 def CandidateShift(net, fpn_feat_next, ref_candidate, img=None, img_meta=None):
@@ -17,20 +17,18 @@ def CandidateShift(net, fpn_feat_next, ref_candidate, img=None, img_meta=None):
         :param correlation_patch_size: the output size of roialign
         :return: candidates on the target frame
         """
-        # ref_candidate_shift = {}
-        # for k, v in ref_candidate.items():
-        #     ref_candidate_shift[k] = v.clone()
 
         if ref_candidate['box'].size(0) == 0:
             ref_candidate_shift = {'box': torch.tensor([])}
 
         else:
-            # we only use the features in the P3 layer to perform correlation operation
-            fpn_feat_ref = ref_candidate['fpn_feat']
-            corr = correlate(fpn_feat_ref, fpn_feat_next, patch_size=cfg.correlation_patch_size, kernel_size=3)
-            # display_correlation_map(fpn_ref, img_meta, idx)
 
             if cfg.temporal_fusion_module:
+                # we only use the features in the P3 layer to perform correlation operation
+                fpn_feat_ref = ref_candidate['fpn_feat']
+                corr = correlate_operator(fpn_feat_next, fpn_feat_ref,
+                                          patch_size=cfg.correlation_patch_size, kernel_size=3, dilation_patch=1)
+                # display_correlation_map(fpn_ref, img_meta, idx)
                 concatenated_features = F.relu(torch.cat([corr, fpn_feat_ref, fpn_feat_next], dim=1))
 
                 # extract features on the predicted bbox
@@ -51,23 +49,69 @@ def CandidateShift(net, fpn_feat_next, ref_candidate, img=None, img_meta=None):
             else:
 
                 # FEELVOS
+                # we only use the features in the P3 layer to perform correlation operation
+                fpn_feat_ref = ref_candidate['fpn_feat']
+                # display_correlation_map(fpn_ref, img_meta, idx)
                 n_ref = ref_candidate['box'].size(0)
                 proto_ref = ref_candidate['proto']
                 mask_coeff_ref = cfg.mask_proto_coeff_activation(ref_candidate['mask_coeff'])
                 mask_pred_h, mask_pred_w = proto_ref.size()[:2]
                 upsampled_fpn_feat_next = F.interpolate(fpn_feat_next.float(), (mask_pred_h, mask_pred_w),
                                                         mode='bilinear', align_corners=False)
-                upsampled_corr = F.interpolate(corr.float(), (mask_pred_h, mask_pred_w),
-                                               mode='bilinear', align_corners=False)
+                attention_next = net.VOS_attention(upsampled_fpn_feat_next)
 
                 pred_masks_ref = generate_mask(proto_ref, mask_coeff_ref, ref_candidate['box'])
                 pred_masks_ref = pred_masks_ref.gt(0.5).float()
+                seg_type = 2
+                if seg_type == 1:
+                    corr = correlate_operator(fpn_feat_next, fpn_feat_ref,
+                                              patch_size=cfg.correlation_patch_size, kernel_size=3, dilation_patch=1)
+                    upsampled_corr = F.interpolate(corr.float(), (mask_pred_h, mask_pred_w),
+                                                   mode='bilinear', align_corners=False)
+                    upsampled_corr = torch.max(upsampled_corr, dim=1)[0]  # [1, h, w]
+                    # extract features on the predicted bbox
+                    box_ref_c = center_size(ref_candidate['box'])
+                    # we use 1.2 box to crop features
+                    box_ref_crop = point_form(torch.cat([box_ref_c[:, :2],
+                                                         torch.clamp(box_ref_c[:, 2:] * 1.5, min=0, max=1)], dim=1))
+                    _, upsampled_corr = crop(upsampled_corr.permute(1, 2, 0).contiguous().repeat(1, 1, n_ref),
+                                             box_ref_crop.view(n_ref, -1))
+                    upsampled_corr = upsampled_corr.permute(2, 0, 1).contiguous()  # [n_ref, h, w]
+
+                elif seg_type == 2:
+                    feat_h, feat_w = fpn_feat_ref.size()[2:]
+                    downsampled_pred_masks_ref = F.interpolate(pred_masks_ref.unsqueeze(0).float(), (feat_h, feat_w),
+                                                               mode='bilinear', align_corners=False).squeeze(0)
+                    corr = []
+                    for j in range(n_ref):
+                        corr.append(correlate_operator(fpn_feat_next,
+                                                       fpn_feat_ref * downsampled_pred_masks_ref[j].view(1, 1, feat_h, feat_w),
+                                                       patch_size=cfg.correlation_patch_size, kernel_size=3))
+                    corr = torch.cat(corr, dim=0)
+                    upsampled_corr = F.interpolate(corr.float(), (mask_pred_h, mask_pred_w),
+                                                   mode='bilinear', align_corners=False)
+                    upsampled_corr = torch.max(upsampled_corr, dim=1)[0]  # [n_ref, h, w]
+
                 pred_masks_next = []
                 for j in range(n_ref):
-                    vos_feat = torch.cat([upsampled_fpn_feat_next, upsampled_corr,
-                                          pred_masks_ref[j].unsqueeze(0).unsqueeze(1)], dim=1)
-                    pred_masks_next.append(net.VOS_head(vos_feat).squeeze(0))  # [1, mask_pred_h, mask_pred_w]
-                ref_candidate_shift = {'mask': cfg.mask_proto_mask_activation(torch.cat(pred_masks_next, dim=0))}
+                    norm_upsampled_corr = upsampled_corr[j] / torch.clamp(upsampled_corr[j].max(), min=1e-5)
+                    vos_feat = upsampled_fpn_feat_next * norm_upsampled_corr.unsqueeze(0).unsqueeze(1)
+                    vos_mask_temp = net.VOS_head(vos_feat) * attention_next  # [1, 1, mask_pred_h, mask_pred_w]
+                    vos_mask_temp = cfg.mask_proto_mask_activation(vos_mask_temp.squeeze(0)).gt_(0.5)
+                    pred_masks_next.append(vos_mask_temp)
+                pred_masks_next = torch.cat(pred_masks_next, dim=0)
+                # _, pred_masks_next_ = crop(pred_masks_next.permute(1, 2, 0).contiguous(), box_ref_crop)
+                # pred_masks_next = pred_masks_next.permute(2, 0, 1).contiguous()  # [n_ref, h, w]
+                ref_candidate_shift = {'mask': pred_masks_next}
+
+                # temp = torch.max(upsampled_corr.view(n_ref, -1), dim=1)[0].view(n_ref, 1, 1)
+                # plt.imshow(torch.stack((upsampled_corr / temp, pred_masks_ref,
+                #                        pred_masks_next), dim=2).view(n_ref*mask_pred_h, -1).cpu().numpy())
+                # root_dir = ''.join(['/home/lmh/Downloads/VIS/code/OSTMask/weights/YTVIS2019/weights_r50_kl_vos_C/vos_mask/',
+                #                     str(img_meta[0]['video_id'])])
+                # if not os.path.exists(root_dir):
+                #     os.makedirs(root_dir)
+                # plt.savefig(''.join([root_dir, '/', str(img_meta[0]['frame_id']), '_+.png']))
 
         return ref_candidate_shift
 
@@ -96,6 +140,8 @@ def generate_candidate(predictions):
             candidate_cur['track'] = predictions['track'][i]
             if cfg.train_centerness:
                 candidate_cur['centerness'] = predictions['centerness'][i][keep].view(-1)
+            if cfg.mask_coeff_for_occluded:
+                candidate_cur['mask_occluded_coeff'] = predictions['mask_occluded_coeff'][i][keep, :]
 
         candidate.append(candidate_cur)
 

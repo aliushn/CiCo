@@ -9,7 +9,6 @@ from cocoapi.PythonAPI.pycocotools.ytvoseval import YTVOSeval
 import matplotlib as plt
 from datasets import cfg
 import cv2
-from utils.functions import SavePath
 
 
 def bbox2result_with_id(preds, classes):

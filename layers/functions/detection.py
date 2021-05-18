@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from ..box_utils import decode, jaccard, mask_iou, crop
+from layers.utils import decode, jaccard, mask_iou, crop
 from utils import timer
 
 from datasets import cfg
@@ -131,7 +131,7 @@ class Detect(object):
                                                                      self.nms_thresh, self.top_k)
             else:
                 boxes_aft_nms, masks_aft_nms, track_aft_nms, classes_aft_nms, scores_aft_nms, idx_out = \
-                    self.fast_nms(boxes, masks_coeff, track, scores, self.nms_thresh, self.top_k)
+                    self.fast_nms(boxes, masks_coeff, proto_data, track, scores, self.nms_thresh, self.top_k)
         else:
             boxes_aft_nms, masks_aft_nms, track_aft_nms, classes_aft_nms, scores_aft_nms = \
                 self.traditional_nms(boxes, masks_coeff, track, scores, self.nms_thresh, self.conf_thresh)
@@ -152,17 +152,17 @@ class Detect(object):
         _, idx = scores.sort(0, descending=True)
         idx = idx[:top_k]
 
+        # Compute the pairwise IoU between the boxes
+        boxes_idx = boxes[idx]
+        iou = jaccard(boxes_idx, boxes_idx)
         if cfg.nms_as_miou:
             det_masks = proto_data @ masks_coeff[idx].t()
             det_masks = cfg.mask_proto_mask_activation(det_masks)
             _, det_masks = crop(det_masks.squeeze(0), boxes[idx])
             det_masks = det_masks.permute(2, 0, 1).contiguous()  # [n_masks, h, w]
             det_masks = det_masks.gt(0.5).float()
-            iou = mask_iou(det_masks, det_masks)
-        else:
-            # Compute the pairwise IoU between the boxes
-            boxes_idx = boxes[idx]
-            iou = jaccard(boxes_idx, boxes_idx)
+            m_iou = mask_iou(det_masks, det_masks)
+            iou = 0.5 * iou + 0.5 * m_iou
 
         # Zero out the lower triangle of the cosine similarity matrix and diagonal
         iou = torch.triu(iou, diagonal=1)
@@ -210,7 +210,8 @@ class Detect(object):
         
         return idx_out, idx_out.size(0)
 
-    def fast_nms(self, boxes, masks, track, scores, iou_threshold:float=0.5, top_k:int=200, second_threshold:bool=True):
+    def fast_nms(self, boxes, masks_coeff, proto_data,
+                 track, scores, iou_threshold:float=0.5, top_k:int=200, second_threshold:bool=True):
         scores, idx = scores.sort(1, descending=True)  # [num_classes, num_dets]
 
         idx = idx[:, :top_k].contiguous()
@@ -219,11 +220,23 @@ class Detect(object):
         num_classes, num_dets = idx.size()
 
         boxes = boxes[idx.view(-1), :].view(num_classes, num_dets, 4)
-        masks = masks[idx.view(-1), :].view(num_classes, num_dets, -1)
+        masks_coeff = masks_coeff[idx.view(-1), :].view(num_classes, num_dets, -1)
         if cfg.train_track:
             track = track[idx.view(-1), :].view(num_classes, num_dets, -1)
 
         iou = jaccard(boxes, boxes)  # [num_classes, num_dets, num_dets]
+        if cfg.nms_as_miou:
+            det_masks = cfg.mask_proto_coeff_activation(masks_coeff) @ proto_data.permute(2, 0, 1).contiguous()
+            det_masks = cfg.mask_proto_mask_activation(det_masks)  # [n_class, num_dets, h, w]
+            det_masks = det_masks.permute(0, 3, 2, 1).contiguous()
+            det_masks_crop = []
+            for i in range(num_classes):
+                _, det_masks_cur = crop(det_masks[i], boxes[i])
+                det_masks_crop.append(det_masks_cur)
+            det_masks = torch.stack(det_masks_crop, dim=0).permute(0, 3, 1, 2).contiguous().gt(0.5).float()
+            m_iou = mask_iou(det_masks, det_masks)  # [n_class, num_dets, num_dets]
+            iou = iou * 0.5 + m_iou * 0.5
+
         iou.triu_(diagonal=1)
         iou_max, _ = iou.max(dim=1)  # [num_classes, num_dets]
 

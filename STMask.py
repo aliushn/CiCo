@@ -5,8 +5,8 @@ import numpy as np
 from collections import defaultdict
 
 from datasets.config import cfg, mask_type
-from layers import Detect, Detect_TF, Track, generate_candidate, \
-    Track_TF, PredictionModule, PredictionModule_FC, make_net, FPN, FastMaskIoUNet, TemporalNet, correlate
+from layers.modules import PredictionModule_FC, make_net, FPN, FastMaskIoUNet, TemporalNet
+from layers.functions import Detect, Detect_TF, Track, generate_candidate, Track_TF
 from backbone import construct_backbone
 from utils import timer
 
@@ -114,8 +114,9 @@ class STMask(nn.Module):
                 self.TemporalNet = TemporalNet(corr_channels, cfg.mask_proto_n)
             else:
                 # using FEELVOS, VOS strategy, to track instances from previous to current frame
-                VOS_in_channels = in_channels + cfg.correlation_patch_size ** 2 + 1
+                VOS_in_channels = in_channels
                 self.VOS_head, _ = make_net(VOS_in_channels, cfg.VOS_head, include_last_relu=False)
+                self.VOS_attention = nn.Conv2d(in_channels, 1, kernel_size=3, padding=1)
 
         else:
             self.detect = Detect(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k, conf_thresh=cfg.nms_conf_thresh,
@@ -257,6 +258,9 @@ class STMask(nn.Module):
 
                 if cfg.train_class:
                     pred_outs['conf'] = []
+
+                if cfg.mask_coeff_for_occluded:
+                    pred_outs['mask_occluded_coeff'] = []
 
                 for idx, pred_layer in zip(self.selected_layers, self.prediction_layers):
                     pred_x = fpn_outs[idx]

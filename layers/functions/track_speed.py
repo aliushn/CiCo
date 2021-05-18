@@ -1,10 +1,10 @@
 import torch
 import torch.nn.functional as F
-from ..box_utils import jaccard, mask_iou,  DIoU
-from ..mask_utils import generate_mask
+from layers.utils.box_utils import jaccard, mask_iou,  DIoU
+from layers.utils.mask_utils import generate_mask
 from utils import timer
 
-from datasets import cfg, mask_type
+from datasets import cfg
 
 import numpy as np
 

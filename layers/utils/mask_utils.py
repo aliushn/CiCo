@@ -124,3 +124,25 @@ def generate_mask(proto_data, mask_coeff, bbox):
     det_masks = pred_masks.permute(2, 0, 1).contiguous()  # [n_masks, h, w]
 
     return det_masks
+
+
+def mask_iou(mask1, mask2):
+    # [c, n1, h, w], [c, n2, h, w]
+    d3 = len(mask1.size()) == 3
+    if d3:
+        mask1 = mask1.unsqueeze(0)
+        mask2 = mask2.unsqueeze(0)
+    c, n1 = mask1.size()[:2]
+    n2 = mask2.size(1)
+    mask1 = mask1.view(c, n1, 1, -1)
+    mask2 = mask2.view(c, 1, n2, -1)
+    intersection = torch.sum(mask1 * mask2, dim=-1)  # [c, n1, n2]
+    area1 = torch.sum(mask1, dim=-1)   # [c, n1, 1]
+    area2 = torch.sum(mask2, dim=-1)   # [c, 1, n2]
+    union = (area1 + area2) - intersection
+    mask_ious = intersection / union
+    keep = union == 0
+    mask_ious[keep] = torch.zeros(1, keep.sum(), device=mask1.device)
+    if d3:
+        mask_ious = mask_ious.squeeze(0)
+    return mask_ious

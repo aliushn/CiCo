@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 from datasets.config import cfg
-from spatial_correlation_sampler import spatial_correlation_sample
-import torch.nn.functional as F
 from mmcv.ops import roi_align
 
 
@@ -37,31 +35,6 @@ class TemporalNet(nn.Module):
         x_reg = torch.cat([x_reg[:, :2] * variances[0], x_reg[:, 2:] * variances[1]], dim=1)
 
         return x_reg, x_coeff
-
-
-def correlate(x1, x2, patch_size=11, kernel_size=1, dilation_patch=1):
-    """
-    :param x1: features 1
-    :param x2: features 2
-    :param patch_size: the size of whole patch is used to calculate the correlation
-    :return:
-    """
-
-    # Output sizes oH and oW are no longer dependant of patch size, but only of kernel size and padding
-    # patch_size is now the whole patch, and not only the radii.
-    # stride1 is now stride and stride2 is dilation_patch, which behave like dilated convolutions
-    # equivalent max_displacement is then dilation_patch * (patch_size - 1) / 2.
-    # to get the right parameters for FlowNetC, you would have
-    out_corr = spatial_correlation_sample(x1,
-                                          x2,
-                                          kernel_size=kernel_size,
-                                          patch_size=patch_size,
-                                          stride=1,
-                                          padding=int((kernel_size - 1)/2),
-                                          dilation_patch=dilation_patch)
-    b, ph, pw, h, w = out_corr.size()
-    out_corr = out_corr.view(b, ph*pw, h, w) / x1.size(1)
-    return F.leaky_relu_(out_corr, 0.1)
 
 
 def bbox_feat_extractor(feature_maps, boxes, pool_size):

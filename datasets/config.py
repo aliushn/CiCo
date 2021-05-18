@@ -442,7 +442,6 @@ YouTube_VOS_base_config = Config({
     'mask_proto_crop': False,
     'mask_proto_crop_expand': 0,
     'mask_proto_loss': None,
-    'mask_proto_binarize_downsampled_gt': True,
     'mask_proto_grid_file': 'data/grid.npy',
     'mask_proto_use_grid': False,
     'mask_proto_remove_empty_masks': False,
@@ -666,6 +665,8 @@ STMask_base_config = YouTube_VOS_base_config.copy({
     'discard_mask_area': 5 * 5,
     'mask_proto_coeff_diversity_loss': False,
     'mask_proto_crop_with_pred_box': True,
+    'mask_coeff_for_occluded': False,
+    'mask_occluded_alpha': 6.125,
 
     # Proto_net settings
     'backbone_C2_as_features': False,
@@ -716,11 +717,12 @@ STMask_base_config = YouTube_VOS_base_config.copy({
     'use_semantic_segmentation_loss': False,
 
     # eval
+    'interval_key_frame': 1,
     'nms_conf_thresh': 0.05,
     'nms_thresh': 0.5,
     'eval_conf_thresh': 0.05,
     'candidate_conf_thresh': 0.05,
-    'nms_as_miou': False,
+    'nms_as_miou': True,
     'remove_false_inst': True,
     'add_missed_masks': False,
     'use_train_sub': False,

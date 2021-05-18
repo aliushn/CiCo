@@ -417,21 +417,6 @@ def index2d(src, idx):
     return src.view(-1)[idx.view(-1)].view(idx.size())
 
 
-def mask_iou(mask1, mask2):
-    # [n1, h, w], [n2, h, w]
-    n1, n2 = mask1.size(0), mask2.size(0)
-    mask1 = mask1.view(n1, -1)
-    mask2 = mask2.view(n2, -1)
-    intersection = mask1 @ mask2.t()  # [n1, n2]
-    area1 = torch.sum(mask1, dim=1).unsqueeze(-1)   # [n1, 1]
-    area2 = torch.sum(mask2, dim=1).unsqueeze(-1)   # [n2, 1]
-    union = (area1 + area2.t()) - intersection
-    mask_ious = intersection / union
-    keep = union == 0
-    mask_ious[keep] = torch.zeros(1, keep.sum(), device=mask1.device)
-    return mask_ious
-
-
 def DIoU(det_bbox, prev_det_bbox):
     n_dets = det_bbox.size(0)
     n_prev = prev_det_bbox.size(0)

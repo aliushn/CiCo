@@ -13,12 +13,6 @@ import torch
 
 
 class YTVOSDataset(CustomDataset):
-    CLASSES = ('person', 'giant_panda', 'lizard', 'parrot', 'skateboard', 'sedan',
-                'ape', 'dog', 'snake', 'monkey', 'hand', 'rabbit', 'duck', 'cat', 'cow', 'fish',
-                'train', 'horse', 'turtle', 'bear', 'motorbike', 'giraffe', 'leopard',
-                'fox', 'deer', 'owl', 'surfboard', 'airplane', 'truck', 'zebra', 'tiger',
-                'elephant', 'snowboard', 'boat', 'shark', 'mouse', 'frog', 'eagle', 'earless_seal',
-                'tennis_racket')
 
     def __init__(self,
                  ann_file,

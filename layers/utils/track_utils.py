@@ -5,6 +5,33 @@ import torch.distributions as dist
 from datasets import cfg
 import matplotlib.pyplot as plt
 import os
+from spatial_correlation_sampler import spatial_correlation_sample
+import torch.nn.functional as F
+
+
+def correlate_operator(x1, x2, patch_size=11, kernel_size=1, dilation_patch=1):
+    """
+    :param x1: features 1
+    :param x2: features 2
+    :param patch_size: the size of whole patch is used to calculate the correlation
+    :return:
+    """
+
+    # Output sizes oH and oW are no longer dependant of patch size, but only of kernel size and padding
+    # patch_size is now the whole patch, and not only the radii.
+    # stride1 is now stride and stride2 is dilation_patch, which behave like dilated convolutions
+    # equivalent max_displacement is then dilation_patch * (patch_size - 1) / 2.
+    # to get the right parameters for FlowNetC, you would have
+    out_corr = spatial_correlation_sample(x1,
+                                          x2,
+                                          kernel_size=kernel_size,
+                                          patch_size=patch_size,
+                                          stride=1,
+                                          padding=int((kernel_size - 1)/2),
+                                          dilation_patch=dilation_patch)
+    b, ph, pw, h, w = out_corr.size()
+    out_corr = out_corr.view(b, ph*pw, h, w) / x1.size(1)
+    return F.leaky_relu_(out_corr, 0.1)
 
 
 def split_bbox(bbox, idx_bbox_ori, nums_bbox_per_layer):
@@ -31,15 +58,6 @@ def split_bbox(bbox, idx_bbox_ori, nums_bbox_per_layer):
     return split_bboxes, split_bboxes_idx[0]
 
 
-def mask_iou(mask1, mask2):
-    intersection = torch.sum(mask1 * mask2, dim=(0, 1))
-    area1 = torch.sum(mask1, dim=(0, 1))
-    area2 = torch.sum(mask2, dim=(0, 1))
-    union = (area1 + area2) - intersection
-    ret = intersection / union
-    return ret
-
-
 def generate_track_gaussian(track_data, boxes):
     h, w, c = track_data.size()
     c_boxes = center_size(boxes)
@@ -55,8 +73,8 @@ def generate_track_gaussian(track_data, boxes):
     return mu.t(), var.t()
 
 
-def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta, add_bbox_dummy=False, bbox_dummy_iou=0,
-                        match_coeff=None):
+def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta, add_bbox_dummy=False,
+                        bbox_dummy_iou=0, match_coeff=None, use_FEELVOS=False):
     # compute comprehensive matching score based on matchig likelihood,
     # bbox confidence, and ious
     if add_bbox_dummy:
@@ -73,6 +91,9 @@ def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta
     else:
         # match coeff needs to be length of 4
         assert (len(match_coeff) == 4)
+        if use_FEELVOS:
+            match_coeff[1] = match_coeff[1] + match_coeff[2]
+            match_coeff[2] = 0
         return match_ll + match_coeff[0] * bbox_scores \
                + match_coeff[1] * mask_ious \
                + match_coeff[2] * bbox_ious \

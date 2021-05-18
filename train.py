@@ -112,12 +112,12 @@ if torch.cuda.device_count() == 0:
     print('No GPUs detected. Exiting...')
     exit(-1)
 
-if args.batch_size*2 // torch.cuda.device_count() < 8:
+if args.batch_size*2 // torch.cuda.device_count() < 6:
     if __name__ == '__main__':
         print('Per-GPU batch size is less than the recommended limit for batch norm. Disabling batch norm.')
     cfg.freeze_bn = True
 
-loss_types = ['B', 'BIoU', 'C', 'M', 'T', 'center', 'B_shift', 'M_shift',
+loss_types = ['B', 'BIoU', 'C', 'M', 'T', 'center', 'B_shift', 'M_shift', 'M_occluded',
               'P', 'D', 'S', 'I']
 
 if torch.cuda.is_available():
@@ -367,13 +367,14 @@ def train():
                     if iteration % args.save_interval == 0 and iteration > 0:  # epoch >= 7:
                         setup_eval()
                         save_path_valid_metrics = save_path(epoch, iteration).replace('.pth', '.txt')
+                        # valid_sub
+                        cfg.valid_sub_dataset.test_mode = False
+                        metrics = compute_validation_map(STMask_net, valid_data=False,
+                                                         output_metrics_file=save_path_valid_metrics)
+
                         # valid datasets
                         metrics_valid = compute_validation_map(STMask_net, valid_data=True,
                                                                output_metrics_file=save_path_valid_metrics)
-                        # valid_sub
-                        # cfg.valid_sub_dataset.test_mode = False
-                        # metrics = compute_validation_map(STMask_net, valid_data=False,
-                        #                                  output_metrics_file=save_path_valid_metrics)
 
                 iteration += 1
 
@@ -447,7 +448,8 @@ def setup_eval():
                             '--batch_size=' + str(args.eval_batch_size),
                             '--output_json',
                             '--score_threshold=' + str(cfg.eval_conf_thresh),
-                            '--mask_det_file='+args.save_folder+'eval_mask_det.json'])
+                            '--mask_det_file='+args.save_folder+'eval_mask_det.json',
+                            '--interval_key_frame='+str(cfg.interval_key_frame)])
 
 
 if __name__ == '__main__':

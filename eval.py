@@ -3,7 +3,7 @@ from STMask import STMask
 from utils.functions import MovingAverage, ProgressBar
 from utils import timer
 from utils.functions import SavePath
-from layers.output_utils import postprocess_ytbvis, undo_image_transformation, display_fpn_outs
+from layers.utils.output_utils import postprocess_ytbvis, undo_image_transformation
 
 from datasets import get_dataset, prepare_data
 import mmcv
@@ -15,7 +15,7 @@ import argparse
 import random
 import os
 from collections import defaultdict
-from layers.eval_utils import bbox2result_with_id, results2json_videoseg, ytvos_eval, calc_metrics
+from layers.utils.eval_utils import bbox2result_with_id, results2json_videoseg, calc_metrics
 
 import matplotlib.pyplot as plt
 import cv2
@@ -43,6 +43,8 @@ def parse_args(argv=None):
     parser.add_argument('--clip_eval_mode', default=False, type=str2bool,
                         help='Use cuda to evaulate model')
     parser.add_argument('--top_k', default=100, type=int,
+                        help='Further restrict the number of predictions to parse')
+    parser.add_argument('--interval_key_frame', default=1, type=int,
                         help='Further restrict the number of predictions to parse')
     parser.add_argument('--cuda', default=True, type=str2bool,
                         help='Use cuda to evaulate model')
@@ -528,7 +530,7 @@ def validation(net: STMask, valid_data=False, output_metrics_file=None):
                 pad_h, pad_w = images.size()[2:4]
 
             with timer.env('Network Extra'):
-                key_frame = 1 if images_meta[0]['frame_id'] % 2 == 0 else 0
+                key_frame = 1 if images_meta[0]['frame_id'] % args.interval_key_frame == 0 else 0
                 preds = net(images, img_meta=images_meta, key_frame=key_frame)
 
                 if it == dataset_size - 1:
@@ -576,7 +578,10 @@ def validation(net: STMask, valid_data=False, output_metrics_file=None):
 
 
 def evaluate(net: STMask, dataset):
-    net.detect.use_fast_nms = args.fast_nms
+    if cfg.temporal_fusion_module or cfg.use_FEELVOS:
+        net.Detect_TF.use_fast_nms = args.fast_nms
+    else:
+        net.detect.use_fast_nms = args.fast_nms
     cfg.mask_proto_debug = args.mask_proto_debug
 
     frame_times = MovingAverage()
@@ -602,7 +607,7 @@ def evaluate(net: STMask, dataset):
             pad_h, pad_w = images.size()[2:4]
 
             with timer.env('Network Extra'):
-                key_frame = 1 if images_meta[0]['frame_id'] % 2 == 0 else 0
+                key_frame = 1 if images_meta[0]['frame_id'] % args.interval_key_frame == 0 else 0
                 preds = net(images, img_meta=images_meta, key_frame=key_frame)
 
             # Perform the meat of the operation here depending on our mode.

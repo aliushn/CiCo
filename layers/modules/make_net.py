@@ -1,5 +1,5 @@
 import torch.nn as nn
-from layers.interpolate import InterpolateModule
+from layers.utils.interpolate import InterpolateModule
 
 
 def make_net(in_channels, conf, include_last_relu=True):

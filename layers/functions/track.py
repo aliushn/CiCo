@@ -1,9 +1,6 @@
 import torch
 import torch.nn.functional as F
-from ..box_utils import decode, jaccard, index2d, mask_iou, crop, center_size, DIoU
-from ..mask_utils import generate_mask
-from ..track_utils import compute_comp_scores
-from layers.mask_utils import generate_rel_coord
+from layers.utils import jaccard, mask_iou, DIoU, generate_mask, compute_comp_scores, generate_rel_coord
 from utils import timer
 
 from datasets import cfg

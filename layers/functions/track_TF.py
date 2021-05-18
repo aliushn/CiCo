@@ -1,9 +1,5 @@
 import torch
-import torch.nn.functional as F
-import torch.distributions as dist
-from ..box_utils import jaccard,  mask_iou
-from ..track_utils import generate_track_gaussian, compute_comp_scores, display_association_map
-from ..mask_utils import generate_mask
+from layers.utils import jaccard,  mask_iou, generate_track_gaussian, compute_comp_scores, generate_mask
 from .TF_utils import CandidateShift
 from utils import timer
 
@@ -139,7 +135,8 @@ class Track_TF(object):
                                                   label_delta,
                                                   add_bbox_dummy=True,
                                                   bbox_dummy_iou=0.3,
-                                                  match_coeff=cfg.match_coeff)
+                                                  match_coeff=cfg.match_coeff,
+                                                  use_FEELVOS=cfg.use_FEELVOS)
                 comp_scores[:, 1:] = comp_scores[:, 1:] * 0.95 ** (self.prev_candidate['tracked_mask'] - 1).view(1, -1)
                 match_likelihood, match_ids = torch.max(comp_scores, dim=1)
                 # translate match_ids to det_obj_ids, assign new id to new objects
@@ -182,7 +179,7 @@ class Track_TF(object):
         # whether add some tracked masks
         cond1 = self.prev_candidate['tracked_mask'] <= 5
         # whether tracked masks are greater than a small threshold, which removes some false positives
-        cond2 = self.prev_candidate['mask'].gt_(0.5).sum([1, 2]) > 2
+        cond2 = self.prev_candidate['mask'].gt_(0.5).sum([1, 2]) > 10
         # a declining weights (0.8) to remove some false positives that cased by consecutively track to segment
         det_score, _ = self.prev_candidate['conf'][:, 1:].max(1)
         cond3 = det_score.clone().detach() > cfg.eval_conf_thresh

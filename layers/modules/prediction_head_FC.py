@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from datasets.config import cfg, mask_type
 from .make_net import make_net
@@ -67,6 +66,8 @@ class PredictionModule_FC(nn.Module):
 
             if cfg.train_class:
                 self.conf_layer = nn.ModuleList([])
+            if cfg.mask_coeff_for_occluded:
+                self.mask_occluded_layer = nn.ModuleList([])
 
             for k in range(len(cfg.head_layer_params)):
                 kernel_size = cfg.head_layer_params[k]['kernel_size']
@@ -98,6 +99,10 @@ class PredictionModule_FC(nn.Module):
                 else:
                     self.mask_layer.append(nn.Conv2d(self.out_channels, self.num_priors*self.mask_dim,
                                                      **cfg.head_layer_params[k]))
+
+                if cfg.mask_coeff_for_occluded:
+                    self.mask_occluded_layer.append(nn.Conv2d(self.out_channels, self.num_priors * self.mask_dim,
+                                                              **cfg.head_layer_params[k]))
 
             # What is this ugly lambda doing in the middle of all this clean prediction module code?
             def make_extra(num_layers, out_channels):
@@ -139,7 +144,9 @@ class PredictionModule_FC(nn.Module):
         bbox_x = src.bbox_extra(x)
         mask_x = src.mask_extra(x)
 
-        conf, bbox, centerness_data, mask, track = [], [], [], [], []
+        conf, bbox, centerness_data, mask = [], [], [], []
+        if cfg.mask_coeff_for_occluded:
+            mask_occluded = []
         for k in range(len(cfg.head_layer_params)):
             if cfg.train_centerness:
                 centerness_cur = src.centerness_layer[k](bbox_x)
@@ -161,6 +168,10 @@ class PredictionModule_FC(nn.Module):
                 mask_cur = src.mask_layer[k](mask_x)
             mask.append(mask_cur.permute(0, 2, 3, 1).contiguous())
 
+            if cfg.mask_coeff_for_occluded:
+                mask_occluded_cur = src.mask_occluded_layer[k](mask_x)
+                mask_occluded.append(mask_occluded_cur.permute(0, 2, 3, 1).contiguous())
+
         # cat for all anchors
         if cfg.train_boxes:
             bbox = torch.cat(bbox, dim=-1).view(x.size(0), -1, 4)
@@ -171,6 +182,8 @@ class PredictionModule_FC(nn.Module):
             conf = torch.cat(conf, dim=-1).view(x.size(0), -1, src.num_classes)
         mask = torch.cat(mask, dim=-1).view(x.size(0), -1, src.mask_dim)
         # mask = cfg.mask_proto_coeff_activation(mask)
+        if cfg.mask_coeff_for_occluded:
+            mask_occluded = torch.cat(mask_occluded, dim=-1).view(x.size(0), -1, src.mask_dim)
 
         # See box_utils.decode for an explanation of this
         if cfg.use_yolo_regressors:
@@ -190,6 +203,9 @@ class PredictionModule_FC(nn.Module):
 
         if cfg.train_class:
             preds['conf'] = conf
+
+        if cfg.mask_coeff_for_occluded:
+            preds['mask_occluded_coeff'] = mask_occluded
 
         return preds
 
