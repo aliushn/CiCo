@@ -1,7 +1,8 @@
 import torch
-from layers.utils import jaccard, mask_iou, crop
+from layers.utils import jaccard, mask_iou, crop, generate_mask
 from utils import timer
 from datasets import cfg
+import torch.nn.functional as F
 
 
 class Detect_TF(object):
@@ -26,11 +27,9 @@ class Detect_TF(object):
         self.use_cross_class_nms = True
         self.use_fast_nms = True
 
-    def __call__(self, net, candidate, is_output_candidate=False):
+    def __call__(self, candidate):
         """
         Args:
-             net: (tensor) Loc preds from loc layers
-                Shape: [batch, num_priors, 4]
             candidate: (tensor) Shape: Conf preds from conf layers
                 Shape: [batch, num_priors, num_classes]
         Returns:
@@ -41,61 +40,65 @@ class Detect_TF(object):
         """
 
         with timer.env('Detect'):
+            result = []
+            for i in range(len(candidate)):
+                result.append(self.detect(candidate[i]))
 
-            result = self.detect(candidate, is_output_candidate)
-            if is_output_candidate:
-                return result
-            else:
-                return [{'detection': result, 'net': net}]
+        return result
 
-    def detect(self, candidate, is_output_candidate=False):
+    def detect(self, candidate):
         """ Perform nms for only the max scoring class that isn't background (class 0) """
 
-        scores = candidate['conf'].t()[1:]
+        if cfg.train_class:
+            scores = candidate['conf'].t()   # [num_class+1, num_anchors*h*w]
+        else:
+            scores = candidate['stuff'].view(-1)      # [num_anchors*h*w, 1]
         boxes = candidate['box']
-        centerness_scores = candidate['centerness']
         mask_coeff = candidate['mask_coeff']
         proto_data = candidate['proto']
+        sem_data = candidate['sem_seg'] if cfg.use_semantic_segmentation_loss else None  # [h, w, num_class]
+        centerness_scores = candidate['centerness'] if cfg.train_centerness else None
         mask_occluded_coeff = candidate['mask_occluded_coeff'] if cfg.mask_coeff_for_occluded else None
 
         if boxes.size(0) == 0:
-            if is_output_candidate:
-                return candidate
-            else:
-                return {'box': boxes, 'mask_coeff': mask_coeff, 'class': torch.Tensor(), 'score': torch.Tensor()}
+            return {'box': boxes, 'mask_coeff': mask_coeff, 'class': torch.Tensor(), 'score': torch.Tensor()}
 
         if self.use_cross_class_nms:
-            idx_out, out_aft_nms = self.cc_fast_nms(boxes, mask_coeff, mask_occluded_coeff, proto_data, scores,
-                                                    centerness_scores, self.nms_thresh, self.top_k)
+            out_aft_nms = self.cc_fast_nms(boxes, mask_coeff, mask_occluded_coeff, proto_data, scores,
+                                           sem_data, centerness_scores, self.nms_thresh, self.top_k)
         else:
-            idx_out, out_aft_nms = self.fast_nms(boxes, mask_coeff, proto_data, scores, centerness_scores,
-                                                 self.nms_thresh, self.top_k)
-        out_aft_nms['track'] = candidate['track']
+            out_aft_nms = self.fast_nms(boxes, mask_coeff, proto_data, scores, sem_data, centerness_scores,
+                                        self.nms_thresh, self.top_k)
 
-        if is_output_candidate:
-            candidate['conf'] = candidate['conf'][idx_out]
-            candidate['box'] = boxes[idx_out]
-            candidate['mask_coeff'] = mask_coeff[idx_out]
-            if cfg.train_centerness:
-                candidate['centerness'] = centerness_scores[idx_out]
-                candidate['conf'] *= candidate['centerness'][:, None]
-            if cfg.mask_coeff_for_occluded:
-                candidate['mask_occluded_coeff'] = mask_occluded_coeff[idx_out]
-            return candidate
-        else:
-            return out_aft_nms
+        for k, v in candidate.items():
+            if k in {'fpn_feat', 'proto', 'track', 'sem_seg'}:
+                out_aft_nms[k] = v
 
-    def cc_fast_nms(self, boxes, masks_coeff, masks_occluded_coeff, proto_data, conf, centerness_scores,
+        return out_aft_nms
+
+    def cc_fast_nms(self, boxes, masks_coeff, masks_occluded_coeff, proto_data, scores, sem_data, centerness_scores,
                     iou_threshold: float = 0.5, top_k: int = 200):
         # Collapse all the classes into 1
-        scores, classes = conf.max(dim=0)
+        if cfg.train_class:
+            scores, classes = scores[1:].max(dim=0)   # [n_dets]
+        else:
+            # For a specific instance, we only take the fired area into account to calculate its category
+            # Step 1: multiply instances' masks and semantic segmentation to filter fired area
+            # step 2: mean of all pixels in the fired area as its classification confidence
+            h, w = sem_data.size()[:2]
+            sem_data = sem_data.permute(2, 0, 1).contiguous().unsqueeze(0)   # [1, num_class, h, w]
+            det_masks = generate_mask(proto_data, masks_coeff, boxes)
+            downsampled_det_masks = F.interpolate(det_masks.unsqueeze(1).float(), (h, w),
+                                                  mode='bilinear', align_corners=False).gt(0.5)
+            scores_conf = (sem_data * downsampled_det_masks).sum(dim=(2, 3)) / downsampled_det_masks.sum(dim=(2, 3))
+            scores_conf, classes = scores_conf.max(dim=1)
+            scores = scores * scores_conf  # [n_dets]
 
         if centerness_scores is not None:
-            scores = scores * centerness_scores
+            scores = scores * centerness_scores.view(1, -1)
 
         _, idx = scores.sort(0, descending=True)
         idx = idx[:top_k]
-        idx_out = None
 
         if len(idx) == 0:
             out_after_NMS = {'box': torch.Tensor(), 'mask_coeff': torch.Tensor(), 'class': torch.Tensor(),
@@ -109,12 +112,9 @@ class Detect_TF(object):
             boxes_idx = boxes[idx]
             iou = jaccard(boxes_idx, boxes_idx)
             if cfg.nms_as_miou:
-                det_masks = proto_data @ cfg.mask_proto_coeff_activation(masks_coeff.t())
-                det_masks = cfg.mask_proto_mask_activation(det_masks)
-                _, det_masks = crop(det_masks, boxes)
-                det_masks = det_masks.permute(2, 0, 1).contiguous()  # [n_masks, h, w]
-                det_masks = det_masks.gt(0.5).float()
-                m_iou = mask_iou(det_masks[idx], det_masks[idx])
+                det_masks_idx = generate_mask(proto_data, masks_coeff[idx], boxes[idx])
+                det_masks_idx = det_masks_idx.gt(0.5).float()
+                m_iou = mask_iou(det_masks_idx, det_masks_idx)
                 iou = iou * 0.5 + m_iou * 0.5
 
             # Zero out the lower triangle of the cosine similarity matrix and diagonal
@@ -131,28 +131,37 @@ class Detect_TF(object):
 
             boxes = boxes[idx_out]
             masks_coeff = masks_coeff[idx_out]
-            if classes is not None:
-                classes = classes[idx_out] + 1
+            classes = classes[idx_out] + 1
             scores = scores[idx_out]
-            if centerness_scores is not None:
-                centerness_scores = centerness_scores[idx_out]
 
-            out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': classes,
-                             'score': scores, 'centerness': centerness_scores, 'proto': proto_data}
+            out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': classes, 'score': scores}
+            if cfg.train_centerness:
+                out_after_NMS['centerness'] = centerness_scores[idx_out]
             if cfg.mask_coeff_for_occluded:
                 out_after_NMS['mask_occluded_coeff'] = masks_occluded_coeff
 
-        return idx_out, out_after_NMS
+        return out_after_NMS
 
-    def fast_nms(self, boxes, masks_coeff, proto_data, conf, centerness_scores,
+    def fast_nms(self, boxes, masks_coeff, proto_data, scores, sem_data, centerness_scores,
                  iou_threshold: float = 0.5, top_k: int = 200,
                  second_threshold: bool = True):
 
         if centerness_scores is not None:
             centerness_scores = centerness_scores.view(-1, 1)
-            conf = conf * centerness_scores.t()
+            scores = scores * centerness_scores.t()
 
-        scores, idx = conf.sort(1, descending=True)  # [num_classes, num_dets]
+        if cfg.train_class:
+            scores = scores[1:]
+        else:
+            h, w = sem_data.size()[2:]
+            det_masks = generate_mask(proto_data, masks_coeff, boxes)
+            # resize pos_masks_ref and pos_masks_next to keep the same size with track data
+            downsampled_det_masks = F.interpolate(det_masks.unsqueeze(1).float(), (h, w),
+                                                  mode='bilinear', align_corners=False).gt(0.5)
+            scores_conf = (sem_data * downsampled_det_masks).sum(dim=(2, 3)) / downsampled_det_masks.sum(dim=(2, 3))
+            scores = (scores * scores_conf).t()
+
+        scores, idx = scores.sort(1, descending=True)  # [num_classes, num_dets]
         idx = idx[:, :top_k].contiguous()
         scores = scores[:, :top_k]
 
@@ -162,22 +171,13 @@ class Detect_TF(object):
 
         else:
             num_classes, num_dets = idx.size()
-            boxes = boxes[idx.view(-1), :].view(num_classes, num_dets, 4)
-            masks_coeff = masks_coeff[idx.view(-1), :].view(num_classes, num_dets, -1)
-            if centerness_scores is not None:
-                centerness_scores = centerness_scores[idx.view(-1), :].view(num_classes, num_dets, -1)
-
             iou = jaccard(boxes, boxes)  # [num_classes, num_dets, num_dets]
 
             if cfg.nms_as_miou:
-                det_masks = cfg.mask_proto_coeff_activation(masks_coeff) @ proto_data.permute(2, 0, 1).contiguous()
-                det_masks = cfg.mask_proto_mask_activation(det_masks)  # [n_class, num_dets, h, w]
-                det_masks = det_masks.permute(0, 3, 2, 1).contiguous()
-                det_masks_crop = []
-                for i in range(num_classes):
-                    _, det_masks_cur = crop(det_masks[i], boxes[i])
-                    det_masks_crop.append(det_masks_cur)
-                det_masks = torch.stack(det_masks_crop, dim=0).permute(0, 3, 1, 2).contiguous().gt(0.5).float()
+                boxes = boxes[idx.view(-1), :]
+                masks_coeff = masks_coeff[idx.view(-1), :]
+                det_masks = generate_mask(proto_data, masks_coeff, boxes).view(num_classes, num_dets, proto_data.size(0), proto_data.size(1))
+                det_masks = det_masks.gt(0.5).float()
                 m_iou = mask_iou(det_masks, det_masks)  # [n_class, num_dets, num_dets]
                 iou = iou * 0.5 + m_iou * 0.5
 
@@ -199,27 +199,13 @@ class Detect_TF(object):
             classes = torch.arange(num_classes, device=boxes.device)[:, None].expand_as(keep)
             classes = classes[keep]
 
-            boxes = boxes[keep]
-            masks_coeff = masks_coeff[keep]
-            if centerness_scores is not None:
-                centerness_scores = centerness_scores[keep]
+            boxes = boxes.view(num_classes, num_dets, -1)[keep]
+            masks_coeff = masks_coeff.view(num_classes, num_dets, -1)[keep]
             scores = scores[keep]
-            idx_out = idx[keep]
 
-            # Only keep the top cfg.max_num_detections highest scores across all classes
-            scores, idx = scores.sort(0, descending=True)
-            idx = idx[:cfg.max_num_detections]
-            scores = scores[:cfg.max_num_detections]
-
-            classes = classes[idx]
-            boxes = boxes[idx]
-            masks_coeff = masks_coeff[idx]
+            out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': classes, 'score': scores}
             if centerness_scores is not None:
-                centerness_scores = centerness_scores[idx]
-            idx_out = idx_out[idx]
+                out_after_NMS['centerness'] = centerness_scores[idx.view(-1), :].view(num_classes, num_dets, -1)[keep]
 
-            out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': classes,
-                             'score': scores, 'centerness': centerness_scores, 'proto': proto_data}
-
-        return idx_out, out_after_NMS
+        return out_after_NMS
 

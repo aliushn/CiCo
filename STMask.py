@@ -32,9 +32,6 @@ class STMask(nn.Module):
 
         self.backbone = construct_backbone(cfg.backbone)
 
-        if cfg.freeze_bn:
-            self.freeze_bn()
-
         # Compute mask_dim here and add it back to the config. Make sure Yolact's constructor is called early!
         if cfg.mask_type == mask_type.direct:
             cfg.mask_dim = cfg.mask_size ** 2
@@ -69,9 +66,6 @@ class STMask(nn.Module):
         self.num_priors = len(self.pred_scales[0])
         src_channels = self.backbone.channels
 
-        if cfg.use_maskiou:
-            self.maskiou_net = FastMaskIoUNet()
-
         if cfg.fpn is not None:
             # Some hacky rewiring to accomodate the FPN
             self.fpn = FPN([src_channels[i] for i in self.selected_layers])
@@ -100,7 +94,7 @@ class STMask(nn.Module):
 
             self.prediction_layers.append(pred)
 
-        if cfg.temporal_fusion_module or cfg.use_FEELVOS:
+        if cfg.use_temporal_info:
             # temporal fusion
             self.correlation_selected_layer = cfg.correlation_selected_layer
             # evaluation for frame-level tracking
@@ -112,7 +106,7 @@ class STMask(nn.Module):
             if cfg.temporal_fusion_module:
                 corr_channels = 2*in_channels + cfg.correlation_patch_size**2
                 self.TemporalNet = TemporalNet(corr_channels, cfg.mask_proto_n)
-            else:
+            elif cfg.use_FEELVOS:
                 # using FEELVOS, VOS strategy, to track instances from previous to current frame
                 VOS_in_channels = in_channels
                 self.VOS_head, _ = make_net(VOS_in_channels, cfg.VOS_head, include_last_relu=False)
@@ -123,8 +117,6 @@ class STMask(nn.Module):
                                  nms_thresh=cfg.nms_thresh)
             self.Track = Track()
 
-            self.n_prev_inst = 0
-
         # Extra parameters for the extra losses
         if cfg.use_class_existence_loss:
             # This comes from the smallest layer selected
@@ -132,16 +124,18 @@ class STMask(nn.Module):
             self.class_existence_fc = nn.Linear(src_channels[-1], cfg.num_classes - 1)
 
         if cfg.use_semantic_segmentation_loss:
-            self.semantic_seg_conv = nn.Conv2d(src_channels[0], cfg.num_classes - 1, kernel_size=1)
-
-    def save_weights(self, path):
-        """ Saves the model's weights using compression because the file sizes were getting too big. """
-        torch.save(self.state_dict(), path)
+            sem_seg_head = cfg.sem_seg_head + [(cfg.num_classes - 1, 1, {})]
+            self.semantic_seg_conv, _ = make_net(in_channels, sem_seg_head, include_last_relu=False)
+            # self.semantic_seg_conv = nn.Conv2d(src_channels[0], cfg.num_classes - 1, kernel_size=1)
 
     def load_weights(self, path):
         """ Loads weights from a compressed save file. """
         state_dict = torch.load(path)
         model_dict = self.state_dict()
+        for key in list(state_dict.keys()):
+            if key.startswith('module.'):
+                state_dict[key[7:]] = state_dict[key]
+                del state_dict[key]
 
         # For backward compatability, remove these (the new variable is called layers)
         for key in list(state_dict.keys()):
@@ -164,9 +158,9 @@ class STMask(nn.Module):
         model_dict.update(state_dict)
         self.load_state_dict(model_dict)
 
-    def init_weights(self, backbone_path):
+    def init_weights(self, backbone_path, local_rank=1):
         """ Initialize weights for training. """
-        state_dict = torch.load(backbone_path)
+        state_dict = torch.load(backbone_path, map_location=torch.device('cpu'))
         model_dict = self.state_dict()
 
         # only remain same modules and layers between pre-trained model and our model
@@ -177,14 +171,16 @@ class STMask(nn.Module):
                 del state_dict[key]
 
         state_dict = {k: v for k, v in state_dict.items() if k in model_dict}
-        print('parameters without load weights from pre-trained models')
-        print([k for k, v in model_dict.items() if k not in state_dict])
+        if local_rank == 0:
+            print('parameters without load weights from pre-trained models')
+            print([k for k, v in model_dict.items() if k not in state_dict])
         model_dict.update(state_dict)
 
         # Initialize the rest of the conv layers with xavier
         for k, v in model_dict.items():
             if k not in state_dict:
-                print('init weights by Xavier:', k)
+                if local_rank == 0:
+                    print('init weights by Xavier:', k)
                 if 'weight' in k:
                     nn.init.xavier_uniform_(model_dict[k])
                 elif 'bias' in k:
@@ -200,19 +196,7 @@ class STMask(nn.Module):
     def train(self, mode=True):
         super().train(mode)
 
-        if cfg.freeze_bn:
-            self.freeze_bn()
-
-    def freeze_bn(self, enable=False):
-        """ Adapted from https://discuss.pytorch.org/t/how-to-train-with-frozen-batchnorm/12106/8 """
-        for module in self.modules():
-            if isinstance(module, nn.BatchNorm2d):
-                module.train() if enable else module.eval()
-
-                module.weight.requires_grad = enable
-                module.bias.requires_grad = enable
-
-    def forward_single(self, x, key_frame=1):
+    def forward_single(self, x):
         """ The input should be of size [batch_size, 3, img_h, img_w] """
 
         with timer.env('backbone'):
@@ -236,7 +220,8 @@ class STMask(nn.Module):
                     proto_x = fpn_outs[self.proto_src]
 
                 proto_out = self.proto_net(proto_x)
-                proto_out = cfg.mask_proto_prototype_activation(proto_out)
+                if cfg.mask_proto_prototype_activation is not None:
+                    proto_out = cfg.mask_proto_prototype_activation(proto_out)
 
                 # Move the features last so the multiplication is easy
                 proto_out = proto_out.permute(0, 2, 3, 1).contiguous()
@@ -246,57 +231,58 @@ class STMask(nn.Module):
                     bias_shape[1] = 1
                     proto_out = torch.cat([proto_out, torch.ones(*bias_shape)], 1)
 
-        if key_frame:
-            with timer.env('pred_heads'):
-                pred_outs = {'mask_coeff': [], 'priors': []}
+        with timer.env('pred_heads'):
+            pred_outs = {'mask_coeff': [], 'priors': []}
 
-                if cfg.train_boxes:
-                    pred_outs['loc'] = []
+            if cfg.train_boxes:
+                pred_outs['loc'] = []
 
-                if cfg.train_centerness:
-                    pred_outs['centerness'] = []
+            if cfg.train_centerness:
+                pred_outs['centerness'] = []
 
-                if cfg.train_class:
-                    pred_outs['conf'] = []
+            if cfg.train_class:
+                pred_outs['conf'] = []
+            else:
+                pred_outs['stuff'] = []
 
-                if cfg.mask_coeff_for_occluded:
-                    pred_outs['mask_occluded_coeff'] = []
+            if cfg.mask_coeff_for_occluded:
+                pred_outs['mask_occluded_coeff'] = []
 
-                for idx, pred_layer in zip(self.selected_layers, self.prediction_layers):
-                    pred_x = fpn_outs[idx]
+            for idx, pred_layer in zip(self.selected_layers, self.prediction_layers):
+                pred_x = fpn_outs[idx]
 
-                    # A hack for the way dataparallel works
-                    if cfg.share_prediction_module and pred_layer is not self.prediction_layers[0]:
-                        pred_layer.parent = [self.prediction_layers[0]]
+                # A hack for the way dataparallel works
+                if cfg.share_prediction_module and pred_layer is not self.prediction_layers[0]:
+                    pred_layer.parent = [self.prediction_layers[0]]
 
-                    p = pred_layer(pred_x)
+                p = pred_layer(pred_x)
 
-                    for k, v in p.items():
-                        pred_outs[k].append(v)  # [batch_size, h*w*anchors, dim]
+                for k, v in p.items():
+                    pred_outs[k].append(v)  # [batch_size, h*w*anchors, dim]
 
-                    if cfg.backbone_C2_as_features:
-                        idx -= 1
+                if cfg.backbone_C2_as_features:
+                    idx -= 1
 
-                for k, v in pred_outs.items():
-                    pred_outs[k] = torch.cat(v, 1)
+            for k, v in pred_outs.items():
+                pred_outs[k] = torch.cat(v, 1)
 
-            with timer.env('track'):
-                track_out = self.track_net(proto_x).permute(0, 2, 3, 1).contiguous()
-                pred_outs['track'] = track_out
+        with timer.env('track'):
+            pred_outs['track'] = self.track_net(proto_x).permute(0, 2, 3, 1).contiguous()
 
-        else:
-            pred_outs = {}
+        if cfg.use_semantic_segmentation_loss or not cfg.train_class:
+            with timer.env('sem_seg'):
+                pred_outs['sem_seg'] = self.semantic_seg_conv(proto_x).permute(0, 2, 3, 1).contiguous()
 
         pred_outs['proto'] = proto_out
 
         return fpn_outs, pred_outs
 
-    def forward(self, x, img_meta=None, key_frame=1):
+    def forward(self, x, img_meta=None):
         if self.training:
-            batch_size, nf, c, h, w = x.size()
-            fpn_outs, pred_outs = self.forward_single(x.view(-1, c, h, w))
+            batch_size, c, h, w = x.size()
+            fpn_outs, pred_outs = self.forward_single(x)
 
-            if cfg.temporal_fusion_module or cfg.use_FEELVOS:
+            if cfg.use_temporal_info:
                 # calculate correlation map
                 pred_outs['fpn_feat'] = fpn_outs[self.correlation_selected_layer]
 
@@ -304,40 +290,32 @@ class STMask(nn.Module):
             if cfg.use_class_existence_loss:
                 pred_outs['classes'] = self.class_existence_fc(fpn_outs[-1].mean(dim=(2, 3)))
 
-            if cfg.use_semantic_segmentation_loss:
-                pred_outs['segm'] = self.semantic_seg_conv(fpn_outs[0])
-
             # for nn.DataParallel
-            pred_outs['priors'] = pred_outs['priors'].repeat(batch_size*nf, 1, 1)
+            pred_outs['priors'] = pred_outs['priors'].repeat(batch_size, 1, 1)
 
             return pred_outs
         else:
             # track instances frame-by-frame
-            if cfg.temporal_fusion_module or cfg.use_FEELVOS:
-                if img_meta[0]['is_first']:
-                    self.n_prev_inst = 0
-                if self.n_prev_inst == 0:
-                    key_frame = 1
+            if cfg.use_temporal_info:
+                bs = x.size(0)
+                fpn_outs, pred_outs = self.forward_single(x)
 
-                fpn_outs, pred_outs = self.forward_single(x, key_frame)
-
-                if key_frame:
+                if cfg.train_class:
                     pred_outs['conf'] = F.softmax(pred_outs['conf'], -1)
-                    # we only use the bbox features in the P3 layer
-                    pred_outs['fpn_feat'] = fpn_outs[self.correlation_selected_layer]
-                    candidate = generate_candidate(pred_outs)
-                    candidate_after_NMS = self.Detect_TF(self, candidate[0], is_output_candidate=True)
                 else:
-                    candidate_after_NMS = {'fpn_feat': fpn_outs[self.correlation_selected_layer],
-                                           'proto': pred_outs['proto'].squeeze(0)}
-
-                pred_outs_after_NMS, self.n_prev_inst = self.Track_TF(self, candidate_after_NMS, img_meta[0],
-                                                                      key_frame, img=x)
+                    pred_outs['stuff'] = torch.sigmoid(pred_outs['stuff'])
+                # we only use the bbox features in the P3 layer
+                pred_outs['fpn_feat'] = fpn_outs[self.correlation_selected_layer]
+                candidate = generate_candidate(pred_outs)
+                candidate_after_NMS = self.Detect_TF(candidate)
+                pred_outs_after_NMS = []
+                for i in range(bs):
+                    pred_outs_after_NMS.append(self.Track_TF(self, candidate_after_NMS[i], img_meta[i], img=x))
 
             else:
-                bb_outs = self.forward_BB(x)
-                pred_outs = self.forward_head(x, bb_outs)
-                pred_outs['conf'] = F.softmax(pred_outs['conf'], -1)
+                bb_outs, pred_outs = self.forward_single(x)
+                if cfg.train_class:
+                    pred_outs['conf'] = F.softmax(pred_outs['conf'], -1)
                 pred_outs['mask_coeff'] = cfg.mask_proto_coeff_activation(pred_outs['mask_coeff'])
                 # detect instances by NMS for each single frame
                 pred_outs_after_NMS = self.detect(pred_outs, self)

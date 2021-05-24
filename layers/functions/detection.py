@@ -31,7 +31,7 @@ class Detect(object):
             raise ValueError('nms_threshold must be non negative.')
         self.conf_thresh = conf_thresh
         
-        self.use_cross_class_nms = False
+        self.use_cross_class_nms = True
         self.use_fast_nms = True
 
     def __call__(self, predictions, net):
@@ -83,7 +83,8 @@ class Detect(object):
                 decoded_boxes = decode(loc_data[batch_idx], prior_data)
 
                 result = self.detect(batch_idx, conf_data, decoded_boxes, centerness_data,
-                                     mask_data, track_data, proto_data, inst_data)
+                                     mask_data, proto_data, inst_data)
+                result['track'] = track_data
 
                 if result is not None and proto_data is not None:
                     result['proto'] = proto_data[batch_idx]
@@ -95,7 +96,7 @@ class Detect(object):
         return out
 
     def detect(self, batch_idx, conf_preds, decoded_boxes, centerness_data,
-               mask_data, track_data, proto_data, inst_data):
+               mask_data, proto_data, inst_data):
         """ Perform nms for only the max scoring class that isn't background (class 0) """
         assert cfg.train_class or cfg.train_clip_class, \
             'The training process should include train_class or train_clip_class.'
@@ -113,7 +114,6 @@ class Detect(object):
 
         boxes = decoded_boxes[keep, :]
         masks_coeff = mask_data[batch_idx, keep, :]
-        track = track_data[batch_idx, keep, :] if cfg.train_track else None
         proto_data = proto_data[batch_idx]
 
         if inst_data is not None:
@@ -125,23 +125,23 @@ class Detect(object):
         
         if self.use_fast_nms:
             if self.use_cross_class_nms:
-                boxes_aft_nms, masks_aft_nms, track_aft_nms, classes_aft_nms, scores_aft_nms, \
+                boxes_aft_nms, masks_aft_nms, classes_aft_nms, scores_aft_nms, \
                 centerness_score_aft_nms, idx_out = self.cc_fast_nms(boxes, masks_coeff, proto_data,
-                                                                     track, scores, centerness_scores,
+                                                                     scores, centerness_scores,
                                                                      self.nms_thresh, self.top_k)
             else:
-                boxes_aft_nms, masks_aft_nms, track_aft_nms, classes_aft_nms, scores_aft_nms, idx_out = \
-                    self.fast_nms(boxes, masks_coeff, proto_data, track, scores, self.nms_thresh, self.top_k)
+                boxes_aft_nms, masks_aft_nms, classes_aft_nms, scores_aft_nms, idx_out = \
+                    self.fast_nms(boxes, masks_coeff, proto_data, scores, self.nms_thresh, self.top_k)
         else:
-            boxes_aft_nms, masks_aft_nms, track_aft_nms, classes_aft_nms, scores_aft_nms = \
-                self.traditional_nms(boxes, masks_coeff, track, scores, self.nms_thresh, self.conf_thresh)
+            boxes_aft_nms, masks_aft_nms, classes_aft_nms, scores_aft_nms = \
+                self.traditional_nms(boxes, masks_coeff, scores, self.nms_thresh, self.conf_thresh)
 
         idx = torch.arange(len(keep))[keep][idx_out]
 
-        return {'box': boxes_aft_nms, 'mask_coeff': masks_aft_nms, 'track': track_aft_nms, 'class': classes_aft_nms,
+        return {'box': boxes_aft_nms, 'mask_coeff': masks_aft_nms, 'class': classes_aft_nms,
                 'score': scores_aft_nms, 'centerness': centerness_score_aft_nms, 'bbox_idx': idx}
 
-    def cc_fast_nms(self, boxes, masks_coeff, proto_data, track, conf, centerness_scores,
+    def cc_fast_nms(self, boxes, masks_coeff, proto_data, conf, centerness_scores,
                     iou_threshold: float = 0.5, top_k: int = 200):
         # Collapse all the classes into 1
         scores, classes = conf.max(dim=0)
@@ -178,15 +178,13 @@ class Detect(object):
 
         boxes = boxes[idx_out]
         masks_coeff = masks_coeff[idx_out]
-        if track is not None:
-            track = track[idx_out]
         if classes is not None:
             classes = classes[idx_out] + 1
         scores = scores[idx_out]  # conf.max(dim=0)[0][idx_out]  # scores[idx_out]
         if centerness_scores is not None:
             centerness_scores = centerness_scores[idx_out]
 
-        return boxes, masks_coeff, track, classes, scores, centerness_scores, idx_out
+        return boxes, masks_coeff, classes, scores, centerness_scores, idx_out
 
     def coefficient_nms(self, coeffs, scores, cos_threshold=0.9, top_k=400):
         _, idx = scores.sort(0, descending=True)
@@ -211,7 +209,7 @@ class Detect(object):
         return idx_out, idx_out.size(0)
 
     def fast_nms(self, boxes, masks_coeff, proto_data,
-                 track, scores, iou_threshold:float=0.5, top_k:int=200, second_threshold:bool=True):
+                 scores, iou_threshold:float=0.5, top_k:int=200, second_threshold:bool=True):
         scores, idx = scores.sort(1, descending=True)  # [num_classes, num_dets]
 
         idx = idx[:, :top_k].contiguous()
@@ -221,8 +219,6 @@ class Detect(object):
 
         boxes = boxes[idx.view(-1), :].view(num_classes, num_dets, 4)
         masks_coeff = masks_coeff[idx.view(-1), :].view(num_classes, num_dets, -1)
-        if cfg.train_track:
-            track = track[idx.view(-1), :].view(num_classes, num_dets, -1)
 
         iou = jaccard(boxes, boxes)  # [num_classes, num_dets, num_dets]
         if cfg.nms_as_miou:
@@ -256,9 +252,7 @@ class Detect(object):
         classes = classes[keep]
 
         boxes = boxes[keep]
-        masks = masks[keep]
-        if cfg.train_track:
-            track = track[keep]
+        masks = masks_coeff[keep]
         scores = scores[keep]
         idx_out = idx[keep]
 
@@ -270,13 +264,11 @@ class Detect(object):
         classes = classes[idx]
         boxes = boxes[idx]
         masks = masks[idx]
-        if cfg.train_track:
-            track = track[idx]
         idx_out = idx_out[idx]
 
-        return boxes, masks, track, classes+1, scores, idx_out
+        return boxes, masks, classes+1, scores, idx_out
 
-    def traditional_nms(self, boxes, masks, track, scores, iou_threshold=0.5, conf_thresh=0.05):
+    def traditional_nms(self, boxes, masks, scores, iou_threshold=0.5, conf_thresh=0.05):
         num_classes = scores.size(0)
 
         idx_lst = []
@@ -317,4 +309,4 @@ class Detect(object):
         classes = classes[idx2]
 
         # Undo the multiplication above
-        return boxes[idx] / cfg.max_size, masks[idx], track[idx], classes, scores
+        return boxes[idx] / cfg.max_size, masks[idx], classes, scores

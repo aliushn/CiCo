@@ -116,7 +116,7 @@ def change(gt, priors):
     return -torch.sqrt( (diff ** 2).sum(dim=2) )
 
 
-def match(pos_thresh, neg_thresh, bbox, labels, ids, priors, loc_data, conf_data, loc_t, conf_t, idx_t, ids_t, idx):
+def match(pos_thresh, neg_thresh, bbox, labels, ids, priors, loc_data, loc_t, conf_t, idx_t, ids_t, idx):
     """Match each prior box with the ground truth box of the highest jaccard
     overlap, encode the bounding boxes, then return the matched indices
     corresponding to both confidence and location preds.
@@ -128,7 +128,6 @@ def match(pos_thresh, neg_thresh, bbox, labels, ids, priors, loc_data, conf_data
         ids: (tensor) the instance ids of each gt bbox
         priors: (tensor) Prior boxes from priorbox layers, Shape: [n_priors,4]. [cx,cy,w,h]
         loc_data: (tensor) The predicted bbox regression coordinates for this batch. [cx,cy,w,h]
-        conf_data: (tensor) The predicted classification confidence scores for this batch. [num_obj, num_classes]
         loc_t: (tensor) Tensor to be filled w/ endcoded location targets.
         conf_t: (tensor) Tensor to be filled w/ matched indices for conf preds. Note: -1 means neutral.
         idx_t: (tensor) Tensor to be filled w/ the index of the matched gt box for each prior.
@@ -149,16 +148,6 @@ def match(pos_thresh, neg_thresh, bbox, labels, ids, priors, loc_data, conf_data
     # delete the bboxes that inlcude more than two instance with a high BIoU
     multi_instance_in_box = (overlaps > pos_thresh-0.1).sum(0) > 1
     best_truth_overlap[multi_instance_in_box] = (pos_thresh + neg_thresh) / 2
-
-    # consider classification scores for choosing positive samples
-    keep_cla = best_truth_overlap > pos_thresh
-    if keep_cla.sum() > 0:
-        cla_score = F.cross_entropy(conf_data[keep_cla], labels[best_truth_idx[keep_cla]], reduction='none')
-        cla_score = 2 / (1 + cla_score.exp())  # value in [0, 1]
-        best_truth_overlap[keep_cla] = best_truth_overlap[keep_cla] + cla_score
-        cla_thresh = cla_score.mean()
-        pos_thresh = pos_thresh + cla_thresh
-        neg_thresh = neg_thresh + cla_thresh
 
     # We want to ensure that each gt gets used at least once so that we don't
     # waste any training data. In order to do that, find the max overlap anchor

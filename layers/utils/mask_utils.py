@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from .box_utils import crop, crop_sipmask
-from datasets import cfg
+from datasets import cfg, activation_func
 
 
 def generate_rel_coord(det_bbox, mask_h, mask_w, sigma_scale=2):
@@ -108,18 +108,31 @@ def plot_protos(protos, pred_masks, img_meta, num):
                          str(num), '.png']))
 
 
-def generate_mask(proto_data, mask_coeff, bbox):
+def generate_mask(proto_data, mask_coeff, bbox=None):
+    '''
+    :param proto_data: [h, w, 32]
+    :param mask_coeff: [n, 32]
+    :param bbox: [n, 4]
+    :return:
+    '''
     # get masks
     if cfg.use_sipmask:
         pred_masks00 = cfg.mask_proto_mask_activation(proto_data @ mask_coeff[:, :cfg.mask_proto_n].t())
         pred_masks01 = cfg.mask_proto_mask_activation(proto_data @ mask_coeff[:, cfg.mask_proto_n:cfg.mask_proto_n*2].t())
         pred_masks10 = cfg.mask_proto_mask_activation(proto_data @ mask_coeff[:, cfg.mask_proto_n*2:cfg.mask_proto_n*3].t())
         pred_masks11 = cfg.mask_proto_mask_activation(proto_data @ mask_coeff[:, cfg.mask_proto_n*3:].t())
-        pred_masks = crop_sipmask(pred_masks00, pred_masks01, pred_masks10, pred_masks11, bbox)
+        if bbox is not None:
+            pred_masks = crop_sipmask(pred_masks00, pred_masks01, pred_masks10, pred_masks11, bbox)
     else:
+        mask_coeff = cfg.mask_proto_coeff_activation(mask_coeff)
+        if cfg.mask_proto_coeff_activation == activation_func.sigmoid:
+            # hope to get mask coefficients with L0 sparsity
+            mask_coeff = mask_coeff * 2 - 1
+            mask_coeff = torch.clamp(mask_coeff, min=0)
         pred_masks = proto_data @ mask_coeff.t()
         pred_masks = cfg.mask_proto_mask_activation(pred_masks)
-        _, pred_masks = crop(pred_masks, bbox)  # [mask_h, mask_w, n]
+        if bbox is not None:
+            _, pred_masks = crop(pred_masks, bbox)  # [mask_h, mask_w, n]
 
     det_masks = pred_masks.permute(2, 0, 1).contiguous()  # [n_masks, h, w]
 

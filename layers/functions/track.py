@@ -83,7 +83,7 @@ class Track(object):
         mask_h, mask_w = proto_data.size()[:2]
 
         # get masks
-        det_masks = generate_mask(proto_data, det_masks_coff, det_bbox, cfg.mask_proto_mask_activation)
+        det_masks = generate_mask(proto_data, cfg.mask_proto_coeff_activation(det_masks_coff), det_bbox)
         soft_crop = generate_rel_coord(det_bbox, mask_h, mask_w, sigma_scale=1.8)
         det_masks_out = soft_crop * det_masks
         det_masks = det_masks.gt(0.5).float()
@@ -221,7 +221,7 @@ class Track(object):
         if cfg.remove_false_inst:
             keep = det_obj_ids >= 0
             for k in detection:
-                if k not in {'proto', 'bbox_idx', 'priors', 'loc_t'} and detection[k] is not None:
+                if k not in {'proto', 'bbox_idx', 'priors', 'loc_t', 'track'} and detection[k] is not None:
                     detection[k] = detection[k][keep]
 
         return detection

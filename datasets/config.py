@@ -135,7 +135,7 @@ dataset_base = Config({
 
 train_YouTube_VOS_dataset = dataset_base.copy({
     'img_prefix': '../datasets/YouTube_VOS2019/train/JPEGImages',
-    'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/valid_sub.json',
+    'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/train_sub.json',
     # 'extra_aug': dict(random_crop=dict(min_ious=(0.1, 0.3, 0.5, 0.7, 0.9), min_crop_size=0.3)),
     # 'extra_aug': dict(expand=dict(mean=(123.675, 116.28, 103.53), to_rgb=True, ratio_range=(1, 3))),
 })
@@ -388,7 +388,7 @@ YouTube_VOS_base_config = Config({
     'classes': YouTube_VOS_CLASSES,
     'COLORS': COLORS,
 
-    'max_iter': 600000,
+    'max_epoch': 12,
 
     # The maximum number of detections for evaluation
     'max_num_detections': 100,
@@ -400,7 +400,7 @@ YouTube_VOS_base_config = Config({
 
     # For each lr step, what to multiply the lr with
     'gamma': 0.1,
-    'lr_steps': (280000, 360000, 400000),
+    'lr_steps': (6, 9),
 
     # Initial learning rate to linearly warmup from (if until > 0)
     'lr_warmup_init': 1e-4,
@@ -410,6 +410,7 @@ YouTube_VOS_base_config = Config({
 
     # The terms to scale the respective loss by
     'conf_alpha': 1,
+    'stuff_alpha': 1,
     'bbox_alpha': 1.5,
     'track_alpha': 10,
     'mask_alpha': 0.4 / 256 * 140 * 140,  # Some funky equation. Don't worry about it.
@@ -436,9 +437,9 @@ YouTube_VOS_base_config = Config({
     'mask_proto_src': None,
     'mask_proto_net': [(256, 3, {}), (256, 3, {})],
     'mask_proto_bias': False,
-    'mask_proto_prototype_activation': activation_func.relu,
+    'mask_proto_prototype_activation': None,  # activation_func.relu,
     'mask_proto_mask_activation': activation_func.sigmoid,
-    'mask_proto_coeff_activation': activation_func.tanh,
+    'mask_proto_coeff_activation': activation_func.sigmoid,
     'mask_proto_crop': False,
     'mask_proto_crop_expand': 0,
     'mask_proto_loss': None,
@@ -471,10 +472,6 @@ YouTube_VOS_base_config = Config({
     'discard_box_width': 4 / 550,
     'discard_box_height': 4 / 550,
 
-    # If using batchnorm anywhere in the backbone, freeze the batchnorm layer during training.
-    # Note: any additional batch norm layers after the backbone will not be frozen.
-    'freeze_bn': False,
-
     # Set this to a config object if you want an FPN (inherit from fpn_base). See fpn_base for details.
     'fpn': None,
 
@@ -505,10 +502,6 @@ YouTube_VOS_base_config = Config({
     # This branch is only evaluated during training time and is just there for multitask learning.
     'use_semantic_segmentation_loss': False,
     'semantic_segmentation_alpha': 1,
-
-    # Adds another branch to the netwok to predict Mask IoU.
-    'use_mask_scoring': False,
-    'mask_scoring_alpha': 1,
 
     # Match gt boxes using the Box2Pix change metric instead of the standard IoU metric.
     # Note that the threshold you set for iou_threshold should be negative with this setting on.
@@ -572,27 +565,11 @@ YouTube_VOS_base_config = Config({
     # Don't turn this on if you're not using yolo regressors!
     'use_prediction_matching': False,
 
-    # A list of settings to apply after the specified iteration. Each element of the list should look like
-    # (iteration, config_dict) where config_dict is a dictionary you'd pass into a config object's init.
-    'delayed_settings': [],
-
     # Use command-line arguments to set this.
     'no_jit': False,
 
     'backbone': None,
     'name': 'base_config',
-
-    # Fast Mask Re-scoring Network
-    # Inspried by Mask Scoring R-CNN (https://arxiv.org/abs/1903.00241)
-    # Do not crop out the mask with bbox but slide a convnet on the image-size mask,
-    # then use global pooling to get the final mask score
-    'use_maskiou': False,
-
-    # Archecture for the mask iou network. A (num_classes-1, 1, {}) layer is appended to the end.
-    'maskiou_net': [],
-
-    # Discard predicted masks whose area is less than this
-    'discard_mask_area': -1,
 
     'rescore_mask': False,
     'rescore_bbox': False,
@@ -618,11 +595,12 @@ STMask_base_config = YouTube_VOS_base_config.copy({
     'classes': YouTube_VOS_CLASSES,
 
     # Training params
-    'lr_steps': (150000, 200000),
-    'max_iter': 250000,
+    'lr_steps': (9, 15),
+    'max_epoch': 18,
 
     # loss
     'conf_alpha': 6.125,
+    'stuff_alpha': 10,
     'bbox_alpha': 1.5,
     'BIoU_alpha': 0.5,
     'bboxiou_alpha': 5,
@@ -651,20 +629,21 @@ STMask_base_config = YouTube_VOS_base_config.copy({
     'extra_head_net': [(256, 3, {'padding': 1})],
     'extra_layers': (2, 2, 2),
     'head_layer_params': {0: {'kernel_size': [3, 3], 'padding': (1, 1)},
-                          1: {'kernel_size': [3, 5], 'padding': (1, 2)},
-                          2: {'kernel_size': [5, 3], 'padding': (2, 1)}},
+                          1: {'kernel_size': [3, 3], 'padding': (1, 1)},
+                          2: {'kernel_size': [3, 3], 'padding': (1, 1)}},
 
     # Mask Settings
     'mask_type': mask_type.lincomb,
     'mask_alpha': 6.125,
     'mask_proto_src': 0,
     'mask_proto_crop': True,
+    'mask_proto_crop_outside': False,
     'mask_proto_n': 32,
     'mask_proto_net': [(256, 3, {'padding': 1})] * 3 + [(None, -2, {}), (256, 3, {'padding': 1})] + [(32, 1, {})],
     'mask_proto_normalize_emulate_roi_pooling': False,
     'discard_mask_area': 5 * 5,
     'mask_proto_coeff_diversity_loss': False,
-    'mask_proto_crop_with_pred_box': True,
+    'mask_proto_crop_with_pred_box': False,
     'mask_coeff_for_occluded': False,
     'mask_occluded_alpha': 6.125,
 
@@ -674,17 +653,21 @@ STMask_base_config = YouTube_VOS_base_config.copy({
 
     # train boxes
     'train_boxes': True,
-    'train_class': True,
-    'train_centerness': True,
+    'train_class': False,
+    'train_centerness': False,
 
     # Track settings
     'train_track': True,
-    'match_coeff': [0, 0.7, 0.3, 0],   # scores, mask_iou, box_iou, label
+    'match_coeff': [0, 3.5, 1.5, 0],   # scores, mask_iou, box_iou, label
     'track_net': [(256, 3, {'padding': 1})] * 2 + [(128, 1, {})],
+    'track_crop_with_pred_mask': False,
     'track_crop_with_pred_box': False,
 
+    # temporal settings
+    'use_temporal_info': True,
+
     # temporal fusion module settings
-    'temporal_fusion_module': True,
+    'temporal_fusion_module': False,
     'correlation_patch_size': 11,
     'correlation_selected_layer': 1,
     'boxshift_with_pred_box': False,
@@ -713,15 +696,16 @@ STMask_base_config = YouTube_VOS_base_config.copy({
     'crowd_iou_threshold': 0.7,
     'use_conf_cross_frames': False,
     'use_boxiou_loss': True,
-    'use_maskiou_loss': False,
-    'use_semantic_segmentation_loss': False,
+    'use_maskiou_loss': True,
+    'use_semantic_segmentation_loss': True,
+    'sem_seg_head': [(256, 3, {'padding': 1})] * 2,
 
     # eval
     'interval_key_frame': 1,
-    'nms_conf_thresh': 0.05,
+    'nms_conf_thresh': 0.1,  # 0.05,
     'nms_thresh': 0.5,
-    'eval_conf_thresh': 0.05,
-    'candidate_conf_thresh': 0.05,
+    'eval_conf_thresh': 0.1,  # 0.05,
+    'candidate_conf_thresh': 0.1,  # 0.05,
     'nms_as_miou': True,
     'remove_false_inst': True,
     'add_missed_masks': False,
@@ -829,9 +813,6 @@ STMask_darknet53_config = STMask_base_config.copy({
 
 STMask_plus_base_OVIS_config = STMask_plus_base_config.copy({
     'name': 'STMask_plus_base_OVIS',
-    # Training params
-    'lr_steps': (100000, 150000),
-    'max_iter': 200000,
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
@@ -844,9 +825,6 @@ STMask_plus_base_OVIS_config = STMask_plus_base_config.copy({
 
 STMask_plus_base_ada_OVIS_config = STMask_plus_base_ada_config.copy({
     'name': 'STMask_plus_base_ada_OVIS',
-    # Training params
-    'lr_steps': (100000, 150000),
-    'max_iter': 200000,
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
@@ -859,9 +837,6 @@ STMask_plus_base_ada_OVIS_config = STMask_plus_base_ada_config.copy({
 
 STMask_plus_resnet50_OVIS_config = STMask_plus_resnet50_config.copy({
     'name': 'STMask_plus_resnet50_OVIS',
-    # Training params
-    'lr_steps': (100000, 150000),
-    'max_iter': 200000,
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
@@ -874,9 +849,6 @@ STMask_plus_resnet50_OVIS_config = STMask_plus_resnet50_config.copy({
 
 STMask_plus_resnet50_ada_OVIS_config = STMask_plus_resnet50_ada_config.copy({
     'name': 'STMask_plus_resnet50_ada_OVIS',
-    # Training params
-    'lr_steps': (100000, 150000),
-    'max_iter': 200000,
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
@@ -890,9 +862,6 @@ STMask_plus_resnet50_ada_OVIS_config = STMask_plus_resnet50_ada_config.copy({
 
 STMask_plus_base_YTVIS2021_config = STMask_plus_base_config.copy({
     'name': 'STMask_plus_base_YTVIS2021',
-    # Training params
-    'lr_steps': (150000, 250000, 300000),
-    'max_iter': 350000,
 
     # Dataset stuff
     'train_dataset': train_YouTube_VOS2021_dataset,
@@ -905,9 +874,6 @@ STMask_plus_base_YTVIS2021_config = STMask_plus_base_config.copy({
 
 STMask_plus_base_ada_YTVIS2021_config = STMask_plus_base_ada_config.copy({
     'name': 'STMask_plus_base_ada_YTVIS2021',
-    # Training params
-    'lr_steps': (150000, 250000, 300000),
-    'max_iter': 350000,
 
     # Dataset stuff
     'train_dataset': train_YouTube_VOS2021_dataset,
@@ -920,9 +886,6 @@ STMask_plus_base_ada_YTVIS2021_config = STMask_plus_base_ada_config.copy({
 
 STMask_plus_resnet50_YTVIS2021_config = STMask_plus_resnet50_config.copy({
     'name': 'STMask_plus_resnet50_YTVIS2021',
-    # Training params
-    'lr_steps': (150000, 250000, 300000),
-    'max_iter': 350000,
 
     # Dataset stuff
     'train_dataset': train_YouTube_VOS2021_dataset,
@@ -935,9 +898,6 @@ STMask_plus_resnet50_YTVIS2021_config = STMask_plus_resnet50_config.copy({
 
 STMask_plus_resnet50_ada_YTVIS2021_config = STMask_plus_resnet50_ada_config.copy({
     'name': 'STMask_plus_resnet50_ada_YTVIS2021',
-    # Training params
-    'lr_steps': (150000, 250000, 300000),
-    'max_iter': 350000,
 
     # Dataset stuff
     'train_dataset': train_YouTube_VOS2021_dataset,

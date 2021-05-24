@@ -10,10 +10,11 @@ from matplotlib.patches import Polygon
 from datasets import cfg, mask_type, MEANS, STD, activation_func
 from utils.augmentations import Resize
 from utils import timer
+import os
 from .box_utils import crop, sanitize_coordinates, center_size
 
 
-def postprocess_ytbvis(det_output, pad_h, pad_w, img_meta, interpolation_mode='bilinear',
+def postprocess_ytbvis(detection, pad_h, pad_w, img_meta, interpolation_mode='bilinear',
                        display_mask=False, visualize_lincomb=False, crop_masks=True, score_threshold=0,
                        img_ids=None, mask_det_file=None):
     """
@@ -34,8 +35,6 @@ def postprocess_ytbvis(det_output, pad_h, pad_w, img_meta, interpolation_mode='b
         - masks   [num_det, h, w]: Full image masks for each detection.
     """
 
-    net = det_output['net']
-    detection = det_output['detection']
     dets = {}
     for k, v in detection.items():
         dets[k] = v.clone()
@@ -52,9 +51,9 @@ def postprocess_ytbvis(det_output, pad_h, pad_w, img_meta, interpolation_mode='b
     if score_threshold > 0:
         keep = dets['score'] > score_threshold
 
-        for k in dets:
-            if k not in {'proto', 'bbox_idx', 'priors', 'embed_vectors', 'box_shift'} and dets[k] is not None:
-                dets[k] = dets[k][keep]
+        for k, v in dets.items():
+            if k not in {'proto', 'priors'} and v is not None:
+                dets[k] = v[keep]
 
     # Undo the padding introduced with preserve_aspect_ratio
     if cfg.preserve_aspect_ratio and dets['score'].nelement() != 0:
@@ -62,9 +61,9 @@ def postprocess_ytbvis(det_output, pad_h, pad_w, img_meta, interpolation_mode='b
         boxes = dets['box']
         boxes = center_size(boxes)
         not_outside = ((boxes[:, 0] > s_w) + (boxes[:, 1] > s_h)) < 1  # not (a or b)
-        for k in dets:
-            if k not in {'proto', 'bbox_idx', 'priors', 'embed_vectors', 'box_shift'} and dets[k] is not None:
-                dets[k] = dets[k][not_outside]
+        for k, v in dets.items():
+            if k not in {'proto', 'priors'} and v is not None:
+                dets[k] = v[not_outside]
 
     if dets['score'].size(0) == 0:
         dets['segm'] = torch.Tensor()
@@ -72,14 +71,14 @@ def postprocess_ytbvis(det_output, pad_h, pad_w, img_meta, interpolation_mode='b
 
     # Actually extract everything from dets now
     boxes = dets['box']
-    masks_coeff = dets['mask_coeff']
+    mask_coeff = dets['mask_coeff']
     masks = dets['mask']
     proto_data = dets['proto']
     # normlized_coeff = F.normalize(masks_coeff, dim=1)
     # sim = torch.mm(normlized_coeff, normlized_coeff.t())
 
     if visualize_lincomb:
-        display_lincomb(proto_data, masks_coeff, img_ids, mask_det_file)
+        display_lincomb(proto_data, mask_coeff, img_ids, mask_det_file)
 
     # Undo padding for masks
     masks = masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
@@ -187,26 +186,30 @@ def display_lincomb(proto_data, masks, img_ids=None, mask_det_file=None):
         for y in range(arr_h):
             for x in range(arr_w):
                 i = arr_w * y + x
+                proto_data_cur = proto_data[:, :, idx[i]]
 
                 if i == 0:
-                    running_total = proto_data[:, :, idx[i]].cpu().numpy() * coeffs_sort[i]
+                    running_total = proto_data_cur.cpu().numpy() * coeffs_sort[i]
                 else:
-                    running_total += proto_data[:, :, idx[i]].cpu().numpy() * coeffs_sort[i]
+                    running_total += proto_data_cur.cpu().numpy() * coeffs_sort[i]
 
                 running_total_nonlin = running_total
                 if cfg.mask_proto_mask_activation == activation_func.sigmoid:
                     running_total_nonlin = (1 / (1 + np.exp(-running_total_nonlin)))
 
-                arr_img[y * proto_h:(y + 1) * proto_h, x * proto_w:(x + 1) * proto_w] = (proto_data[:, :,
-                                                                                         idx[i]] / torch.max(
-                    proto_data[:, :, idx[i]])).cpu().numpy() * coeffs_sort[i]
+                arr_img[y * proto_h:(y + 1) * proto_h, x * proto_w:(x + 1) * proto_w] = \
+                    ((proto_data_cur - torch.min(proto_data_cur)) / torch.max(proto_data_cur)).cpu().numpy() * coeffs_sort[i]
                 arr_run[y * proto_h:(y + 1) * proto_h, x * proto_w:(x + 1) * proto_w] = (
                             running_total_nonlin > 0.5).astype(np.float)
-        plt.imshow(arr_img)
+        plt.imshow(arr_img*10)
         plt.axis('off')
+        root_dir = ''.join([mask_det_file[:-12], 'out_proto/', str(img_ids[0]), '/'])
+        if not os.path.exists(root_dir):
+            os.makedirs(root_dir)
+
         if img_ids is not None:
             plt.title(str(img_ids))
-            plt.savefig(''.join([mask_det_file[:-12], 'out_proto/', str(img_ids), 'protos.png']))
+            plt.savefig(''.join([root_dir, str(img_ids[1]), '_protos.png']))
         # plt.show()
         # plt.imshow(arr_run)
         # plt.show()
@@ -217,7 +220,7 @@ def display_lincomb(proto_data, masks, img_ids=None, mask_det_file=None):
         plt.imshow(out_masks[:, :, jdx].cpu().numpy())
         if img_ids is not None:
             plt.title(str(img_ids))
-            plt.savefig(''.join([mask_det_file[:-12], 'out_proto/', str(img_ids), str(jdx), 'mask.png']))
+            plt.savefig(''.join([root_dir, str(img_ids[1]), '_', str(jdx), '_mask.png']))
         # plt.show()
 
 

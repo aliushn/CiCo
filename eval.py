@@ -166,8 +166,6 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
                                       img_ids=img_ids,
                                       mask_det_file=args.mask_det_file)
         torch.cuda.synchronize()
-        scores = dets_out['score'][:args.top_k].detach().cpu().numpy()
-        boxes = dets_out['box'][:args.top_k].detach().cpu().numpy()
 
     if 'segm' in dets_out:
         masks = dets_out['segm'][:args.top_k]
@@ -175,6 +173,8 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
     else:
         args.display_masks = False
 
+    scores = dets_out['score'][:args.top_k].detach().cpu().numpy()
+    boxes = dets_out['box'][:args.top_k].detach().cpu().numpy()
     classes = dets_out['class'][:args.top_k].detach().cpu().numpy()
     num_dets_to_consider = min(args.top_k, classes.shape[0])
     color_type = dets_out['box_ids']
@@ -500,7 +500,7 @@ class CustomDataParallel(torch.nn.DataParallel):
         return sum(outputs, [])
 
 
-def validation(net: STMask, valid_data=False, output_metrics_file=None):
+def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None):
     cfg.mask_proto_debug = args.mask_proto_debug
     if not valid_data:
         cfg.valid_sub_dataset.test_mode = True
@@ -525,13 +525,11 @@ def validation(net: STMask, valid_data=False, output_metrics_file=None):
         for it, data_batch in enumerate(data_loader):
             timer.reset()
             with timer.env('Load Data'):
-                images, images_meta, ref_images, ref_images_meta = prepare_data(data_batch, is_cuda=True,
-                                                                                train_mode=False)
+                images, images_meta = prepare_data(data_batch, devices=device, train_mode=False)
                 pad_h, pad_w = images.size()[2:4]
 
             with timer.env('Network Extra'):
-                key_frame = 1 if images_meta[0]['frame_id'] % args.interval_key_frame == 0 else 0
-                preds = net(images, img_meta=images_meta, key_frame=key_frame)
+                preds = net(images, img_meta=images_meta)
 
                 if it == dataset_size - 1:
                     batch_size = len(dataset) % args.batch_size
@@ -578,7 +576,7 @@ def validation(net: STMask, valid_data=False, output_metrics_file=None):
 
 
 def evaluate(net: STMask, dataset):
-    if cfg.temporal_fusion_module or cfg.use_FEELVOS:
+    if cfg.use_temporal_info:
         net.Detect_TF.use_fast_nms = args.fast_nms
     else:
         net.detect.use_fast_nms = args.fast_nms
@@ -602,13 +600,11 @@ def evaluate(net: STMask, dataset):
             timer.reset()
 
             with timer.env('Load Data'):
-                images, images_meta, ref_images, ref_images_meta = prepare_data(data_batch, is_cuda=True,
-                                                                                train_mode=False)
+                images, images_meta = prepare_data(data_batch, train_mode=False, devices=torch.cuda.current_device())
             pad_h, pad_w = images.size()[2:4]
 
             with timer.env('Network Extra'):
-                key_frame = 1 if images_meta[0]['frame_id'] % args.interval_key_frame == 0 else 0
-                preds = net(images, img_meta=images_meta, key_frame=key_frame)
+                preds = net(images, img_meta=images_meta)
 
             # Perform the meat of the operation here depending on our mode.
             if it == dataset_size - 1:
@@ -622,17 +618,15 @@ def evaluate(net: STMask, dataset):
                     if not cfg.display_mask_single:
                         img_numpy = prep_display(preds[batch_id], images[batch_id], pad_h, pad_w,
                                                  img_meta=images_meta[batch_id], img_ids=img_id)
-                    else:
-                        for p in range(preds[batch_id]['detection']['box'].size(0)):
-                            preds_single = {'detection': {}}
-                            for k in preds[batch_id]['detection']:
-                                if preds[batch_id]['detection'][k] is not None and k not in {'proto'}:
-                                    preds_single['detection'][k] = preds[batch_id]['detection'][k][p]
-                                else:
-                                    preds_single['detection'][k] = None
-                            preds_single['net'] = preds[batch_id]['net']
-                            preds_single['detection']['box_ids'] = torch.tensor(-1)
 
+                    else:
+                        for p in range(preds[batch_id]['box'].size(0)):
+                            preds_single = {}
+                            for k, v in preds[batch_id].items():
+                                if k not in {'proto'}:
+                                    preds_single[k] = v[p]
+
+                            preds_single['box_ids'] = torch.tensor(-1)
                             img_numpy = prep_display(preds_single, images[batch_id], pad_h, pad_w,
                                                      img_meta=images_meta[batch_id], img_ids=img_id)
                             plt.imshow(img_numpy)

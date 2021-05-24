@@ -123,72 +123,36 @@ def get_dataset(data_cfg):
     return dset
 
 
-def prepare_data(data_batch, devices: list = None, allocation: list = None, batch_size=None, is_cuda=False,
-                 train_mode=True):
+def prepare_data(data_batch, devices, train_mode=True):
     if train_mode:
         with torch.no_grad():
-            if batch_size is None:
-                batch_size = 1
-            if devices is None:
-                devices = ['cuda:0'] if is_cuda else ['cpu']
-            if allocation is None:
-                allocation = [batch_size // len(devices)] * (len(devices) - 1)
-                allocation.append(batch_size - sum(allocation))  # The rest might need more/less
-
-            images_list = data_batch['img']
-            bboxes_list = data_batch['bboxes']
-            labels_list = data_batch['labels']
-            masks_list = data_batch['masks']
-            ids_list = data_batch['ids']
+            images = torch.cat(data_batch['img']).cuda(devices)
+            bs = images.size(0)
+            bboxes_list = [sum(data_batch['bboxes'], [])[i].cuda(devices) for i in range(bs)]
+            labels_list = [sum(data_batch['labels'], [])[i].cuda(devices) for i in range(bs)]
+            masks_list = [sum(data_batch['masks'], [])[i].cuda(devices) for i in range(bs)]
+            ids_list = [sum(data_batch['ids'], [])[i].cuda(devices) for i in range(bs)]
             images_meta_list = data_batch['img_meta']
-            n_clip = images_list[0].size(0)
 
-            split_images, split_bboxes, split_labels, split_masks, split_ids, split_images_meta = \
-                [[None for alloc in allocation] for _ in range(6)]
-            for idx, device, alloc in zip(range(len(devices)), devices, allocation):
-                split_images[idx] = gradinator(torch.stack(images_list[alloc * idx:alloc * (idx + 1)], dim=0).to(device))
-                for cur_idx in range(alloc):
-                    bboxes_list[alloc * idx + cur_idx] = [gradinator(
-                        bboxes_list[alloc * idx + cur_idx][i].to(device)) for i in range(n_clip)]
-                    labels_list[alloc * idx + cur_idx] = [gradinator(
-                        labels_list[alloc * idx + cur_idx][i].to(device)) for i in range(n_clip)]
-                    masks_list[alloc * idx + cur_idx] = [gradinator(masks_list[alloc * idx + cur_idx][i].to(device))
-                                                         for i in range(n_clip)]
-                    ids_list[alloc * idx + cur_idx] = [gradinator(ids_list[alloc * idx + cur_idx][i].to(device))
-                                                       for i in range(n_clip)]
-
-                split_bboxes[idx] = bboxes_list[alloc * idx:alloc * (idx + 1)]
-                split_labels[idx] = labels_list[alloc * idx:alloc * (idx + 1)]
-                split_masks[idx] = masks_list[alloc * idx:alloc * (idx + 1)]
-                split_ids[idx] = ids_list[alloc * idx:alloc * (idx + 1)]
-                split_images_meta[idx] = images_meta_list[alloc * idx:alloc * (idx + 1)]
-
-            return split_images, split_bboxes, split_labels, split_masks, split_ids, split_images_meta
+            return images, bboxes_list, labels_list, masks_list, ids_list, images_meta_list
     else:
         # [0] is downsample image [1, 3, 384, 640], [1] is original image [1, 3, 736, 1280]
         images = torch.stack([img[0].data for img in data_batch['img']], dim=0)
         images_meta = [img_meta[0].data for img_meta in data_batch['img_meta']]
-        if 'ref_imgs' in data_batch.keys():
-            ref_images = torch.stack([ref_img[0].data for ref_img in data_batch['ref_imgs']], dim=0)
-            ref_images_meta = [ref_img_meta[0].data for ref_img_meta in data_batch['ref_img_metas']]
-        else:
-            ref_images = None
-            ref_images_meta = None
+        # if 'ref_imgs' in data_batch.keys():
+        #     ref_images = torch.stack([ref_img[0].data for ref_img in data_batch['ref_imgs']], dim=0)
+        #     ref_images_meta = [ref_img_meta[0].data for ref_img_meta in data_batch['ref_img_metas']]
+        # else:
+        #     ref_images = None
+        #     ref_images_meta = None
 
-        if is_cuda:
-            images = gradinator(images.cuda())
-            images_meta = images_meta
-            if ref_images is not None:
-                ref_images = gradinator(ref_images.cuda())
-                ref_images_meta = ref_images_meta
-        else:
-            images = gradinator(images)
-            images_meta = images_meta
-            if ref_images is not None:
-                ref_images = gradinator(ref_images)
-                ref_images_meta = ref_images_meta
+        images = gradinator(images.cuda(devices))
+        images_meta = images_meta
+        # if ref_images is not None:
+        #     ref_images = gradinator(ref_images.cuda())
+        #     ref_images_meta = ref_images_meta
 
-        return images, images_meta, ref_images, ref_images_meta
+        return images, images_meta
 
 
 def gradinator(x):

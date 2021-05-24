@@ -66,6 +66,9 @@ class PredictionModule_FC(nn.Module):
 
             if cfg.train_class:
                 self.conf_layer = nn.ModuleList([])
+            else:
+                self.stuff_layer = nn.ModuleList([])
+
             if cfg.mask_coeff_for_occluded:
                 self.mask_occluded_layer = nn.ModuleList([])
 
@@ -89,6 +92,9 @@ class PredictionModule_FC(nn.Module):
                     else:
                         self.conf_layer.append(nn.Conv2d(self.out_channels, self.num_priors * self.num_classes,
                                                          **cfg.head_layer_params[k]))
+                else:
+                    self.stuff_layer.append(nn.Conv2d(self.out_channels, self.num_priors,
+                                                      **cfg.head_layer_params[k]))
 
                 if cfg.use_dcn_mask:
                     self.mask_layer.append(FeatureAlign(self.out_channels,
@@ -117,6 +123,8 @@ class PredictionModule_FC(nn.Module):
 
             if cfg.train_class:
                 self.conf_extra = make_extra(cfg.extra_layers[0], self.out_channels)
+            else:
+                self.stuff_extra = make_extra(cfg.extra_layers[0], self.out_channels)
             self.bbox_extra, self.mask_extra = [make_extra(x, self.out_channels) for x in cfg.extra_layers[:2]]
 
     def forward(self, x):
@@ -141,12 +149,19 @@ class PredictionModule_FC(nn.Module):
 
         if cfg.train_class:
             conf_x = src.conf_extra(x)
+        else:
+            stuff_x = src.stuff_extra(x)
         bbox_x = src.bbox_extra(x)
         mask_x = src.mask_extra(x)
 
-        conf, bbox, centerness_data, mask = [], [], [], []
+        bbox, centerness_data, mask = [], [], []
+        if cfg.train_class:
+            conf = []
+        else:
+            stuff = []
         if cfg.mask_coeff_for_occluded:
             mask_occluded = []
+
         for k in range(len(cfg.head_layer_params)):
             if cfg.train_centerness:
                 centerness_cur = src.centerness_layer[k](bbox_x)
@@ -161,6 +176,9 @@ class PredictionModule_FC(nn.Module):
                 else:
                     conf_cur = src.conf_layer[k](conf_x)
                 conf.append(conf_cur.permute(0, 2, 3, 1).contiguous())
+            else:
+                stuff_cur = src.stuff_layer[k](stuff_x)
+                stuff.append(stuff_cur.permute(0, 2, 3, 1).contiguous())
 
             if cfg.use_dcn_mask:
                 mask_cur = src.mask_layer[k](mask_x, bbox_cur.detach())
@@ -180,6 +198,8 @@ class PredictionModule_FC(nn.Module):
             centerness_data = torch.tanh(centerness_data)
         if cfg.train_class:
             conf = torch.cat(conf, dim=-1).view(x.size(0), -1, src.num_classes)
+        else:
+            stuff = torch.cat(stuff, dim=-1).view(x.size(0), -1, 1)
         mask = torch.cat(mask, dim=-1).view(x.size(0), -1, src.mask_dim)
         # mask = cfg.mask_proto_coeff_activation(mask)
         if cfg.mask_coeff_for_occluded:
@@ -203,6 +223,8 @@ class PredictionModule_FC(nn.Module):
 
         if cfg.train_class:
             preds['conf'] = conf
+        else:
+            preds['stuff'] = stuff
 
         if cfg.mask_coeff_for_occluded:
             preds['mask_occluded_coeff'] = mask_occluded
