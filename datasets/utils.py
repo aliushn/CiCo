@@ -123,18 +123,87 @@ def get_dataset(data_cfg):
     return dset
 
 
-def prepare_data(data_batch, devices, train_mode=True):
-    if train_mode:
-        with torch.no_grad():
-            images = torch.cat(data_batch['img']).cuda(devices)
-            bs = images.size(0)
-            bboxes_list = [sum(data_batch['bboxes'], [])[i].cuda(devices) for i in range(bs)]
-            labels_list = [sum(data_batch['labels'], [])[i].cuda(devices) for i in range(bs)]
-            masks_list = [sum(data_batch['masks'], [])[i].cuda(devices) for i in range(bs)]
-            ids_list = [sum(data_batch['ids'], [])[i].cuda(devices) for i in range(bs)]
-            images_meta_list = data_batch['img_meta']
+def detection_collate_vis(batch):
+    """Custom collate fn for dealing with batches of images that have a different
+    number of associated object annotations (bounding boxes).
 
-            return images, bboxes_list, labels_list, masks_list, ids_list, images_meta_list
+    Arguments:
+        batch: (tuple) A tuple of tensor images and (lists of annotations, masks)
+
+    Return:
+        A tuple containing:
+            1) (tensor) batch of images stacked on their 0 dim
+            2) (list<tensor>, list<tensor>, list<int>) annotations for a given image are stacked
+                on 0 dim. The output gt is a tuple of annotations and masks.
+    """
+    batch_out = {}
+    # batch_out['img'] = torch.cat([batch[i]['img'].data for i in range(batch_size)])
+    # if 'ref_imgs' in batch[0].keys():
+    #     batch_out['ref_imgs'] = torch.cat([batch[i]['ref_imgs'].data for i in range(batch_size)])
+
+    for k in batch[0].keys():
+        batch_out[k] = []
+
+    for i in range(len(batch)):
+        for k in batch_out.keys():
+            if isinstance(batch[i][k], list):
+                batch_out[k].append(batch[i][k])
+            else:
+                batch_out[k].append(batch[i][k].data)
+
+    return batch_out
+
+
+def detection_collate_coco(batch):
+    """Custom collate fn for dealing with batches of images that have a different
+    number of associated object annotations (bounding boxes).
+
+    Arguments:
+        batch: (tuple) A tuple of tensor images and (lists of annotations, masks)
+
+    Return:
+        A tuple containing:
+            1) (tensor) batch of images stacked on their 0 dim
+            2) (list<tensor>, list<tensor>, list<int>) annotations for a given image are stacked
+                on 0 dim. The output gt is a tuple of annotations and masks.
+    """
+    targets = []
+    imgs = []
+    masks = []
+    num_crowds = []
+
+    for sample in batch:
+        imgs.append(sample[0])
+        targets.append(torch.FloatTensor(sample[1][0]))
+        masks.append(torch.FloatTensor(sample[1][1]))
+        num_crowds.append(sample[1][2])
+
+    return imgs, targets, masks, num_crowds
+
+
+def prepare_data(data_batch, devices, train_type='vis', train_mode=True):
+    if train_mode:
+        if train_type == 'vis':
+            with torch.no_grad():
+                images = torch.cat(data_batch['img']).cuda(devices)
+                bs = images.size(0)
+                bboxes_list = [sum(data_batch['bboxes'], [])[i].cuda(devices) for i in range(bs)]
+                labels_list = [sum(data_batch['labels'], [])[i].cuda(devices) for i in range(bs)]
+                masks_list = [sum(data_batch['masks'], [])[i].cuda(devices) for i in range(bs)]
+                ids_list = [sum(data_batch['ids'], [])[i].cuda(devices) for i in range(bs)]
+                images_meta_list = data_batch['img_meta']
+
+                return images, bboxes_list, labels_list, masks_list, ids_list, images_meta_list
+        else:
+            with torch.no_grad():
+                imgs = torch.stack(data_batch[0]).cuda(devices)
+                bboxes_list = [target[:, :4].cuda(devices) for target in data_batch[1]]
+                labels_list = [target[:, -1].data.long().cuda(devices) for target in data_batch[1]]
+                masks_list = [mask.cuda(devices) for mask in data_batch[2]]
+                num_crowds = data_batch[3]
+
+                return imgs, bboxes_list, labels_list, masks_list, num_crowds
+
     else:
         # [0] is downsample image [1, 3, 384, 640], [1] is original image [1, 3, 736, 1280]
         images = torch.stack([img[0].data for img in data_batch['img']], dim=0)

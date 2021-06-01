@@ -60,62 +60,82 @@ def split_bbox(bbox, idx_bbox_ori, nums_bbox_per_layer):
 
 def generate_track_gaussian(track_data, masks=None, boxes=None):
     '''
-    :param track_data: [h, w, c]
+    :param track_data: [h, w, c] or [n, h, w, c]
     :param masks: [n, h, w]
-    :param boxes:
-    :return:
+    :param boxes: [n, 4]
+    :return: the means and variances of multi-vairants Gaussian distribution for tracking
     '''
 
-    h, w, c = track_data.size()
-    if masks is not None:
-        downsampled_masks = F.interpolate(masks.unsqueeze(1).float(), (h, w),
-                                          mode='bilinear', align_corners=False).gt(0.5)
-        track_data = track_data.permute(2, 0, 1).contiguous().unsqueeze(0)
-        cropped_track_data = track_data * downsampled_masks
-        n_pixels = downsampled_masks.sum(dim=(2, 3))
-        mu = cropped_track_data.sum(dim=(2, 3)) / torch.clamp(n_pixels, min=1)  # [n_pos, c]
-        var = torch.sum((cropped_track_data - mu[:, :, None, None]) ** 2, dim=(2, 3))  # [n_pos, c]
+    dim = len(track_data.size())
+    if dim == 3:
+        track_data = track_data.unsqueeze(0)
+    _, h, w, c = track_data.size()
 
-    elif boxes is not None:
-        c_boxes = center_size(boxes)
-        # only use the center region to evaluate multi-vairants Gaussian distribution
-        c_boxes[:, 2:] = c_boxes[:, 2:] * 0.75
-        crop_mask, cropped_track_data = crop(track_data.unsqueeze(-1).repeat(1, 1, 1, boxes.size(0)),
-                                             point_form(c_boxes))
-        crop_mask = crop_mask.reshape(h * w, c, -1)
-        cropped_track_data = cropped_track_data.reshape(h * w, c, -1)
-        mu = cropped_track_data.sum(0) / crop_mask.sum(0)  # [c, n_pos]
-        var = torch.sum((cropped_track_data - mu.unsqueeze(0)) ** 2, dim=0)  # [c, n_pos]
-        mu, var = mu.t(), var.t()
+    assert masks is not None or boxes is not None
+
+    if masks is not None:
+        # use pred masks as the fired area to crop track_data
+        used_masks = F.interpolate(masks.unsqueeze(1).float(), (h, w),
+                                   mode='bilinear', align_corners=False).gt(0.5).squeeze(1)
+        if boxes is not None:
+            # For small objects, masks are too small to embed distinct Gaussian distribution
+            small_obj = used_masks.sum(dim=(1, 2)) <= h*w*0.1
+            if small_obj.sum() > 0:
+                crop_masks_small, _ = crop(used_masks[small_obj].permute(1, 2, 0).contiguous(), boxes[small_obj])
+                used_masks[small_obj] = used_masks[small_obj] & crop_masks_small.permute(2, 0, 1).contiguous().bool()
+        cropped_track_data = track_data * used_masks.unsqueeze(-1)   # [n_pos, h, w, 3]
 
     else:
-        mu, var = None, None
+        # only use the center region of pred boxes to evaluate multi-vairants Gaussian distribution
+        c_boxes = center_size(boxes)
+        c_boxes[:, 2:] = c_boxes[:, 2:] * 0.75
+        if dim == 3:
+            track_data = track_data.repeat(c_boxes.size(0), 1, 1, 1)
+        used_masks, cropped_track_data = crop(track_data.permute(1, 2, 3, 0).contiguous(),
+                                              point_form(c_boxes))   # [h, w, c, n_pos]
+        used_masks = used_masks.permute(3, 0, 1, 2).contiguous()
+        cropped_track_data = cropped_track_data.permute(3, 0, 1, 2).contiguous()
+
+    n_pixels = used_masks.sum(dim=(1, 2)).view(-1, 1)
+    mu = cropped_track_data.sum(dim=(1, 2)) / torch.clamp(n_pixels, min=1)  # [n_pos, c]
+    var = torch.sum((cropped_track_data - mu[:, None, None, :]) ** 2, dim=(1, 2))  # [n_pos, c]
 
     return mu, var
 
 
-def compute_kl_div(p_mu, p_var, q_mu, q_var):
+def compute_kl_div(p_mu, p_var, q_mu=None, q_var=None):
     '''
     # kl_divergence for two Gaussian distributions, where k is the dim of variables
             # D_kl(p||q) = 0.5(log(torch.norm(Sigma_q) / torch.norm(Sigma_p)) - k
             #                  + (mu_p-mu_q)^T * torch.inverse(Sigma_q) * (mu_p-mu_q))
             #                  + torch.trace(torch.inverse(Sigma_q) * Sigma_p))
-    :param p_mu: [np, c]
-    :param p_var: [np, c]
-    :param q_mu: [nq, c]
-    :param q: [nq, c]
+    :param p_mu:   [bs, np, c]
+    :param p_var: [bs, np, c]
+    :param q_mu:  [bs, nq, c]
+    :param q:    [bs, nq, c]
     :return:
     '''
 
-    first_term = torch.sum(q_var.log(), dim=-1).unsqueeze(0) \
-                 - torch.sum(p_var.log(), dim=-1).unsqueeze(1) - p_mu.size(1)  # [nq, np]
-    # ([1, np, c] - [nq, 1, c]) * [1, np, c] => [nq, np] sec_kj = \sum_{i=1}^C (mu_ij-mu_ik)^2 * sigma_i^{-1}
-    second_term = torch.sum((p_mu.unsqueeze(0) - q_mu.unsqueeze(1)) ** 2 / p_var.unsqueeze(0),
-                            dim=-1)
-    third_term = torch.mm(1. / q_var, p_var.t())  # [nq, np]
-    kl_divergence = 0.5 * (first_term + second_term + third_term)  # [0, +infinite]
+    if q_mu is None:
+        q_mu, q_var = p_mu, p_var
 
-    return kl_divergence
+    use_batch = True
+    if p_mu.dim() == 2:
+        use_batch = False
+        p_mu, p_var = p_mu.unsqueeze(0), p_var.unsqueeze(0)
+        q_mu, q_var = q_mu.unsqueeze(0), q_var.unsqueeze(0)
+
+    p_var = torch.clamp(p_var, min=1e-5)
+    q_var = torch.clamp(q_var, min=1e-5)
+
+    first_term = torch.sum(q_var.log(), dim=-1).unsqueeze(2) \
+                 - torch.sum(p_var.log(), dim=-1).unsqueeze(1) - p_mu.size(2)     # [bs, nq, np]
+    # ([bs, 1, np, c] - [bs, nq, 1, c]) * [bs, 1, np, c] => [bs, nq, np]
+    second_term = torch.sum((p_mu.unsqueeze(1) - q_mu.unsqueeze(2)) ** 2 / p_var.unsqueeze(1), dim=-1)
+    third_term = torch.div(p_var.unsqueeze(1), q_var.unsqueeze(2)).sum(dim=-1)                     # [bs, nq, np]
+    kl_divergence = 0.5 * (first_term + second_term + third_term) + 1e-5                 # value in [0, +infinite]
+
+    return kl_divergence if use_batch else kl_divergence.squeeze(0)
 
 
 def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta, add_bbox_dummy=False,
@@ -139,7 +159,7 @@ def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta
         if use_FEELVOS:
             match_coeff[1] = match_coeff[1] + match_coeff[2]
             match_coeff[2] = 0
-        return 2 * match_ll + match_coeff[0] * bbox_scores \
+        return match_ll + match_coeff[0] * bbox_scores \
                + match_coeff[1] * mask_ious \
                + match_coeff[2] * bbox_ious \
                + match_coeff[3] * label_delta

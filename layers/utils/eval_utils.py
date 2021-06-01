@@ -7,7 +7,6 @@ import pycocotools.mask as mask_util
 from cocoapi.PythonAPI.pycocotools.ytvos import YTVOS
 from cocoapi.PythonAPI.pycocotools.ytvoseval import YTVOSeval
 import matplotlib as plt
-from datasets import cfg
 import cv2
 
 
@@ -28,13 +27,12 @@ def bbox2result_with_id(preds, classes):
     else:
         bboxes = preds['box'].cpu().numpy()
         if preds['class'] is not None:
-            labels = preds['class'].cpu().numpy()
-            # labels_all = preds['class_all'].cpu().numpy()
+            labels = preds['class'].view(-1).cpu().numpy()
         else:
             labels = None
-        scores = preds['score'].cpu().numpy()
+        scores = preds['score'].view(-1).cpu().numpy()
         segms = preds['segm']
-        obj_ids = preds['box_ids'].cpu().numpy()
+        obj_ids = preds['box_ids'].view(-1).cpu().numpy()
         results = {}
         if labels is not None:
             for bbox, label, score, segm, obj_id in zip(bboxes, labels, scores, segms, obj_ids):
@@ -88,9 +86,14 @@ def results2json_videoseg(dataset, results, out_file, sampler_img_ids=None):
 
                 data['video_id'] = vid_id
                 data['score'] = np.array(obj['scores']).mean().item()
-                # majority voting for sequence category
+                # majority voting of those frames with top k highest scores for sequence catgory
+                scores_sorted_idx = np.argsort(-1 * np.stack(obj['scores'], axis=0))
+                cats_with_highest_scores = np.stack(obj['cats'], axis=0)[scores_sorted_idx[:5]]
+                data['category_id'] = np.bincount(cats_with_highest_scores).argmax().item()
+                # print(data['category_id'])
                 # data['category_id'] = np.stack(obj['cats'], axis=0).sum(0).argmax().item()+1
-                data['category_id'] = np.bincount(np.array(obj['cats'])).argmax().item()
+                # majority voting for sequence category
+                # data['category_id'] = np.bincount(np.array(obj['cats'])).argmax().item()
                 vid_seg = []
                 for fid in range(frame_id + 1):
                     if fid in obj['segms']:

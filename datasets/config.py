@@ -3,29 +3,55 @@ from math import sqrt
 import torch
 
 # for making bounding boxes pretty
-COLORS = ((244, 67, 54),
-          (233, 30, 99),
-          (156, 39, 176),
-          (103, 58, 183),
-          (63, 81, 181),
-          (33, 150, 243),
-          (3, 169, 244),
-          (0, 188, 212),
-          (0, 150, 136),
-          (76, 175, 80),
-          (139, 195, 74),
-          (205, 220, 57),
-          (255, 235, 59),
-          (255, 193, 7),
-          (255, 152, 0),
-          (255, 87, 34),
-          (121, 85, 72),
+COLORS = ((244,  67,  54),
+          (233,  30,  99),
+          (156,  39, 176),
+          (103,  58, 183),
+          ( 63,  81, 181),
+          ( 33, 150, 243),
+          (  3, 169, 244),
+          (  0, 188, 212),
+          (  0, 150, 136),
+          ( 76, 175,  80),
+          (139, 195,  74),
+          (205, 220,  57),
+          (255, 235,  59),
+          (255, 193,   7),
+          (255, 152,   0),
+          (255,  87,  34),
+          (121,  85,  72),
           (158, 158, 158),
-          (96, 125, 139))
+          ( 96, 125, 139))
 
 # These are in BGR and are for YouTubeVOS
 MEANS = (123.675, 116.28, 103.53)
 STD = (58.395, 57.12, 57.375)
+
+COCO_CLASSES = ('person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
+                'train', 'truck', 'boat', 'traffic light', 'fire hydrant',
+                'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog',
+                'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe',
+                'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
+                'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat',
+                'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
+                'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl',
+                'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot',
+                'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
+                'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop',
+                'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven',
+                'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase',
+                'scissors', 'teddy bear', 'hair drier', 'toothbrush')
+
+COCO_LABEL_MAP = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8,
+                  9: 9, 10: 10, 11: 11, 13: 12, 14: 13, 15: 14, 16: 15, 17: 16,
+                  18: 17, 19: 18, 20: 19, 21: 20, 22: 21, 23: 22, 24: 23, 25: 24,
+                  27: 25, 28: 26, 31: 27, 32: 28, 33: 29, 34: 30, 35: 31, 36: 32,
+                  37: 33, 38: 34, 39: 35, 40: 36, 41: 37, 42: 38, 43: 39, 44: 40,
+                  46: 41, 47: 42, 48: 43, 49: 44, 50: 45, 51: 46, 52: 47, 53: 48,
+                  54: 49, 55: 50, 56: 51, 57: 52, 58: 53, 59: 54, 60: 55, 61: 56,
+                  62: 57, 63: 58, 64: 59, 65: 60, 67: 61, 70: 62, 72: 63, 73: 64,
+                  74: 65, 75: 66, 76: 67, 77: 68, 78: 69, 79: 70, 80: 71, 81: 72,
+                  82: 73, 84: 74, 85: 75, 86: 76, 87: 77, 88: 78, 89: 79, 90: 80}
 
 YouTube_VOS_CLASSES = ('person', 'giant_panda', 'lizard', 'parrot', 'skateboard',
                        'sedan', 'ape', 'dog', 'snake', 'monkey',
@@ -61,6 +87,7 @@ OVIS_LABEL_MAP = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8,
                   9: 9, 10: 10, 11: 11, 12: 12, 13: 13, 14: 14, 15: 15, 16: 16,
                   17: 17, 18: 18, 19: 19, 20: 20, 21: 21, 22: 22, 23: 23, 24: 24,
                   25: 25}
+
 
 # ----------------------- CONFIG CLASS ----------------------- #
 
@@ -105,10 +132,62 @@ References[]    Holds the configuration for anything you want it to.
         for k, v in vars(self).items():
             print(k, ' = ', v)
 
+# ----------------------- DATASETS ----------------------- #
+
+dataset_base_coco = Config({
+    'name': 'Base Dataset',
+
+    # Training images and annotations
+    'train_images': '../datasets/COCO/train2017/',
+    'train_info': 'path_to_annotation_file',
+
+    # Validation images and annotations.
+    'valid_images': '../datasets/COCO/val2017/',
+    'valid_info': '../datasets/COCO/annotations/',
+
+    # Whether or not to load GT. If this is False, eval.py quantitative evaluation won't work.
+    'has_gt': True,
+
+    # A list of names for each of you classes.
+    'class_names': COCO_CLASSES,
+
+    # COCO class ids aren't sequential, so this is a bandage fix. If your ids aren't sequential,
+    # provide a map from category_id -> index in class_names + 1 (the +1 is there because it's 1-indexed).
+    # If not specified, this just assumes category ids start at 1 and increase sequentially.
+    'label_map': None
+})
+
+coco2014_dataset = dataset_base_coco.copy({
+    'name': 'COCO 2014',
+
+    'train_info': './data/coco/annotations/instances_train2014.json',
+    'valid_info': './data/coco/annotations/instances_val2014.json',
+
+    'label_map': COCO_LABEL_MAP
+})
+
+coco2017_dataset = dataset_base_coco.copy({
+    'name': 'COCO 2017',
+
+    'train_info': '../datasets/COCO/annotations/instances_train2017.json',
+    'valid_info': '../datasets/COCO/annotations/instances_val2017.json',
+
+    'label_map': COCO_LABEL_MAP
+})
+
+coco2017_testdev_dataset = dataset_base_coco.copy({
+    'name': 'COCO 2017 Test-Dev',
+
+    'valid_info': '../datasets/COCO/annotations/image_info_test-dev2017.json',
+    'valid_images': '../datasets/COCO/test2017/',
+    'has_gt': False,
+
+    'label_map': COCO_LABEL_MAP
+})
 
 # ----------------------- DATASETS ----------------------- #
 
-dataset_base = Config({
+dataset_base_vis = Config({
     'type': 'YTVOSDataset',
 
     # images and annotations path
@@ -133,80 +212,81 @@ dataset_base = Config({
 
 })
 
-train_YouTube_VOS_dataset = dataset_base.copy({
+train_YouTube_VOS_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/YouTube_VOS2019/train/JPEGImages',
-    'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/train_sub.json',
+    'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/valid_sub.json',
     # 'extra_aug': dict(random_crop=dict(min_ious=(0.1, 0.3, 0.5, 0.7, 0.9), min_crop_size=0.3)),
     # 'extra_aug': dict(expand=dict(mean=(123.675, 116.28, 103.53), to_rgb=True, ratio_range=(1, 3))),
 })
 
-valid_sub_YouTube_VOS_dataset = dataset_base.copy({
+valid_sub_YouTube_VOS_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/YouTube_VOS2019/train/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/valid_sub.json',
     'test_mode': False,
 })
 
-valid_YouTube_VOS_dataset = dataset_base.copy({
+valid_YouTube_VOS_dataset = dataset_base_vis.copy({
 
     'img_prefix': '../datasets/YouTube_VOS2019/valid/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/valid.json',
     'test_mode': True,
 })
 
-test_YouTube_VOS_dataset = dataset_base.copy({
+test_YouTube_VOS_dataset = dataset_base_vis.copy({
 
     'img_prefix': '../datasets/YouTube_VOS2019/test/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/test.json',
     'has_gt': False,
 })
 
-train_YouTube_VOS2021_dataset = dataset_base.copy({
+train_YouTube_VOS2021_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/YouTube_VOS2021/train/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2021/train/instances.json',
     # 'extra_aug': dict(random_crop=dict(min_ious=(0.1, 0.3, 0.5, 0.7, 0.9), min_crop_size=0.3)),
     # 'extra_aug': dict(expand=dict(mean=(123.675, 116.28, 103.53), to_rgb=True, ratio_range=(1, 3))),
 })
 
-valid_sub_YouTube_VOS2021_dataset = dataset_base.copy({
+valid_sub_YouTube_VOS2021_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/YouTube_VOS2021/train/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2021/annotations_instances/valid_sub.json',
     'test_mode': False,
 })
 
-valid_YouTube_VOS2021_dataset = dataset_base.copy({
+valid_YouTube_VOS2021_dataset = dataset_base_vis.copy({
 
     'img_prefix': '../datasets/YouTube_VOS2021/valid/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2021/valid/instances.json',
     'test_mode': True,
 })
 
-test_YouTube_VOS2021_dataset = dataset_base.copy({
+test_YouTube_VOS2021_dataset = dataset_base_vis.copy({
 
     'img_prefix': '../datasets/YouTube_VOS2021/test/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2021/test/instances.json',
 })
 
 
-train_OVIS_dataset = dataset_base.copy({
+train_OVIS_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/OVIS/train',
     'ann_file': '../datasets/OVIS/annotations_train.json',
     # 'extra_aug': dict(random_crop=dict(min_ious=(0.1, 0.3, 0.5, 0.7, 0.9), min_crop_size=0.3)),
     # 'extra_aug': dict(expand=dict(mean=(123.675, 116.28, 103.53), to_rgb=True, ratio_range=(1, 3))),
 })
 
-valid_OVIS_dataset = dataset_base.copy({
+valid_OVIS_dataset = dataset_base_vis.copy({
 
     'img_prefix': '../datasets/OVIS/valid',
     'ann_file': '../datasets/OVIS/annotations_valid.json',
     'test_mode': True,
 })
 
-test_OVIS_dataset = dataset_base.copy({
+test_OVIS_dataset = dataset_base_vis.copy({
 
     'img_prefix': '../datasets/OVIS/test',
     'ann_file': '../datasets/OVIS/annotations_test.json',
     'has_gt': False,
 })
+
 
 # ----------------------- TRANSFORMS ----------------------- #
 
@@ -335,20 +415,13 @@ vgg16_backbone = backbone_base.copy({
     'pred_aspect_ratios': [[[1], [1, sqrt(2), 1 / sqrt(2), sqrt(3), 1 / sqrt(3)][:n]] for n in [3, 5, 5, 5, 3, 3]],
 })
 
-# ----------------------- MASK BRANCH TYPES ----------------------- #
-
-mask_type = Config({
-    'direct': 0,
-    'lincomb': 1,
-})
-
 # ----------------------- ACTIVATION FUNCTIONS ----------------------- #
 
 activation_func = Config({
     'tanh': torch.tanh,
     'sigmoid': torch.sigmoid,
     'softmax': lambda x: torch.nn.functional.softmax(x, dim=-1),
-    'relu': lambda x: torch.nn.functional.relu(x, inplace=True),
+    'relu': lambda x: torch.nn.functional.relu(x, inplace=False),
     'none': lambda x: x,
 })
 
@@ -381,11 +454,7 @@ fpn_base = Config({
 # ----------------------- CONFIG DEFAULTS ----------------------- #
 
 
-YouTube_VOS_base_config = Config({
-    'train_dataset': train_YouTube_VOS_dataset,
-    'valid_dataset': valid_YouTube_VOS_dataset,
-    'num_classes': 41,  # This should include the background class
-    'classes': YouTube_VOS_CLASSES,
+base_config = Config({
     'COLORS': COLORS,
 
     'max_epoch': 12,
@@ -418,9 +487,6 @@ YouTube_VOS_base_config = Config({
     # Eval.py sets this if you just want to run YOLACT as a detector
     'eval_mask_branch': True,
 
-    # the dim of embedding vectors in track layers
-    'embed_dim': 512,
-
     # Top_k examples to consider for NMS
     'nms_top_k': 200,
     # Examples with confidence less than this are not considered by NMS
@@ -431,19 +497,17 @@ YouTube_VOS_base_config = Config({
     'eval_conf_thresh': 0.3,
 
     # See mask_type for details.
-    'mask_type': mask_type.direct,
     'mask_size': 16,
     'masks_to_train': 100,
     'mask_proto_src': None,
     'mask_proto_net': [(256, 3, {}), (256, 3, {})],
     'mask_proto_bias': False,
-    'mask_proto_prototype_activation': None,  # activation_func.relu,
+    'mask_proto_prototype_activation': activation_func.relu,
     'mask_proto_mask_activation': activation_func.sigmoid,
-    'mask_proto_coeff_activation': activation_func.sigmoid,
+    'mask_proto_coeff_activation': activation_func.tanh,
     'mask_proto_crop': False,
     'mask_proto_crop_expand': 0,
     'mask_proto_loss': None,
-    'mask_proto_grid_file': 'data/grid.npy',
     'mask_proto_use_grid': False,
     'mask_proto_remove_empty_masks': False,
     'mask_proto_reweight_coeff': 1,
@@ -483,6 +547,7 @@ YouTube_VOS_base_config = Config({
     'ohem_use_most_confident': False,
 
     # Whether to use sigmoid focal loss instead of softmax, all else being the same.
+    'use_focal_loss': False,
     'use_sigmoid_focal_loss': False,
     'focal_loss_alpha': 0.25,
     'focal_loss_gamma': 2,
@@ -571,10 +636,6 @@ YouTube_VOS_base_config = Config({
     'backbone': None,
     'name': 'base_config',
 
-    'rescore_mask': False,
-    'rescore_bbox': False,
-    'maskious_to_train': -1,
-
     # display output results in each epoch
     'train_output_visualization': True,
 
@@ -582,8 +643,9 @@ YouTube_VOS_base_config = Config({
     'mask_output_json': 'polygon',
 })
 
+
 # ----------------------- STMask CONFIGS ----------------------- #
-STMask_base_config = YouTube_VOS_base_config.copy({
+STMask_base_config = base_config.copy({
     'name': 'STMask_base_config',
 
     # Dataset stuff
@@ -633,19 +695,16 @@ STMask_base_config = YouTube_VOS_base_config.copy({
                           2: {'kernel_size': [3, 3], 'padding': (1, 1)}},
 
     # Mask Settings
-    'mask_type': mask_type.lincomb,
     'mask_alpha': 6.125,
     'mask_proto_src': 0,
     'mask_proto_crop': True,
     'mask_proto_crop_outside': False,
-    'mask_proto_n': 32,
-    'mask_proto_net': [(256, 3, {'padding': 1})] * 3 + [(None, -2, {}), (256, 3, {'padding': 1})] + [(32, 1, {})],
+    'mask_dim': 16,
+    'mask_proto_net': [(256, 3, {'padding': 1})] * 3 + [(None, -2, {})],
     'mask_proto_normalize_emulate_roi_pooling': False,
     'discard_mask_area': 5 * 5,
     'mask_proto_coeff_diversity_loss': False,
     'mask_proto_crop_with_pred_box': False,
-    'mask_coeff_for_occluded': False,
-    'mask_occluded_alpha': 6.125,
 
     # Proto_net settings
     'backbone_C2_as_features': False,
@@ -653,13 +712,13 @@ STMask_base_config = YouTube_VOS_base_config.copy({
 
     # train boxes
     'train_boxes': True,
-    'train_class': False,
+    'train_class': True,
     'train_centerness': False,
 
     # Track settings
     'train_track': True,
-    'match_coeff': [0, 3.5, 1.5, 0],   # scores, mask_iou, box_iou, label
-    'track_net': [(256, 3, {'padding': 1})] * 2 + [(128, 1, {})],
+    'match_coeff': [0, 0.7, 0.3, 0],   # scores, mask_iou, box_iou, label
+    'track_n': 64,
     'track_crop_with_pred_mask': False,
     'track_crop_with_pred_box': False,
 
@@ -696,12 +755,12 @@ STMask_base_config = YouTube_VOS_base_config.copy({
     'crowd_iou_threshold': 0.7,
     'use_conf_cross_frames': False,
     'use_boxiou_loss': True,
-    'use_maskiou_loss': True,
-    'use_semantic_segmentation_loss': True,
-    'sem_seg_head': [(256, 3, {'padding': 1})] * 2,
+    'use_maskiou_loss': False,
+    'use_semantic_segmentation_loss': False,
+    'semantic_segmentation_alpha': 5,
 
     # eval
-    'interval_key_frame': 1,
+    'eval_frames_of_clip': 1,
     'nms_conf_thresh': 0.1,  # 0.05,
     'nms_thresh': 0.5,
     'eval_conf_thresh': 0.1,  # 0.05,
@@ -908,8 +967,56 @@ STMask_plus_resnet50_ada_YTVIS2021_config = STMask_plus_resnet50_ada_config.copy
     'classes': YouTube_VOS2021_CLASSES,
 })
 
+# ----------------------- COCO_YOLACT++ CONFIGS ----------------------- #
+
+STMask_plus_base_coco_config = STMask_plus_base_config.copy({
+    'name': 'STMask_plus_base_coco',
+
+    # Dataset stuff
+    'dataset': coco2017_dataset,
+    'num_classes': len(coco2017_dataset.class_names) + 1,
+
+    # Image Size
+    'min_size': 400,
+    'max_size': 550,
+
+    # Training params
+    'lr_steps': (18, 36, 45, 50),
+    'max_epoch': 54,
+
+    'backbone': STMask_plus_base_config.backbone.copy({
+        'path': 'resnet101_reducedfc.pth',
+    }),
+
+    'train_track': False,
+
+})
+
+STMask_plus_resnet50_coco_config = STMask_plus_resnet50_config.copy({
+    'name': 'STMask_plus_resnet50_coco',
+
+    # Dataset stuff
+    'dataset': coco2017_dataset,
+    'num_classes': len(coco2017_dataset.class_names) + 1,
+
+    # Image Size
+    'min_size': 400,
+    'max_size': 550,
+
+    # Training params
+    'lr_steps': (18, 36, 45, 50),
+    'max_epoch': 54,
+
+    'backbone': STMask_plus_resnet50_ada_config.backbone.copy({
+        'path': 'resnet50-19c8e357.pth',
+    }),
+
+    'train_track': False,
+})
+
+
 # Default config
-cfg = STMask_base_config.copy()
+cfg = STMask_plus_base_config.copy()
 
 
 def set_cfg(config_name: str):

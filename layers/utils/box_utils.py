@@ -64,8 +64,8 @@ def jaccard(box_a, box_b, iscrowd:bool=False):
     E.g.:
         A ∩ B / A ∪ B = A ∩ B / (area(A) + area(B) - A ∩ B)
     Args:
-        box_a: (tensor) Ground truth bounding boxes, Shape: [num_objects,4] [x1,y1, x2, y2]
-        box_b: (tensor) Prior boxes from priorbox layers, Shape: [num_priors,4] [x1,y1,x2,y2]
+        box_a: (tensor) Ground truth bounding boxes, Shape: [n,A,4] [x1,y1, x2, y2]
+        box_b: (tensor) Prior boxes from priorbox layers, Shape: [n,B,4] [x1,y1,x2,y2]
     Return:
         jaccard overlap: (tensor) Shape: [box_a.size(0), box_b.size(0)]
     """
@@ -75,13 +75,11 @@ def jaccard(box_a, box_b, iscrowd:bool=False):
         box_a = box_a[None, ...]
         box_b = box_b[None, ...]
 
-    # box_a, box_b = torch.clamp(box_a, min=0, max=1), torch.clamp(box_b, min=0, max=1)
-
-    inter = intersect(box_a, box_b)
+    inter = intersect(box_a, box_b)                                               # [n, A, B]
     area_a = ((box_a[:, :, 2] - box_a[:, :, 0])
-              * (box_a[:, :, 3] - box_a[:, :, 1])).unsqueeze(2).expand_as(inter)  # [A,B]
+              * (box_a[:, :, 3] - box_a[:, :, 1])).unsqueeze(2).expand_as(inter)  # [n, A, B]
     area_b = ((box_b[:, :, 2] - box_b[:, :, 0])
-              * (box_b[:, :, 3] - box_b[:, :, 1])).unsqueeze(1).expand_as(inter)  # [A,B]
+              * (box_b[:, :, 3] - box_b[:, :, 1])).unsqueeze(1).expand_as(inter)  # [n, A, B]
     union = area_a + area_b - inter
 
     out = inter / area_a if iscrowd else inter / union
@@ -116,7 +114,7 @@ def change(gt, priors):
     return -torch.sqrt( (diff ** 2).sum(dim=2) )
 
 
-def match(pos_thresh, neg_thresh, bbox, labels, ids, priors, loc_data, loc_t, conf_t, idx_t, ids_t, idx):
+def match(pos_thresh, neg_thresh, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t, ids_t, idx):
     """Match each prior box with the ground truth box of the highest jaccard
     overlap, encode the bounding boxes, then return the matched indices
     corresponding to both confidence and location preds.
@@ -176,14 +174,24 @@ def match(pos_thresh, neg_thresh, bbox, labels, ids, priors, loc_data, loc_t, co
     conf = labels[best_truth_idx]               # Shape: [num_priors]
     conf[best_truth_overlap < pos_thresh] = -1  # label as neutral
     conf[best_truth_overlap < neg_thresh] = 0   # label as background
-    id_cur = ids[best_truth_idx]
-    id_cur[best_truth_overlap < pos_thresh] = 0  # Only remain positive boxes for tracking
+
+    # Deal with crowd annotations for COCO
+    if crowd_boxes is not None and cfg.crowd_iou_threshold < 1:
+        # Size [num_priors, num_crowds]
+        crowd_overlaps = jaccard(decoded_priors, crowd_boxes, iscrowd=True)
+        # Size [num_priors]
+        best_crowd_overlap, best_crowd_idx = crowd_overlaps.max(1)
+        # Set non-positives with crowd iou of over the threshold to be neutral.
+        conf[(conf <= 0) & (best_crowd_overlap > cfg.crowd_iou_threshold)] = -1
 
     loc = encode(matches, priors, cfg.use_yolo_regressors)  # [cx, cy, w, h]
     loc_t[idx]  = loc    # [num_priors,4] encoded offsets to learn
     conf_t[idx] = conf   # [num_priors] top class label for each prior
     idx_t[idx]  = best_truth_idx  # [num_priors] indices for lookup
-    ids_t[idx]  = id_cur
+    if ids is not None:
+        id_cur = ids[best_truth_idx]
+        id_cur[best_truth_overlap < pos_thresh] = 0  # Only remain positive boxes for tracking
+        ids_t[idx]  = id_cur
 
 @torch.jit.script
 def encode(matched, priors, use_yolo_regressors:bool=False):

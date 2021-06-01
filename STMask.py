@@ -4,9 +4,9 @@ import torch.nn.functional as F
 import numpy as np
 from collections import defaultdict
 
-from datasets.config import cfg, mask_type
+from datasets.config import cfg
 from layers.modules import PredictionModule_FC, make_net, FPN, FastMaskIoUNet, TemporalNet
-from layers.functions import Detect, Detect_TF, Track, generate_candidate, Track_TF
+from layers.functions import Detect, Detect_TF, Track, generate_candidate, Track_TF, Track_TF_Clip
 from backbone import construct_backbone
 from utils import timer
 
@@ -33,32 +33,37 @@ class STMask(nn.Module):
         self.backbone = construct_backbone(cfg.backbone)
 
         # Compute mask_dim here and add it back to the config. Make sure Yolact's constructor is called early!
-        if cfg.mask_type == mask_type.direct:
-            cfg.mask_dim = cfg.mask_size ** 2
-        elif cfg.mask_type == mask_type.lincomb:
-            if cfg.mask_proto_use_grid:
-                self.grid = torch.Tensor(np.load(cfg.mask_proto_grid_file))
-                self.num_grids = self.grid.size(0)
-            else:
-                self.num_grids = 0
+        if cfg.mask_proto_use_grid:
+            self.grid = torch.Tensor(np.load(cfg.mask_proto_grid_file))
+            self.num_grids = self.grid.size(0)
+        else:
+            self.num_grids = 0
 
-            self.proto_src = cfg.mask_proto_src
-            self.interpolation_mode = cfg.fpn.interpolation_mode
+        self.proto_src = cfg.mask_proto_src
+        self.interpolation_mode = cfg.fpn.interpolation_mode
 
-            if self.proto_src is None:
-                in_channels = 3
-            elif cfg.fpn is not None:
-                in_channels = cfg.fpn.num_features
-            else:
-                in_channels = self.backbone.channels[self.proto_src]
-            in_channels += self.num_grids
+        if self.proto_src is None:
+            in_channels = 3
+        elif cfg.fpn is not None:
+            in_channels = cfg.fpn.num_features
+        else:
+            in_channels = self.backbone.channels[self.proto_src]
+        in_channels += self.num_grids
 
-            # The include_last_relu=false here is because we might want to change it to another function
-            self.proto_net, cfg.mask_dim = make_net(in_channels, cfg.mask_proto_net, include_last_relu=False)
-            self.track_net, cfg.track_dim = make_net(in_channels, cfg.track_net, include_last_relu=False)
+        # The include_last_relu=false here is because we might want to change it to another function
+        self.proto_net, proto_channles = make_net(in_channels, cfg.mask_proto_net, include_last_relu=True)
+        proto_arch = [(proto_channles, 3, {'padding': 1})] + [(cfg.mask_dim, 1, {})]
+        self.proto_conv, cfg.mask_dim = make_net(proto_channles, proto_arch, include_last_relu=False)
 
-            if cfg.mask_proto_bias:
-                cfg.mask_dim += 1
+        if cfg.mask_proto_bias:
+            cfg.mask_dim += 1
+
+        if cfg.train_track:
+            track_arch = [(proto_channles, 3, {'padding': 1})] + [(cfg.track_n, 1, {})]
+            self.track_conv, _ = make_net(proto_channles, track_arch, include_last_relu=False)
+        if cfg.use_semantic_segmentation_loss:
+            sem_seg_head = [(proto_channles, 3, {'padding': 1})] + [(cfg.num_classes, 1, {})]
+            self.semantic_seg_conv, _ = make_net(proto_channles, sem_seg_head, include_last_relu=False)
 
         self.selected_layers = cfg.backbone.selected_layers
         self.pred_scales = cfg.backbone.pred_scales
@@ -94,13 +99,16 @@ class STMask(nn.Module):
 
             self.prediction_layers.append(pred)
 
-        if cfg.use_temporal_info:
+        if cfg.train_track and cfg.use_temporal_info:
             # temporal fusion
             self.correlation_selected_layer = cfg.correlation_selected_layer
             # evaluation for frame-level tracking
             self.Detect_TF = Detect_TF(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k,
                                        conf_thresh=cfg.nms_conf_thresh, nms_thresh=cfg.nms_thresh)
-            self.Track_TF = Track_TF()
+            if cfg.eval_frames_of_clip > 1:
+                self.Track_TF_Clip = Track_TF_Clip()
+            else:
+                self.Track_TF = Track_TF()
 
             # track to segment
             if cfg.temporal_fusion_module:
@@ -115,7 +123,9 @@ class STMask(nn.Module):
         else:
             self.detect = Detect(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k, conf_thresh=cfg.nms_conf_thresh,
                                  nms_thresh=cfg.nms_thresh)
-            self.Track = Track()
+
+            if cfg.train_track:
+                self.Track = Track()
 
         # Extra parameters for the extra losses
         if cfg.use_class_existence_loss:
@@ -123,10 +133,9 @@ class STMask(nn.Module):
             # Also note that cfg.num_classes includes background
             self.class_existence_fc = nn.Linear(src_channels[-1], cfg.num_classes - 1)
 
-        if cfg.use_semantic_segmentation_loss:
-            sem_seg_head = cfg.sem_seg_head + [(cfg.num_classes - 1, 1, {})]
-            self.semantic_seg_conv, _ = make_net(in_channels, sem_seg_head, include_last_relu=False)
-            # self.semantic_seg_conv = nn.Conv2d(src_channels[0], cfg.num_classes - 1, kernel_size=1)
+        self.candidate_clip = []
+        self.img_meta_clip = []
+        self.imgs_clip = []
 
     def load_weights(self, path):
         """ Loads weights from a compressed save file. """
@@ -158,7 +167,7 @@ class STMask(nn.Module):
         model_dict.update(state_dict)
         self.load_state_dict(model_dict)
 
-    def init_weights(self, backbone_path, local_rank=1):
+    def init_weights_coco(self, backbone_path, local_rank=1):
         """ Initialize weights for training. """
         state_dict = torch.load(backbone_path, map_location=torch.device('cpu'))
         model_dict = self.state_dict()
@@ -193,6 +202,63 @@ class STMask(nn.Module):
 
         self.load_state_dict(model_dict)
 
+    def init_weights(self, backbone_path, local_rank=1):
+        """ Initialize weights for training. """
+        # Initialize the backbone with the pretrained weights.
+        self.backbone.init_backbone(backbone_path)
+
+        conv_constants = getattr(nn.Conv2d(1, 1, 1), '__constants__')
+
+        # Quick lambda to test if one list contains the other
+        def all_in(x, y):
+            for _x in x:
+                if _x not in y:
+                    return False
+            return True
+
+        # Initialize the rest of the conv layers with xavier
+        for name, module in self.named_modules():
+            # See issue #127 for why we need such a complicated condition if the module is a WeakScriptModuleProxy
+            # Broke in 1.3 (see issue #175), WeakScriptModuleProxy was turned into just ScriptModule.
+            # Broke in 1.4 (see issue #292), where RecursiveScriptModule is the new star of the show.
+            # Note that this might break with future pytorch updates, so let me know if it does
+            is_script_conv = False
+            if 'Script' in type(module).__name__:
+                # 1.4 workaround: now there's an original_name member so just use that
+                if hasattr(module, 'original_name'):
+                    is_script_conv = 'Conv' in module.original_name
+                # 1.3 workaround: check if this has the same constants as a conv module
+                else:
+                    is_script_conv = (
+                            all_in(module.__dict__['_constants_set'], conv_constants)
+                            and all_in(conv_constants, module.__dict__['_constants_set']))
+
+            is_conv_layer = isinstance(module, nn.Conv2d) or is_script_conv
+
+            if is_conv_layer and module not in self.backbone.backbone_modules:
+                nn.init.xavier_uniform_(module.weight.data)
+
+                if module.bias is not None:
+                    if cfg.use_focal_loss and 'conf_layer' in name:
+                        if not cfg.use_sigmoid_focal_loss:
+                            # Initialize the last layer as in the focal loss paper.
+                            # Because we use softmax and not sigmoid, I had to derive an alternate expression
+                            # on a notecard. Define pi to be the probability of outputting a foreground detection.
+                            # Then let z = sum(exp(x)) - exp(x_0). Finally let c be the number of foreground classes.
+                            # Chugging through the math, this gives us
+                            #   x_0 = log(z * (1 - pi) / pi)    where 0 is the background class
+                            #   x_i = log(z / c)                for all i > 0
+                            # For simplicity (and because we have a degree of freedom here), set z = 1. Then we have
+                            #   x_0 =  log((1 - pi) / pi)       note: don't split up the log for numerical stability
+                            #   x_i = -log(c)                   for all i > 0
+                            module.bias.data[0] = np.log((1 - cfg.focal_loss_init_pi) / cfg.focal_loss_init_pi)
+                            module.bias.data[1:] = -np.log(module.bias.size(0) - 1)
+                        else:
+                            module.bias.data[0] = -np.log(cfg.focal_loss_init_pi / (1 - cfg.focal_loss_init_pi))
+                            module.bias.data[1:] = -np.log((1 - cfg.focal_loss_init_pi) / cfg.focal_loss_init_pi)
+                    else:
+                        module.bias.data.zero_()
+
     def train(self, mode=True):
         super().train(mode)
 
@@ -219,17 +285,18 @@ class STMask(nn.Module):
                     # proto_x = p3_upsample # + bb_outs[self.proto_src]
                     proto_x = fpn_outs[self.proto_src]
 
-                proto_out = self.proto_net(proto_x)
+                proto_out_ori = self.proto_net(proto_x)
+                proto_dict = self.proto_conv(proto_out_ori)
                 if cfg.mask_proto_prototype_activation is not None:
-                    proto_out = cfg.mask_proto_prototype_activation(proto_out)
+                    proto_dict = cfg.mask_proto_prototype_activation(proto_dict)
 
                 # Move the features last so the multiplication is easy
-                proto_out = proto_out.permute(0, 2, 3, 1).contiguous()
+                proto_dict = proto_dict.permute(0, 2, 3, 1).contiguous()
 
                 if cfg.mask_proto_bias:
-                    bias_shape = [x for x in proto_out.size()]
+                    bias_shape = [x for x in proto_dict.size()]
                     bias_shape[1] = 1
-                    proto_out = torch.cat([proto_out, torch.ones(*bias_shape)], 1)
+                    proto_dict = torch.cat([proto_dict, torch.ones(*bias_shape)], 1)
 
         with timer.env('pred_heads'):
             pred_outs = {'mask_coeff': [], 'priors': []}
@@ -244,9 +311,6 @@ class STMask(nn.Module):
                 pred_outs['conf'] = []
             else:
                 pred_outs['stuff'] = []
-
-            if cfg.mask_coeff_for_occluded:
-                pred_outs['mask_occluded_coeff'] = []
 
             for idx, pred_layer in zip(self.selected_layers, self.prediction_layers):
                 pred_x = fpn_outs[idx]
@@ -266,23 +330,51 @@ class STMask(nn.Module):
             for k, v in pred_outs.items():
                 pred_outs[k] = torch.cat(v, 1)
 
-        with timer.env('track'):
-            pred_outs['track'] = self.track_net(proto_x).permute(0, 2, 3, 1).contiguous()
+        if cfg.train_track:
+            with timer.env('track'):
+                pred_outs['track'] = self.track_conv(proto_out_ori).permute(0, 2, 3, 1).contiguous()
 
         if cfg.use_semantic_segmentation_loss or not cfg.train_class:
             with timer.env('sem_seg'):
-                pred_outs['sem_seg'] = self.semantic_seg_conv(proto_x).permute(0, 2, 3, 1).contiguous()
+                pred_outs['sem_seg'] = self.semantic_seg_conv(proto_out_ori).permute(0, 2, 3, 1).contiguous()
 
-        pred_outs['proto'] = proto_out
+        pred_outs['proto'] = proto_dict
 
         return fpn_outs, pred_outs
+
+    def track_clip(self, candidate_clip, img_meta_clip, first_clip=False, last_clip=False):
+        # n_frame_clip = 2T+1
+        n_frame_clip = cfg.eval_frames_of_clip
+        T = n_frame_clip // 2
+        n_clip, pred_outs_all = 0, []
+        index = torch.zeros(len(candidate_clip))
+        while len(candidate_clip) >= n_frame_clip:
+            pred_outs_cur = self.Track_TF_Clip(self, candidate_clip[:n_frame_clip], img_meta_clip[:n_frame_clip])
+            if first_clip and n_clip == 0:
+                pred_outs_all += pred_outs_cur
+                index[:n_frame_clip] = 1
+            else:
+                pred_outs_all += pred_outs_cur[T:]
+                index[T:n_frame_clip] = 1
+
+            n_clip += 1
+            candidate_clip = candidate_clip[T:]
+            img_meta_clip = img_meta_clip[T:]
+
+        if last_clip:
+            if len(candidate_clip) > T:
+                pred_outs_cur = self.Track_TF_Clip(self, candidate_clip, img_meta_clip)
+                pred_outs_all += pred_outs_cur[T+1:]
+                index[T:] = 1
+
+        return index, pred_outs_all
 
     def forward(self, x, img_meta=None):
         if self.training:
             batch_size, c, h, w = x.size()
             fpn_outs, pred_outs = self.forward_single(x)
 
-            if cfg.use_temporal_info:
+            if cfg.train_track and cfg.use_temporal_info:
                 # calculate correlation map
                 pred_outs['fpn_feat'] = fpn_outs[self.correlation_selected_layer]
 
@@ -295,31 +387,87 @@ class STMask(nn.Module):
 
             return pred_outs
         else:
-            # track instances frame-by-frame
-            if cfg.use_temporal_info:
-                bs = x.size(0)
-                fpn_outs, pred_outs = self.forward_single(x)
+            bs = x.size(0)
+            fpn_outs, pred_outs = self.forward_single(x)
 
-                if cfg.train_class:
-                    pred_outs['conf'] = F.softmax(pred_outs['conf'], -1)
-                else:
-                    pred_outs['stuff'] = torch.sigmoid(pred_outs['stuff'])
+            if cfg.train_class:
+                pred_outs['conf'] = F.softmax(pred_outs['conf'], -1)
+            else:
+                pred_outs['stuff'] = torch.sigmoid(pred_outs['stuff'])
+                pred_outs['sem_seg'] = F.softmax(pred_outs['sem_seg'], dim=-1)
+
+            # track instances frame-by-frame
+            if cfg.train_track and cfg.use_temporal_info:
+
                 # we only use the bbox features in the P3 layer
-                pred_outs['fpn_feat'] = fpn_outs[self.correlation_selected_layer]
+                pred_outs['fpn_feat'] = fpn_outs[1]
                 candidate = generate_candidate(pred_outs)
                 candidate_after_NMS = self.Detect_TF(candidate)
-                pred_outs_after_NMS = []
-                for i in range(bs):
-                    pred_outs_after_NMS.append(self.Track_TF(self, candidate_after_NMS[i], img_meta[i], img=x))
+                pred_outs_after_track = []
+                if cfg.eval_frames_of_clip == 1:
+                    # two-frames
+                    for i in range(bs):
+                        pred_outs_after_track.append(self.Track_TF(self, candidate_after_NMS[i], img_meta[i], img=x))
+
+                    return pred_outs_after_track, x, img_meta
+
+                else:
+                    # two-clips
+                    n_frame_eval_clip = cfg.eval_frames_of_clip
+                    T = n_frame_eval_clip // 2
+                    self.imgs_clip += x
+                    self.candidate_clip += candidate_after_NMS
+                    self.img_meta_clip += img_meta
+                    n_frames_cur_clip = len(self.candidate_clip)
+                    if n_frames_cur_clip >= n_frame_eval_clip:
+                        is_first_idx = [i for i in range(1, n_frames_cur_clip) if self.img_meta_clip[i]['is_first']]
+
+                        if len(is_first_idx) == 0:
+                            # All frames of the clip come from a video
+                            index, pred_outs_after_track = self.track_clip(self.candidate_clip, self.img_meta_clip,
+                                                                           first_clip=self.img_meta_clip[0]['is_first'])
+
+                        elif len(is_first_idx) == 1:
+                            # The frames of the clip consist of two videos, we need to process them one-by-one
+                            index1, pred_outs1 = self.track_clip(self.candidate_clip[:is_first_idx[0]],
+                                                                 self.img_meta_clip[:is_first_idx[0]],
+                                                                 first_clip=False, last_clip=True)
+                            index2, pred_outs2 = self.track_clip(self.candidate_clip[is_first_idx[0]:],
+                                                                 self.img_meta_clip[is_first_idx[0]:],
+                                                                 first_clip=True, last_clip=False)
+                            pred_outs_after_track = pred_outs1 + pred_outs2
+                            index = torch.cat((index1, index2))
+
+                        else:
+                            print('Only support frames that less than 21, please try smaller batch size')
+
+                        # to remove frames that has been processed
+                        # the last T frames will be leaved to guarantee overlapped frames in two adjacent clips
+                        # for tracking between clips
+                        keep = index > 0
+                        keep_idx = (torch.arange(n_frames_cur_clip)[keep]).tolist()
+                        out_imgs = self.imgs_clip[min(keep_idx):max(keep_idx)+1]
+                        out_img_metas = self.img_meta_clip[min(keep_idx):max(keep_idx)+1]
+                        if len(is_first_idx) == 0:
+                            self.candidate_clip = self.candidate_clip[T+1:]
+                            self.img_meta_clip = self.img_meta_clip[T+1:]
+                            self.imgs_clip = self.imgs_clip[T+1:]
+                        else:
+                            keep_idx = (torch.arange(len(index2))[index2 == 0]).tolist()
+                            self.candidate_clip = self.candidate_clip[is_first_idx[0]:][min(keep_idx):max(keep_idx)+1]
+                            self.img_meta_clip = self.img_meta_clip[is_first_idx[0]:][min(keep_idx):max(keep_idx)+1]
+                            self.imgs_clip = self.imgs_clip[is_first_idx[0]:][min(keep_idx):max(keep_idx)+1]
+
+                        return pred_outs_after_track, out_imgs, out_img_metas
+                    else:
+                        return pred_outs_after_track, [], []
 
             else:
-                bb_outs, pred_outs = self.forward_single(x)
-                if cfg.train_class:
-                    pred_outs['conf'] = F.softmax(pred_outs['conf'], -1)
-                pred_outs['mask_coeff'] = cfg.mask_proto_coeff_activation(pred_outs['mask_coeff'])
                 # detect instances by NMS for each single frame
                 pred_outs_after_NMS = self.detect(pred_outs, self)
-                pred_outs_after_NMS = self.Track(pred_outs_after_NMS, img_meta)
 
-            return pred_outs_after_NMS
+                if cfg.train_track:
+                    pred_outs_after_NMS = self.Track(pred_outs_after_NMS, img_meta)
+
+                return pred_outs_after_NMS
 

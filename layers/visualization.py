@@ -1,12 +1,14 @@
 import torch
 import numpy as np
 import cv2
-from datasets import cfg, mask_type, MEANS, STD
+from datasets import cfg_vis, MEANS_vis, STD_vis
 import random
 from math import sqrt
 import matplotlib.pyplot as plt
 import mmcv
 import torch.nn.functional as F
+
+cfg, MEANS, STD = cfg_vis, MEANS_vis, STD_vis
 
 
 def display_box_shift(box, box_shift, conf=None, img_gpu=None, img_meta=None, idx=0):

@@ -3,6 +3,7 @@ from STMask import STMask
 from utils.functions import MovingAverage, ProgressBar
 from utils import timer
 from utils.functions import SavePath
+from utils.augmentations import BaseTransform
 from layers.utils.output_utils import postprocess_ytbvis, undo_image_transformation
 
 from datasets import get_dataset, prepare_data
@@ -43,8 +44,6 @@ def parse_args(argv=None):
     parser.add_argument('--clip_eval_mode', default=False, type=str2bool,
                         help='Use cuda to evaulate model')
     parser.add_argument('--top_k', default=100, type=int,
-                        help='Further restrict the number of predictions to parse')
-    parser.add_argument('--interval_key_frame', default=1, type=int,
                         help='Further restrict the number of predictions to parse')
     parser.add_argument('--cuda', default=True, type=str2bool,
                         help='Use cuda to evaulate model')
@@ -153,9 +152,6 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
         pad_h, pad_w, _ = img.shape
     ori_h, ori_w, _ = img_meta['ori_shape']
 
-    # if img_gpu is None:
-    # img_gpu = torch.tensor(np.zeros(img_gpu.size(), np.uint8)).cuda()
-
     with timer.env('Postprocess'):
         cfg.mask_proto_debug = args.mask_proto_debug
         # cfg.preserve_aspect_ratio = False
@@ -173,9 +169,9 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
     else:
         args.display_masks = False
 
-    scores = dets_out['score'][:args.top_k].detach().cpu().numpy()
+    scores = dets_out['score'][:args.top_k].view(-1).detach().cpu().numpy()
     boxes = dets_out['box'][:args.top_k].detach().cpu().numpy()
-    classes = dets_out['class'][:args.top_k].detach().cpu().numpy()
+    classes = dets_out['class'][:args.top_k].view(-1).detach().cpu().numpy()
     num_dets_to_consider = min(args.top_k, classes.shape[0])
     color_type = dets_out['box_ids']
     for j in range(num_dets_to_consider):
@@ -250,22 +246,7 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
             color = get_color(j, color_type)
             # plot priors
             h, w, _ = img_meta['img_shape']
-            if 'priors' in dets_out.keys():
-                priors = dets_out['priors'].view(-1, 4).detach().cpu().numpy()
-                if j < dets_out['priors'].size(0):
-                    cpx, cpy, pw, ph = priors[j, :] * [w, h, w, h]
-                    px1, py1 = cpx - pw / 2.0, cpy - ph / 2.0
-                    px2, py2 = cpx + pw / 2.0, cpy + ph / 2.0
-                    px1, py1, px2, py2 = int(px1), int(py1), int(px2), int(py2)
-                    pcolor = [255, 0, 255]
 
-            # plot the range of features for classification and regression
-            pred_scales = [24, 48, 96, 192, 384]
-            # cpx, cpy = (px1+px2)/2, (py1+py2)/2
-            # fx1, fy1 = cpx - pred_scales[p - 3] / 2, cpy - pred_scales[p - 3] / 2
-            # fx2, fy2 = cpx + pred_scales[p - 3] / 2, cpy + pred_scales[p - 3] / 2
-            # fx1, fy1, fx2, fy2 = int(fx1), int(fy1), int(fx2), int(fy2)
-            # fcolor = [255, 128, 0]
             max_w = ori_w if cfg.preserve_aspect_ratio else pad_w
             max_h = ori_h if cfg.preserve_aspect_ratio else pad_h
             x = torch.clamp(torch.tensor([x1, x2]), min=2, max=max_w).tolist(),
@@ -276,10 +257,6 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
 
             if args.display_bboxes:
                 cv2.rectangle(img_numpy, (x[0], y[0]), (x[1], y[1]), color, 2)
-                # if 'priors' in dets_out.keys():
-                #     if j < dets_out['priors'].size(0):
-                #         cv2.rectangle(img_numpy, (px1, py1), (px2, py2), pcolor, 2, lineType=8)
-                # cv2.rectangle(img_numpy, (x[4], y[4]), (x[5], y[5]), fcolor, 2)
 
             if args.display_text:
                 if classes[j] - 1 < 0:
@@ -502,6 +479,7 @@ class CustomDataParallel(torch.nn.DataParallel):
 
 def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None):
     cfg.mask_proto_debug = args.mask_proto_debug
+    detection_collate = detection_collate_vis
     if not valid_data:
         cfg.valid_sub_dataset.test_mode = True
         dataset = get_dataset(cfg.valid_sub_dataset)
@@ -516,7 +494,8 @@ def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None
 
     print()
     data_loader = data.DataLoader(dataset, args.batch_size,
-                                  shuffle=False, collate_fn=detection_collate,
+                                  shuffle=False,
+                                  collate_fn=detection_collate_vis,
                                   pin_memory=True)
     results = []
 
@@ -529,16 +508,16 @@ def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None
                 pad_h, pad_w = images.size()[2:4]
 
             with timer.env('Network Extra'):
-                preds = net(images, img_meta=images_meta)
+                preds, _, _ = net(images, img_meta=images_meta)
 
                 if it == dataset_size - 1:
                     batch_size = len(dataset) % args.batch_size
                 else:
                     batch_size = images.size(0)
 
-                for batch_id in range(batch_size):
+                for pred, img_meta in zip(preds, images_meta):
                     cfg.preserve_aspect_ratio = True
-                    preds_cur = postprocess_ytbvis(preds[batch_id], pad_h, pad_w, images_meta[batch_id],
+                    preds_cur = postprocess_ytbvis(pred, pad_h, pad_w, img_meta,
                                                    score_threshold=cfg.eval_conf_thresh)
                     segm_results = bbox2result_with_id(preds_cur, cfg.classes)
                     results.append(segm_results)
@@ -590,77 +569,71 @@ def evaluate(net: STMask, dataset):
     print()
 
     data_loader = data.DataLoader(dataset, args.batch_size,
-                                  shuffle=False, collate_fn=detection_collate,
+                                  shuffle=False,
+                                  collate_fn=detection_collate_vis,
                                   pin_memory=True)
     results = []
 
     try:
         # Main eval loop
+        timer.reset()
         for it, data_batch in enumerate(data_loader):
-            timer.reset()
 
             with timer.env('Load Data'):
                 images, images_meta = prepare_data(data_batch, train_mode=False, devices=torch.cuda.current_device())
-            pad_h, pad_w = images.size()[2:4]
+                pad_h, pad_w = images.size()[2:4]
 
             with timer.env('Network Extra'):
-                preds = net(images, img_meta=images_meta)
+                preds, out_images, out_img_metas = net(images, img_meta=images_meta)
 
-            # Perform the meat of the operation here depending on our mode.
-            if it == dataset_size - 1:
-                batch_size = len(dataset) % args.batch_size
-            else:
-                batch_size = images.size(0)
+            n_preds = len(preds)
 
-            for batch_id in range(batch_size):
-                if args.display:
-                    img_id = (images_meta[batch_id]['video_id'], images_meta[batch_id]['frame_id'])
-                    if not cfg.display_mask_single:
-                        img_numpy = prep_display(preds[batch_id], images[batch_id], pad_h, pad_w,
-                                                 img_meta=images_meta[batch_id], img_ids=img_id)
-
-                    else:
-                        for p in range(preds[batch_id]['box'].size(0)):
-                            preds_single = {}
-                            for k, v in preds[batch_id].items():
-                                if k not in {'proto'}:
-                                    preds_single[k] = v[p]
-
-                            preds_single['box_ids'] = torch.tensor(-1)
-                            img_numpy = prep_display(preds_single, images[batch_id], pad_h, pad_w,
-                                                     img_meta=images_meta[batch_id], img_ids=img_id)
+            if n_preds > 0:
+                for batch_id in range(n_preds):
+                    if args.display:
+                        img_id = (out_img_metas[batch_id]['video_id'], out_img_metas[batch_id]['frame_id'])
+                        root_dir = ''.join([args.mask_det_file[:-12], 'out/', str(img_id[0]), '/'])
+                        if not os.path.exists(root_dir):
+                            os.makedirs(root_dir)
+                        if not cfg.display_mask_single:
+                            img_numpy = prep_display(preds[batch_id], out_images[batch_id], pad_h, pad_w,
+                                                     img_meta=out_img_metas[batch_id], img_ids=img_id)
                             plt.imshow(img_numpy)
                             plt.axis('off')
-                            plt.savefig(''.join([args.mask_det_file[:-12], 'out_single/', str(img_id), '_', str(p),
-                                                 '.png']))
+                            plt.title(str(img_id))
+                            plt.savefig(''.join([root_dir, str(img_id[1]), '_sem.png']))
                             plt.clf()
 
-                else:
-                    cfg.preserve_aspect_ratio = True
-                    preds_cur = postprocess_ytbvis(preds[batch_id], pad_h, pad_w, images_meta[batch_id],
-                                                   score_threshold=cfg.eval_conf_thresh)
-                    segm_results = bbox2result_with_id(preds_cur, cfg.classes)
-                    results.append(segm_results)
+                        else:
+                            for p in range(preds[batch_id]['box'].size(0)):
+                                preds_single = {}
+                                for k, v in preds[batch_id].items():
+                                    if k not in {'proto'}:
+                                        preds_single[k] = v[p]
+
+                                preds_single['box_ids'] = torch.tensor(-1)
+                                img_numpy = prep_display(preds_single, out_images[batch_id], pad_h, pad_w,
+                                                         img_meta=out_img_metas[batch_id], img_ids=img_id)
+                                plt.imshow(img_numpy)
+                                plt.axis('off')
+                                plt.savefig(''.join([root_dir, str(img_id[1]), '_', str(p), '.png']))
+                                plt.clf()
+
+                    else:
+                        cfg.preserve_aspect_ratio = True
+                        preds_cur = postprocess_ytbvis(preds[batch_id], pad_h, pad_w, out_img_metas[batch_id],
+                                                       score_threshold=cfg.eval_conf_thresh)
+                        segm_results = bbox2result_with_id(preds_cur, cfg.classes)
+                        results.append(segm_results)
 
                 # First couple of images take longer because we're constructing the graph.
                 # Since that's technically initialization, don't include those in the FPS calculations.
                 if it > 1:
-                    frame_times.add(timer.total_time() / batch_size)
+                    frame_times.add(timer.total_time() / n_preds)
+                    # print('Avg FPS: %.4f' % (1 / frame_times.get_avg()))
+                    timer.reset()
 
-                if args.display and not cfg.display_mask_single:
-                    if it > 1:
-                        print('Avg FPS: %.4f' % (1 / frame_times.get_avg()))
-                    plt.imshow(img_numpy)
-                    plt.axis('off')
-                    plt.title(str(img_id))
-
-                    root_dir = ''.join([args.mask_det_file[:-12], 'out/', str(images_meta[batch_id]['video_id']), '/'])
-                    if not os.path.exists(root_dir):
-                        os.makedirs(root_dir)
-                    plt.savefig(''.join([root_dir, str(images_meta[batch_id]['frame_id']), '.png']))
-                    plt.clf()
-                    # plt.show()
-                elif not args.no_bar:
+                if not args.no_bar:
                     if it > 1:
                         fps = 1 / frame_times.get_avg()
                     else:
@@ -668,7 +641,7 @@ def evaluate(net: STMask, dataset):
                     progress = (it + 1) / dataset_size * 100
                     progress_bar.set_val(it + 1)
                     print('\rProcessing Images  %s %6d / %6d (%5.2f%%)    %5.2f fps        '
-                          % (repr(progress_bar), it + 1, dataset_size, progress, fps), end='')
+                          % (repr(progress_bar), it, dataset_size, progress, fps), end='')
 
         if not args.display and not args.benchmark:
             print()

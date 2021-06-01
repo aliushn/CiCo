@@ -2,7 +2,7 @@
 import torch, torchvision
 import torch.nn as nn
 import torch.nn.functional as F
-from datasets.config import cfg, mask_type
+from datasets.config import cfg
 
 from .make_net import make_net
 from .Featurealign import FeatureAlign

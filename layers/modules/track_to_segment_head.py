@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from datasets.config import cfg
+from datasets import cfg
 from mmcv.ops import roi_align
 
 

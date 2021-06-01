@@ -598,8 +598,6 @@ class BackboneTransform(object):
         return img.astype(np.float32), masks, boxes, labels
 
 
-
-
 class BaseTransform(object):
     """ Transorm to be used when evaluating. """
 

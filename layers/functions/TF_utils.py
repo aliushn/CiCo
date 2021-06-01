@@ -1,31 +1,37 @@
 import torch
 import torch.nn.functional as F
-from layers.utils import center_size, point_form, decode, crop, generate_mask, correlate_operator
+from layers.utils import center_size, point_form, decode, crop, generate_mask, correlate_operator, generate_track_gaussian
 from layers.modules import bbox_feat_extractor
-from datasets import cfg, activation_func
+from datasets import cfg
 from utils import timer
 import matplotlib.pyplot as plt
 import os
 
 
-def CandidateShift(net, proto_next, fpn_feat_next, ref_candidate, img=None, img_meta=None):
+def CandidateShift(net, candidate, ref_candidate, img_meta=None, update_track=False):
         """
         The function try to shift the candidates of reference frame to that of target frame.
         The most important step is to shift the bounding box of reference frame to that of target frame
         :param net: network
-        :param proto_next: the proto of masks for the next frame
-        :param fpn_feat_next: fpn_feat of the next frame [256, h, w]
+        :param candidate: ptoto_data [1, h, w, 32] the proto of masks for the next frame
         :param ref_candidate: the candidate dictionary that includes 'box', 'conf', 'mask_coeff', 'track' items.
         :return: candidates on the target frame
         """
 
-        fpn_feat_next = fpn_feat_next.unsqueeze(0)
-        fpn_feat_ref = ref_candidate['fpn_feat'].unsqueeze(0)
+        proto_next = candidate['proto'].squeeze(0)
+        fpn_feat_next = candidate['fpn_feat']
+        fpn_feat_ref = ref_candidate['fpn_feat']
 
-        if ref_candidate['box'].size(0) == 0:
-            ref_candidate_shift = {'box': torch.tensor([])}
+        ref_candidate_shift = {}
+        for k, v in candidate.items():
+            if k in {'proto', 'fpn_feat', 'track', 'sem_seg'}:
+                ref_candidate_shift[k] = v
 
-        else:
+        if 'frame_id' in candidate.keys():
+            ref_candidate_shift['frame_id'] = candidate['frame_id']
+        sem_seg_next = candidate['sem_seg'].squeeze(0) if 'sem_seg' in candidate.keys() else None
+
+        if ref_candidate['box'].size(0) > 0:
 
             if cfg.temporal_fusion_module:
                 # we only use the features in the P3 layer to perform correlation operation
@@ -48,27 +54,37 @@ def CandidateShift(net, proto_next, fpn_feat_next, ref_candidate, img=None, img_
                 ref_candidate_shift = {'box': box_ref_shift.clone()}
                 ref_candidate_shift['score'] = ref_candidate['score'].clone() * 0.8
                 ref_candidate_shift['mask_coeff'] = ref_candidate['mask_coeff'].clone() + mask_coeff_shift
-                ref_candidate_shift['mask'] = generate_mask(proto_next, ref_candidate_shift['mask_coeff'], box_ref_shift)
+                pred_masks_next = generate_mask(proto_next, ref_candidate_shift['mask_coeff'], box_ref_shift)
 
             else:
 
                 # FEELVOS
                 # we only use the features in the P3 layer to perform correlation operation
                 # display_correlation_map(fpn_ref, img_meta, idx)
+
+                fpn_feat_next = F.normalize(fpn_feat_next, dim=1)
+                fpn_feat_ref = F.normalize(ref_candidate['fpn_feat'], dim=1)
+                ref_class = ref_candidate['class']
                 n_ref = ref_candidate['box'].size(0)
                 mask_pred_h, mask_pred_w = proto_next.size()[:2]
                 feat_h, feat_w = fpn_feat_ref.size()[2:]
                 downsampled_pred_masks_ref = F.interpolate(ref_candidate['mask'].unsqueeze(0).float(), (feat_h, feat_w),
-                                                           mode='bilinear', align_corners=False).squeeze(0).gt(0.5)
-                corr, attention_next = [], []
+                                                           mode='bilinear', align_corners=False).squeeze(0).gt(0.3)
+                corr, sem_seg_next_obj, attention_next = [], [], []
                 for j in range(n_ref):
                     corr.append(correlate_operator(fpn_feat_next,
                                                    fpn_feat_ref * downsampled_pred_masks_ref[j].view(1, 1, feat_h, feat_w),
-                                                   patch_size=cfg.correlation_patch_size, kernel_size=3))
+                                                   patch_size=cfg.correlation_patch_size, kernel_size=3, dilation_patch=1))
+                    if sem_seg_next is not None:
+                        sem_seg_next_obj.append(sem_seg_next[:, :, ref_class[j]-1])
+
+                if sem_seg_next is not None:
+                    sem_seg_next_obj = torch.stack(sem_seg_next_obj, dim=0)
+
                 corr = torch.cat(corr, dim=0)
                 upsampled_corr = F.interpolate(corr.float(), (mask_pred_h, mask_pred_w),
                                                mode='bilinear', align_corners=False)
-                upsampled_corr = torch.max(upsampled_corr, dim=1)[0]  # [n_ref, h, w]
+                upsampled_corr, _ = torch.max(upsampled_corr, dim=1)  # [n_ref, h, w]
 
                 if cfg.use_FEELVOS:
                     upsampled_fpn_feat_next = F.interpolate(fpn_feat_next.float(), (mask_pred_h, mask_pred_w),
@@ -84,36 +100,33 @@ def CandidateShift(net, proto_next, fpn_feat_next, ref_candidate, img=None, img_
                         pred_masks_next.append(vos_mask_temp)
                     pred_masks_next = torch.cat(pred_masks_next, dim=0)
                 else:
-                    heat_map = torch.zeros_like(upsampled_corr)
-                    heat_map[upsampled_corr > 0.5] = 1
-                    pred_masks_next = generate_mask(proto_next, ref_candidate['mask_coeff'])
-                    pred_masks_next = pred_masks_next * heat_map
+                    max_val = upsampled_corr.view(n_ref, -1).max(dim=-1)[0]
+                    upsampled_corr = upsampled_corr / max_val.view(-1, 1, 1)
+                    # heat_map = torch.zeros_like(upsampled_corr)
+                    heat_map = torch.clamp(upsampled_corr - 0.1, min=0)
+                    pred_masks_next_ori = generate_mask(proto_next, ref_candidate['mask_coeff'])
+                    pred_masks_next = pred_masks_next_ori * heat_map
 
-                ref_candidate_shift = {'mask': pred_masks_next}
+            ref_candidate_shift['mask'] = pred_masks_next
+            if update_track and 'track' in ref_candidate_shift.keys():
+                track_embed_next = F.normalize(ref_candidate_shift['track'], dim=-1).squeeze(0)
+                mu_next, var_next = generate_track_gaussian(track_embed_next, pred_masks_next.gt(0.5))
+                ref_candidate_shift['track_mu'] = mu_next
+                ref_candidate_shift['track_var'] = var_next
 
-                # plt.axis('off')
-                # plt.imshow((upsampled_corr[0] / upsampled_corr[0].max()).cpu().numpy())
-                # root_dir = ''.join(['/home/lmh/Downloads/VIS/code/OSTMask/weights/YTVIS2019/weights_r50_kl_vos_D_occluded_coeff/corr/',
-                #                     str(img_meta[0]['video_id'])])
-                # if not os.path.exists(root_dir):
-                #     os.makedirs(root_dir)
-                # plt.savefig(''.join([root_dir, '/', str(img_meta[0]['frame_id']), '.png']))
-                # plt.clf()
-                # plt.imshow(attention_next.view(mask_pred_h, mask_pred_w).cpu().numpy())
-                # root_dir = ''.join(['/home/lmh/Downloads/VIS/code/OSTMask/weights/YTVIS2019/weights_r50_kl_vos_D_occluded_coeff/vos_mask/',
-                #                     str(img_meta[0]['video_id'])])
-                # plt.savefig(''.join([root_dir, '/', str(img_meta[0]['frame_id']), '_att.png']))
-                # pred_masks_next_ori = generate_mask(proto_next, mask_coeff_ref)
-                # pred_masks_next_ori = pred_masks_next_ori.permute(1, 0, 2).contiguous().view(mask_pred_h, -1).gt(0.5)
-                # pred_masks_next = pred_masks_next.permute(1, 0, 2).contiguous().view(mask_pred_h, -1).gt(0.5)
-                # plt.imshow(torch.cat([pred_masks_next_ori, pred_masks_next]).cpu().numpy())
-                # plt.axis('off')
-                # root_dir = ''.join(['/home/lmh/Downloads/VIS/code/OSTMask/weights/YTVIS2019/weights_r50_kl_vos_D_occluded_coeff/vos_mask_min/',
-                #                     str(img_meta[0]['video_id'])])
-                # if not os.path.exists(root_dir):
-                #     os.makedirs(root_dir)
-                # plt.savefig(''.join([root_dir, '/', str(img_meta[0]['frame_id']), '_ori_vs_ori*corr.png']))
-                # plt.clf()
+            # plt.axis('off')
+            # plt.title('ref_mask, corr, sem, pre_mask, pred_mask*corr')
+            # temp = F.interpolate(sem_seg_next_obj.unsqueeze(0), (mask_pred_h, mask_pred_w),
+            #                      mode='bilinear', align_corners=False).squeeze(0)
+            # im_show = torch.stack((ref_candidate['mask'], upsampled_corr, temp,
+            #                        pred_masks_next_ori, pred_masks_next.gt_(0.5)), dim=2)
+            # plt.imshow((im_show.view(n_ref * mask_pred_h, -1)).cpu().numpy())
+            # root_dir = ''.join(['/home/lmh/Downloads/VIS/code/OSTMask/weights/YTVIS2019/weights_r50_ori_L0_m8_stuff/corr/',
+            #                     str(img_meta[0]['video_id'])])
+            # if not os.path.exists(root_dir):
+            #     os.makedirs(root_dir)
+            # plt.savefig(''.join([root_dir, '/', str(img_meta[0]['frame_id']), '.png']))
+            # plt.clf()
 
         return ref_candidate_shift
 
@@ -135,7 +148,7 @@ def generate_candidate(predictions):
         keep = (scores > cfg.eval_conf_thresh)
         for k, v in predictions.items():
             if k in {'proto', 'track', 'fpn_feat', 'sem_seg'}:
-                candidate_cur[k] = v[i]
+                candidate_cur[k] = v[i].unsqueeze(0)
             else:
                 candidate_cur[k] = v[i][keep]
 

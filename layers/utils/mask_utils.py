@@ -110,7 +110,7 @@ def plot_protos(protos, pred_masks, img_meta, num):
 
 def generate_mask(proto_data, mask_coeff, bbox=None):
     '''
-    :param proto_data: [h, w, 32]
+    :param proto_data: [h, w, 32] or [n, h, w, 32]
     :param mask_coeff: [n, 32]
     :param bbox: [n, 4]
     :return:
@@ -129,7 +129,17 @@ def generate_mask(proto_data, mask_coeff, bbox=None):
             # hope to get mask coefficients with L0 sparsity
             mask_coeff = mask_coeff * 2 - 1
             mask_coeff = torch.clamp(mask_coeff, min=0)
-        pred_masks = proto_data @ mask_coeff.t()
+
+        dim_proto = len(proto_data.size())
+        if dim_proto == 3:
+            pred_masks = proto_data @ mask_coeff.t()
+        elif dim_proto == 4:
+            # to generate masks for all objects in a video clip
+            pred_masks = (proto_data * mask_coeff.unsqueeze(1).unsqueeze(2)).sum(dim=-1)
+            pred_masks = pred_masks.permute(1, 2, 0).contiguous()
+        else:
+            print('please input the proto_data with size [h, w, c] or [n, h, w, c]')
+
         pred_masks = cfg.mask_proto_mask_activation(pred_masks)
         if bbox is not None:
             _, pred_masks = crop(pred_masks, bbox)  # [mask_h, mask_w, n]
@@ -139,23 +149,25 @@ def generate_mask(proto_data, mask_coeff, bbox=None):
     return det_masks
 
 
-def mask_iou(mask1, mask2):
-    # [c, n1, h, w], [c, n2, h, w]
-    d3 = len(mask1.size()) == 3
-    if d3:
-        mask1 = mask1.unsqueeze(0)
-        mask2 = mask2.unsqueeze(0)
-    c, n1 = mask1.size()[:2]
-    n2 = mask2.size(1)
-    mask1 = mask1.view(c, n1, 1, -1)
-    mask2 = mask2.view(c, 1, n2, -1)
-    intersection = torch.sum(mask1 * mask2, dim=-1)  # [c, n1, n2]
-    area1 = torch.sum(mask1, dim=-1)   # [c, n1, 1]
-    area2 = torch.sum(mask2, dim=-1)   # [c, 1, n2]
-    union = (area1 + area2) - intersection
-    mask_ious = intersection / union
-    keep = union == 0
-    mask_ious[keep] = torch.zeros(1, keep.sum(), device=mask1.device)
-    if d3:
-        mask_ious = mask_ious.squeeze(0)
-    return mask_ious
+def mask_iou(mask_a, mask_b):
+    '''
+    :param mask_a: [c, A, h, w]
+    :param mask_b: [c, B, h, w]
+    :return:
+    '''
+
+    use_batch = True
+    if mask_a.dim() == 3:
+        use_batch = False
+        mask_a = mask_a.unsqueeze(0)
+        mask_b = mask_b.unsqueeze(0)
+    c, n_a = mask_a.size()[:2]
+    n_b = mask_b.size(1)
+    mask_a = mask_a.view(c, n_a, 1, -1)
+    mask_b = mask_b.view(c, 1, n_b, -1)
+    intersection = torch.sum(mask_a * mask_b, dim=-1)   # [c, n_a, n_b]
+    area_a = torch.sum(mask_a, dim=-1)                  # [c, n_a, 1  ]
+    area_b = torch.sum(mask_b, dim=-1)                  # [c, 1,   n_b]
+    union = (area_a + area_b) - intersection
+    mask_ious = intersection.float() / torch.clamp(union.float(), min=1)
+    return mask_ious if use_batch else mask_ious.squeeze(0)

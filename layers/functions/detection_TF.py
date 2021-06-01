@@ -49,26 +49,23 @@ class Detect_TF(object):
     def detect(self, candidate):
         """ Perform nms for only the max scoring class that isn't background (class 0) """
 
-        if cfg.train_class:
-            scores = candidate['conf'].t()   # [num_class+1, num_anchors*h*w]
-        else:
-            scores = candidate['stuff'].view(-1)      # [num_anchors*h*w, 1]
+        scores = candidate['conf'].t() if cfg.train_class else candidate['stuff'].view(-1)
         boxes = candidate['box']
         mask_coeff = candidate['mask_coeff']
-        proto_data = candidate['proto']
-        sem_data = candidate['sem_seg'] if cfg.use_semantic_segmentation_loss else None  # [h, w, num_class]
+        proto_data = candidate['proto'].squeeze(0)
+        sem_data = candidate['sem_seg'].squeeze(0) if cfg.use_semantic_segmentation_loss else None  # [h, w, num_class]
         centerness_scores = candidate['centerness'] if cfg.train_centerness else None
-        mask_occluded_coeff = candidate['mask_occluded_coeff'] if cfg.mask_coeff_for_occluded else None
 
         if boxes.size(0) == 0:
-            return {'box': boxes, 'mask_coeff': mask_coeff, 'class': torch.Tensor(), 'score': torch.Tensor()}
+            out_aft_nms = {'box': boxes, 'mask_coeff': mask_coeff, 'class': torch.Tensor(), 'score': torch.Tensor()}
 
-        if self.use_cross_class_nms:
-            out_aft_nms = self.cc_fast_nms(boxes, mask_coeff, mask_occluded_coeff, proto_data, scores,
-                                           sem_data, centerness_scores, self.nms_thresh, self.top_k)
         else:
-            out_aft_nms = self.fast_nms(boxes, mask_coeff, proto_data, scores, sem_data, centerness_scores,
-                                        self.nms_thresh, self.top_k)
+            if self.use_cross_class_nms:
+                out_aft_nms = self.cc_fast_nms(boxes, mask_coeff, proto_data, scores,
+                                               sem_data, centerness_scores, self.nms_thresh, self.top_k)
+            else:
+                out_aft_nms = self.fast_nms(boxes, mask_coeff, proto_data, scores, sem_data, centerness_scores,
+                                            self.nms_thresh, self.top_k)
 
         for k, v in candidate.items():
             if k in {'fpn_feat', 'proto', 'track', 'sem_seg'}:
@@ -76,23 +73,11 @@ class Detect_TF(object):
 
         return out_aft_nms
 
-    def cc_fast_nms(self, boxes, masks_coeff, masks_occluded_coeff, proto_data, scores, sem_data, centerness_scores,
+    def cc_fast_nms(self, boxes, masks_coeff, proto_data, scores, sem_data, centerness_scores,
                     iou_threshold: float = 0.5, top_k: int = 200):
         # Collapse all the classes into 1
         if cfg.train_class:
             scores, classes = scores[1:].max(dim=0)   # [n_dets]
-        else:
-            # For a specific instance, we only take the fired area into account to calculate its category
-            # Step 1: multiply instances' masks and semantic segmentation to filter fired area
-            # step 2: mean of all pixels in the fired area as its classification confidence
-            h, w = sem_data.size()[:2]
-            sem_data = sem_data.permute(2, 0, 1).contiguous().unsqueeze(0)   # [1, num_class, h, w]
-            det_masks = generate_mask(proto_data, masks_coeff, boxes)
-            downsampled_det_masks = F.interpolate(det_masks.unsqueeze(1).float(), (h, w),
-                                                  mode='bilinear', align_corners=False).gt(0.5)
-            scores_conf = (sem_data * downsampled_det_masks).sum(dim=(2, 3)) / downsampled_det_masks.sum(dim=(2, 3))
-            scores_conf, classes = scores_conf.max(dim=1)
-            scores = scores * scores_conf  # [n_dets]
 
         if centerness_scores is not None:
             scores = scores * centerness_scores.view(1, -1)
@@ -103,17 +88,16 @@ class Detect_TF(object):
         if len(idx) == 0:
             out_after_NMS = {'box': torch.Tensor(), 'mask_coeff': torch.Tensor(), 'class': torch.Tensor(),
                              'score': torch.Tensor()}
-            if cfg.mask_coeff_for_occluded:
-                out_after_NMS['mask_occluded_coeff'] = torch.Tensor()
 
         else:
+            det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
 
             # Compute the pairwise IoU between the boxes
             boxes_idx = boxes[idx]
             iou = jaccard(boxes_idx, boxes_idx)
+            det_masks_idx = det_masks_soft[idx].gt(0.5).float()
+
             if cfg.nms_as_miou:
-                det_masks_idx = generate_mask(proto_data, masks_coeff[idx], boxes[idx])
-                det_masks_idx = det_masks_idx.gt(0.5).float()
                 m_iou = mask_iou(det_masks_idx, det_masks_idx)
                 iou = iou * 0.5 + m_iou * 0.5
 
@@ -131,14 +115,29 @@ class Detect_TF(object):
 
             boxes = boxes[idx_out]
             masks_coeff = masks_coeff[idx_out]
-            classes = classes[idx_out] + 1
-            scores = scores[idx_out]
+            det_masks_soft = det_masks_soft[idx_out]
 
-            out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': classes, 'score': scores}
+            if cfg.train_class:
+                classes = classes[idx_out]
+                scores = scores[idx_out]
+            else:
+                # For a specific instance, we only take the fired area into account to calculate its category
+                # Step 1: multiply instances' masks and semantic segmentation to filter fired area
+                # step 2: mean of all pixels in the fired area as its classification confidence
+                sem_data = sem_data.permute(2, 0, 1).contiguous().unsqueeze(0)
+                sem_data = (sem_data * det_masks_soft.gt(0.5).float().unsqueeze(1)).gt(0.3).float()
+                MIoU = mask_iou(sem_data[:, 1:], det_masks_soft.unsqueeze(1))  # [n, n_class, 1]
+                # MIou_sorted,  MIou_sorted_idx = MIoU.sort(1, descending=True)
+                # print(MIou_sorted[:, :3].reshape(-1), MIou_sorted_idx[:, :3].reshape(-1), scores[idx_out])
+                max_miou, classes = MIoU.max(dim=1)
+                classes = classes.view(-1) + 1
+                scores = max_miou.view(-1)
+
+            out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': classes, 'score': scores,
+                             'mask': det_masks_soft}
+
             if cfg.train_centerness:
                 out_after_NMS['centerness'] = centerness_scores[idx_out]
-            if cfg.mask_coeff_for_occluded:
-                out_after_NMS['mask_occluded_coeff'] = masks_occluded_coeff
 
         return out_after_NMS
 
