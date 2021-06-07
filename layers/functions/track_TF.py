@@ -1,5 +1,5 @@
 import torch
-from layers.utils import jaccard,  mask_iou, generate_track_gaussian, compute_comp_scores, generate_mask, compute_kl_div
+from layers.utils import compute_DIoU,  mask_iou, generate_track_gaussian, compute_comp_scores, generate_mask, compute_kl_div
 from .TF_utils import CandidateShift
 from utils import timer
 
@@ -97,7 +97,7 @@ class Track_TF(object):
             sim = torch.div(1., torch.exp(0.1 * torch.cat([sim_dummy, kl_divergence], dim=-1)))
 
             # Calculate BIoU and MIoU between detected masks and tracked masks for assign IDs
-            bbox_ious = jaccard(det_bbox, self.prev_candidate['box'])  # [n_dets, n_prev]
+            bbox_ious = compute_DIoU(det_bbox, self.prev_candidate['box'])  # [n_dets, n_prev]
             mask_ious = mask_iou(det_masks_soft.gt(0.5).float(), self.prev_candidate['mask'].gt(0.5))  # [n_dets, n_prev]
 
             # compute comprehensive score

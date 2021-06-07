@@ -30,6 +30,7 @@ def str2bool(v):
 
 parser = argparse.ArgumentParser(
     description='Yolact Training Script')
+
 parser.add_argument('--port', default=None, type=str,
                     help='port for dist')
 parser.add_argument('--local_rank', default=0, type=int,
@@ -110,7 +111,7 @@ if torch.cuda.is_available():
 else:
     torch.set_default_tensor_type('torch.FloatTensor')
 
-loss_types = ['B', 'BIoU', 'C', 'stuff', 'M', 'MIoU', 'T', 'center', 'B_shift', 'M_shift', 'M_occluded',
+loss_types = ['B', 'BIoU', 'Rep', 'C', 'stuff', 'M', 'MIoU', 'T', 'center', 'B_shift', 'M_shift', 'M_occluded',
               'P', 'D', 'S', 'I']
 
 
@@ -248,7 +249,7 @@ def train():
                                                                                         devices=torch.cuda.current_device())
 
                 preds = net(imgs)
-                losses = criterion(preds, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds)
+                losses = criterion(imgs, preds, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds)
                 if not args.is_distributed:
                     losses = {k: v.mean() for k, v in losses.items()}  # Mean here because Dataparallel
                 loss = sum([losses[k] for k in losses])  # same weights in three sub-losses
@@ -284,9 +285,9 @@ def train():
                     log.log('train', loss=loss_info, epoch=epoch, iter=iteration,
                             lr=round(cur_lr, 10), elapsed=elapsed)
 
-                # if i == 0 and epoch > 0:
-                #     if epoch % args.save_interval == 0 and args.local_rank == 0:
-                if iteration == 200 and args.local_rank == 0:
+                if i == 0 and epoch > 0:
+                    if epoch % args.save_interval == 0 and args.local_rank == 0:
+                # if iteration == 200 and args.local_rank == 0:
                         if args.keep_latest:
                             latest = SavePath.get_latest(args.save_folder, cfg.name)
 

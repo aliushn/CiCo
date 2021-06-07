@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-from layers.utils import match, log_sum_exp, decode, center_size, crop, jaccard, point_form, generate_mask, compute_kl_div
+from layers.utils import compute_DIoU, match, log_sum_exp, decode, center_size, crop, jaccard, point_form, generate_mask, compute_kl_div, generate_track_gaussian
 from .track_to_segment_head import bbox_feat_extractor
 from layers.utils.track_utils import correlate_operator
 
@@ -51,7 +51,7 @@ class MultiBoxLoss(nn.Module):
             self.class_instances = None
             self.total_instances = 0
 
-    def forward(self, predictions, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds):
+    def forward(self, imgs, predictions, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds):
         """Multibox Loss
         Args:
             predictions (tuple): A tuple containing loc preds, conf preds,
@@ -92,7 +92,7 @@ class MultiBoxLoss(nn.Module):
         proto_data = predictions['proto']
         sem_data = predictions['sem_seg'] if cfg.use_semantic_segmentation_loss else None
 
-        losses, conf_t, ids_t, idx_t = self.multibox_loss(loc_data, conf_data, stuff_data, mask_coeff,
+        losses, conf_t, ids_t, idx_t = self.multibox_loss(imgs, loc_data, conf_data, stuff_data, mask_coeff,
                                                           centerness_data, proto_data, priors, sem_data,
                                                           gt_bboxes, gt_labels,  gt_masks, gt_ids, num_crowds)
 
@@ -114,8 +114,9 @@ class MultiBoxLoss(nn.Module):
                 losses.update(losses_shift)
 
             elif cfg.use_FEELVOS:
-                bb_feat_ref = predictions['fpn_feat'][::2].contiguous()
-                bb_feat_next = predictions['fpn_feat'][1::2].contiguous()
+
+                bb_feat_ref = F.normalize(predictions['fpn_feat'][::2].contiguous(), dim=1)
+                bb_feat_next = F.normalize(predictions['fpn_feat'][1::2].contiguous(), dim=1)
                 gt_masks_next = gt_masks[1::2]
                 gt_ids_next = gt_ids[1::2]
                 conf_t_ref = conf_t[::2].detach()
@@ -142,7 +143,7 @@ class MultiBoxLoss(nn.Module):
         x1, x2 = torch.split(x, [1, 1], dim=-1)
         return x1.squeeze(-1), x2.squeeze(-1)
 
-    def multibox_loss(self, loc_data, conf_data, stuff_data, mask_data, centerness_data, proto_data, priors, segm_data,
+    def multibox_loss(self, imgs, loc_data, conf_data, stuff_data, mask_data, centerness_data, proto_data, priors, segm_data,
                       gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds):
         batch_size, num_priors = loc_data.size()[0:2]
 
@@ -152,6 +153,7 @@ class MultiBoxLoss(nn.Module):
         gt_boxes_t = loc_data.new(batch_size, num_priors, 4)
         conf_t = loc_data.new(batch_size, num_priors).long()
         idx_t = loc_data.new(batch_size, num_priors).long()
+
         if gt_ids is not None:
             ids_t = loc_data.new(batch_size, num_priors).long()  # pids for tracking
         else:
@@ -205,8 +207,14 @@ class MultiBoxLoss(nn.Module):
 
             if cfg.use_boxiou_loss:
                 decoded_loc_p = decode(loc_p, pos_priors, cfg.use_yolo_regressors)
-                DIoU = self.get_DIoU(decoded_loc_p, gt_boxes_t[pos])
-                losses['BIoU'] = (pos_weights * (1-DIoU)).sum() * cfg.bboxiou_alpha
+                DIoU = compute_DIoU(decoded_loc_p, gt_boxes_t[pos]).diag().view(-1)
+                # DIoU in [-1, 1], 0.5(DIoU+1) in [0, 1], - In( 0.5*(1+DIoU) ) in [0, +infinte]
+                DIoU_loss = - torch.log(torch.clamp(0.5 * (1 + DIoU), min=1e-5))
+                losses['BIoU'] = (pos_weights * DIoU_loss).sum() * cfg.bboxiou_alpha
+                # add repulsion loss for crowd occlusion
+                if cfg.use_repulsion_loss:
+                    losses['Rep'] = self.repulsion_loss(pos, idx_t, decoded_loc_p, gt_bboxes)
+
             else:
                 losses['B'] = (pos_weights.view(-1, 1) * F.smooth_l1_loss(loc_p, loc_t,
                                                                           reduction='none')).sum() * cfg.bbox_alpha
@@ -253,25 +261,36 @@ class MultiBoxLoss(nn.Module):
         #  - S: Semantic Segmentation Loss
         return losses, conf_t, ids_t, idx_t
 
-    def get_DIoU(self, pos_pred_boxes, pos_gt_boxes):
-        # calculate bbox IoUs
-        IoU = jaccard(pos_gt_boxes, pos_pred_boxes).diag().view(-1)
+    def repulsion_loss(self, pos, idx_t, decoded_loc_p, gt_bboxes):
+        batch_size = pos.size(0)
+        rep_loss = torch.tensor(0.0, device=pos.device)
+        n = 0.
 
-        # calculate the diagonal length of the smallest enclosing box
-        x_label = torch.cat([pos_pred_boxes[:, ::2], pos_gt_boxes[:, ::2]], dim=1)
-        y_label = torch.cat([pos_pred_boxes[:, 1::2], pos_gt_boxes[:, 1::2]], dim=1)
-        c2 = (x_label.max(dim=1)[0] - x_label.min(dim=1)[0])**2 + (y_label.max(dim=1)[0] - y_label.min(dim=1)[0])**2
-        c2 = torch.clamp(c2, min=1e-10)
+        for idx in range(batch_size):
+            n_pos_cur = pos[idx].sum()
+            # the overlaps between predicted boxes and ground-truth boxes
+            overlaps_cur = jaccard(decoded_loc_p, gt_bboxes[idx])  # [n_pos, n_gt]
 
-        # get the distance of centres between pred_bbox and gt_bbox
-        pos_pred_boxes_c = pos_pred_boxes[:, :2] / 2 + pos_pred_boxes[:, 2:] / 2
-        pos_gt_boxes_c = pos_gt_boxes[:, :2] / 2 + pos_gt_boxes[:, 2:] / 2
-        d2 = ((pos_pred_boxes_c - pos_gt_boxes_c)**2).sum(dim=1)
+            # matched ground-truth bounding box idx with each predicted boxes
+            idx_t_cur = idx_t[idx][pos[idx]]
+            # to find surrounding boxes, we assign the overlaps of matched idx as -1
+            for j in range(pos[idx].sum()):
+                overlaps_cur[j, idx_t_cur[j]] = -1
 
-        # DIoU
-        DIoU = IoU - d2/c2
+            # Crowd occlusion: BIoU greater than 0.1
+            keep = overlaps_cur > 0.1
+            if keep.sum() > 0:
+                n += 1
+                rep_decoded_loc_p = decoded_loc_p.unsqueeze(1).repeat(1, n_pos_cur, 1)[keep]
+                rep_gt_boxes = gt_bboxes[idx].unsqueeze(0).repeat(n_pos_cur, 1, 1)[keep]
 
-        return DIoU
+                rep_DIoU = compute_DIoU(rep_decoded_loc_p, rep_gt_boxes).diag().view(-1)
+                # rep_DIoU in [-1, 1], 0.5 * (1-rep_DIoU) in [0, 1]
+                # rep_loss = -In (0.5*(1-DIoU))
+                rep_DIoU_loss = - torch.log(torch.clamp(0.5 * (1 - rep_DIoU), min=1e-5))
+                rep_loss += rep_DIoU_loss.mean() * 0.2 * cfg.bboxiou_alpha
+
+        return rep_loss / max(n, 1.) * batch_size
 
     def VOS_loss(self, bb_feat_next, gt_masks_next, gt_ids_next, bb_feat_ref, conf_t_ref, idx_t_ref, ids_t_ref,
                  gt_bboxes_ref, gt_masks_ref):
@@ -286,7 +305,7 @@ class MultiBoxLoss(nn.Module):
             pos = conf_t_ref[i] > 0
             pos_idx_ref = idx_t_ref[i, pos]
             pos_ids_ref = ids_t_ref[i, pos]
-            # bbox_t_ref = gt_bboxes_ref[i][pos_idx_ref]
+            bbox_t_ref = gt_bboxes_ref[i][pos_idx_ref]
 
             # if an instance disappears in the next frame, we hope the vos head can output a mask with all 0
             masks_t_next = torch.zeros((pos.sum(), mask_gt_h, mask_gt_w), device=idx_t_ref.device)
@@ -305,12 +324,12 @@ class MultiBoxLoss(nn.Module):
                 corr_cur = correlate_operator(bb_feat_next[i].unsqueeze(0),
                                               (bb_feat_ref[i] * downsampled_masks_t_ref[j].unsqueeze(0)).unsqueeze(0),
                                               patch_size=cfg.correlation_patch_size, kernel_size=3)
-                upsampled_corr_cur = F.interpolate(corr_cur.float(), (int(mask_gt_h/4), int(mask_gt_w/4)),
-                                                   mode='bilinear', align_corners=False)
-                upsampled_corr_cur = torch.max(upsampled_corr_cur, dim=1)[0]  # [1, h, w]
-                norm_upsampled_corr_cur = upsampled_corr_cur / torch.clamp(upsampled_corr_cur.max(), min=1e-5)
-                vos_feat = upsampled_bb_feat_next[i] * norm_upsampled_corr_cur
-                pred_masks_next.append(self.net.VOS_head(vos_feat.unsqueeze(0)) * attention_next[i].unsqueeze(0))
+                corr_cur = torch.max(corr_cur, dim=1)[0]  # [1, h/16, w/16]
+                vos_feat = bb_feat_next[i] * corr_cur
+                upsampled_vos_feat = F.interpolate(vos_feat.unsqueeze(0), (int(mask_gt_h/4), int(mask_gt_w/4)),
+                                                   mode='bilinear', align_corners=False)   # [1, h/4, w/4]
+                pred_vos = self.net.VOS_head(upsampled_vos_feat)
+                pred_masks_next.append(pred_vos * attention_next[i].unsqueeze(0))
             pred_masks_next = torch.cat(pred_masks_next, dim=1)
             upsampled_pred_masks_next = F.interpolate(pred_masks_next.float(), (mask_gt_h, mask_gt_w),
                                                       mode='bilinear', align_corners=False).squeeze(0)
@@ -322,19 +341,18 @@ class MultiBoxLoss(nn.Module):
                 pre_loss = F.smooth_l1_loss(upsampled_pred_masks_next, masks_t_next, reduction='none')
 
             # only consider the region of the predicted reference bbox
-            # box_t_ref_c = center_size(bbox_t_ref)
+            box_t_ref_c = center_size(bbox_t_ref)
             # we use 1.2 box to crop features
-            # box_next_crop_c = torch.cat([box_t_ref_c[:, :2],
-            #                              torch.clamp(box_t_ref_c[:, 2:] * 1.5, min=0, max=1)], dim=1)
-            # box_next_crop = point_form(box_next_crop_c)
-            # print(pre_loss.permute(1, 2, 0).contiguous().size(), box_next_crop.size())
-            # _, pre_loss_crop = crop(pre_loss.permute(1, 2, 0).contiguous(), box_next_crop)  # [h, w, n_ref]
-            # gt_box_width = box_next_crop_c[:, 2] * mask_gt_w
-            # gt_box_width = torch.clamp(gt_box_width, min=1)
-            # gt_box_height = box_next_crop_c[:, 3] * mask_gt_h
-            # gt_box_height = torch.clamp(gt_box_height, min=1)
-            # pre_loss_crop = pre_loss_crop.sum(dim=(0, 1)) / gt_box_width / gt_box_height
-            loss += pre_loss.mean()
+            box_next_crop_c = torch.cat([box_t_ref_c[:, :2],
+                                         torch.clamp(box_t_ref_c[:, 2:] * 1.5, min=0, max=1)], dim=1)
+            box_next_crop = point_form(box_next_crop_c)
+            _, pre_loss_crop = crop(pre_loss.permute(1, 2, 0).contiguous(), box_next_crop)  # [h, w, n_ref]
+            gt_box_width = box_next_crop_c[:, 2] * mask_gt_w
+            gt_box_width = torch.clamp(gt_box_width, min=1)
+            gt_box_height = box_next_crop_c[:, 3] * mask_gt_h
+            gt_box_height = torch.clamp(gt_box_height, min=1)
+            pre_loss_crop = pre_loss_crop.sum(dim=(0, 1)) / gt_box_width / gt_box_height
+            loss += pre_loss_crop.mean()
 
         return {'M_shift': cfg.maskshift_alpha * loss / bs}
 
@@ -443,46 +461,32 @@ class MultiBoxLoss(nn.Module):
         else:
             pos_ids_t = gt_ids
             pos_masks = gt_masks
+            pos_bboxes = gt_bboxes
 
-        # resize pos_masks_ref and pos_masks_next to keep the same size with track data
-        downsampled_pos_masks = F.interpolate(pos_masks.unsqueeze(1).float(), (h, w),
-                                              mode='bilinear', align_corners=False).gt(0.5)
-
-        # remove objects whose pixels of masks in the resolution (track_h, track_w) less than 1
-        # because Gaussian distribution needs at least two pixels to build the means and variances
-        keep = (downsampled_pos_masks.sum(dim=(2, 3)) > 1).squeeze(1)
-
-        if len(keep) > 0:
-            return downsampled_pos_masks[keep], pos_ids_t[keep]
-        else:
-            return None, None, None
+        return pos_masks, pos_bboxes, pos_ids_t
 
     def track_loss(self, track_data, gt_masks, gt_ids, proto_data, mask_coeff, gt_bboxes,
                    loc_data, priors, conf_t, ids_t, idx_t):
         bs, track_h, track_w, t_dim = track_data.size()
         loss = torch.tensor(0., device=track_data.device)
-        # [bs, t_dim, h, w]
-        track_data = track_data.permute(0, 3, 1, 2).contiguous()
 
         n_bs_track, n_bs_class, n_clip = torch.zeros(1), torch.zeros(1), 2
         for i in range(bs//n_clip):
             mu, var, obj_ids = [], [], []
 
             for j in range(n_clip):
-                masks_cur, ids_t_cur = self.prepare_masks_for_track(track_h, track_w, conf_t[2*i+j],
-                                                                    ids_t[2*i+j], loc_data[2*i+j],
-                                                                    priors[2*i+j], idx_t[2*i+j],
-                                                                    gt_bboxes[2*i+j], proto_data[2*i+j],
-                                                                    mask_coeff[2*i+j], gt_masks[2*i+j],
-                                                                    gt_ids[2*i+j])
 
-                if masks_cur is not None:
-                    track_data_cur = track_data[2*i+j].unsqueeze(0) * masks_cur             # [n, t_dim, h, w]
-                    mu_cur = track_data_cur.sum(dim=(2, 3)) / masks_cur.sum(dim=(2, 3))     # [n, t_dim]
-                    var_cur = torch.sum((track_data_cur - mu_cur.view(-1, t_dim, 1, 1)) ** 2, dim=(2, 3))
-                    mu.append(mu_cur)
-                    var.append(var_cur)
-                    obj_ids.append(ids_t_cur)
+                masks_cur, bbox_cur, ids_t_cur = self.prepare_masks_for_track(track_h, track_w, conf_t[2*i+j],
+                                                                              ids_t[2*i+j], loc_data[2*i+j],
+                                                                              priors[2*i+j], idx_t[2*i+j],
+                                                                              gt_bboxes[2*i+j], proto_data[2*i+j],
+                                                                              mask_coeff[2*i+j], gt_masks[2*i+j],
+                                                                              gt_ids[2*i+j])
+
+                mu_cur, var_cur = generate_track_gaussian(track_data[2 * i + j], masks_cur, bbox_cur)
+                mu.append(mu_cur)
+                var.append(var_cur)
+                obj_ids.append(ids_t_cur)
 
             mu, var, obj_ids = torch.cat(mu, dim=0), torch.cat(var, dim=0), torch.cat(obj_ids, dim=0)
 
@@ -731,12 +735,14 @@ class MultiBoxLoss(nn.Module):
 
         for idx in range(mask_coeff.size(0)):
             cur_pos = pos[idx]
-            pos_idx_t = idx_t[idx, cur_pos]
-            pos_pred_box = decode(loc_data[idx, cur_pos], priors[idx, cur_pos], cfg.use_yolo_regressors).detach()
+            if cur_pos.sum() == 0:
+                continue
 
             if cfg.mask_proto_crop:
                 # Note: this is in point-form
                 if cfg.mask_proto_crop_with_pred_box:
+                    pos_pred_box = decode(loc_data[idx, cur_pos], priors[idx, cur_pos],
+                                          cfg.use_yolo_regressors).detach()
                     pos_gt_box_t = pos_pred_box
                 else:
                     pos_gt_box_t = gt_box_t[idx, cur_pos]
@@ -746,9 +752,7 @@ class MultiBoxLoss(nn.Module):
                 pos_gt_box_t = point_form(pos_gt_box_t)
                 pos_gt_box_t = torch.clamp(pos_gt_box_t, min=1e-5, max=1)
 
-            if pos_idx_t.size(0) == 0:
-                continue
-
+            pos_idx_t = idx_t[idx, cur_pos]
             mask_t = masks_gt[idx][pos_idx_t].float()       # [n, mask_h, mask_w]
             proto_masks = proto_data[idx]                   # [mask_h, mask_w, 32]
             proto_coeff = mask_coeff[idx, cur_pos, :]         # [num_pos, 32, Class+1]
@@ -756,7 +760,10 @@ class MultiBoxLoss(nn.Module):
             # get mask loss for ono-occluded part
             # pred_masks = generate_mask(proto_masks, proto_coef, pos_gt_box_t)
             mask_gt_h, mask_gt_w = mask_t.size()[1:]
-            pred_masks = generate_mask(proto_masks, proto_coeff)
+            if cfg.mask_proto_crop:
+                pred_masks = generate_mask(proto_masks, proto_coeff, pos_gt_box_t)
+            else:
+                pred_masks = generate_mask(proto_masks, proto_coeff)
             upsampled_pred_masks = F.interpolate(pred_masks.unsqueeze(0).float(),
                                                  (mask_gt_h, mask_gt_w),
                                                  mode=interpolation_mode, align_corners=False).squeeze(0)
@@ -767,17 +774,10 @@ class MultiBoxLoss(nn.Module):
                 pre_loss = F.smooth_l1_loss(upsampled_pred_masks, mask_t, reduction='none')
 
             if cfg.mask_proto_crop:
-                upsampled_crop_masks, _ = crop(upsampled_pred_masks.permute(1, 2, 0).contiguous(),
-                                               pos_gt_box_t)  # [mask_h, mask_w, n]
-                upsampled_crop_masks = upsampled_crop_masks.permute(2, 0, 1).contiguous()  # [n_masks, h, w]
-                weights = upsampled_crop_masks / torch.clamp(upsampled_crop_masks.sum(dim=(1, 2), keepdim=True), min=1)
-
-                if cfg.mask_proto_crop_outside:
-                    upsampled_crop_masks_outside = (upsampled_crop_masks == 0).float()
-                    weights_outside = upsampled_crop_masks_outside / torch.clamp(upsampled_crop_masks_outside.sum(dim=(1, 2), keepdim=True), min=1)
-                    weights = weights + weights_outside
-
-                pre_loss = (pre_loss * weights).sum(dim=(1, 2))
+                pos_gt_box_wh = center_size(pos_gt_box_t)[:, :2]
+                pos_gt_box_w = torch.clamp(pos_gt_box_wh[:, 0] * mask_gt_w, min=1)
+                pos_gt_box_h = torch.clamp(pos_gt_box_wh[:, 1] * mask_gt_h, min=1)
+                pre_loss = pre_loss.sum(dim=(1, 2)) / pos_gt_box_w / pos_gt_box_h
                 loss_m += torch.sum(pos_weights_per_img[idx] * pre_loss)
             else:
                 loss_m += torch.sum(pos_weights_per_img[idx] * pre_loss) / mask_gt_h / mask_gt_w

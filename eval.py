@@ -23,7 +23,6 @@ import cv2
 from torch.utils.tensorboard import SummaryWriter
 
 
-
 def str2bool(v):
     if v.lower() in ('yes', 'true', 't', 'y', '1'):
         return True
@@ -173,7 +172,7 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
     boxes = dets_out['box'][:args.top_k].detach().cpu().numpy()
     classes = dets_out['class'][:args.top_k].view(-1).detach().cpu().numpy()
     num_dets_to_consider = min(args.top_k, classes.shape[0])
-    color_type = dets_out['box_ids']
+    color_type = dets_out['box_ids'].view(-1)
     for j in range(num_dets_to_consider):
         if scores[j] < args.score_threshold:
             num_dets_to_consider = j
@@ -589,25 +588,26 @@ def evaluate(net: STMask, dataset):
             n_preds = len(preds)
 
             if n_preds > 0:
-                for batch_id in range(n_preds):
+                for batch_id, pred in enumerate(preds):
+
                     if args.display:
                         img_id = (out_img_metas[batch_id]['video_id'], out_img_metas[batch_id]['frame_id'])
-                        root_dir = ''.join([args.mask_det_file[:-12], 'out/', str(img_id[0]), '/'])
+                        root_dir = os.path.join(args.mask_det_file[:-12], 'out', str(img_id[0]))
                         if not os.path.exists(root_dir):
                             os.makedirs(root_dir)
                         if not cfg.display_mask_single:
-                            img_numpy = prep_display(preds[batch_id], out_images[batch_id], pad_h, pad_w,
+                            img_numpy = prep_display(pred, out_images[batch_id], pad_h, pad_w,
                                                      img_meta=out_img_metas[batch_id], img_ids=img_id)
                             plt.imshow(img_numpy)
                             plt.axis('off')
                             plt.title(str(img_id))
-                            plt.savefig(''.join([root_dir, str(img_id[1]), '_sem.png']))
+                            plt.savefig(''.join([root_dir, '/', str(img_id[1]), '.png']))
                             plt.clf()
 
                         else:
-                            for p in range(preds[batch_id]['box'].size(0)):
+                            for p in range(pred['box'].size(0)):
                                 preds_single = {}
-                                for k, v in preds[batch_id].items():
+                                for k, v in pred.items():
                                     if k not in {'proto'}:
                                         preds_single[k] = v[p]
 
@@ -616,12 +616,12 @@ def evaluate(net: STMask, dataset):
                                                          img_meta=out_img_metas[batch_id], img_ids=img_id)
                                 plt.imshow(img_numpy)
                                 plt.axis('off')
-                                plt.savefig(''.join([root_dir, str(img_id[1]), '_', str(p), '.png']))
+                                plt.savefig(''.join([root_dir, '/', str(img_id[1]), '_', str(p), '.png']))
                                 plt.clf()
 
                     else:
                         cfg.preserve_aspect_ratio = True
-                        preds_cur = postprocess_ytbvis(preds[batch_id], pad_h, pad_w, out_img_metas[batch_id],
+                        preds_cur = postprocess_ytbvis(pred, pad_h, pad_w, out_img_metas[batch_id],
                                                        score_threshold=cfg.eval_conf_thresh)
                         segm_results = bbox2result_with_id(preds_cur, cfg.classes)
                         results.append(segm_results)

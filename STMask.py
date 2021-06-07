@@ -113,7 +113,7 @@ class STMask(nn.Module):
             # track to segment
             if cfg.temporal_fusion_module:
                 corr_channels = 2*in_channels + cfg.correlation_patch_size**2
-                self.TemporalNet = TemporalNet(corr_channels, cfg.mask_proto_n)
+                self.TemporalNet = TemporalNet(corr_channels, cfg.mask_dim)
             elif cfg.use_FEELVOS:
                 # using FEELVOS, VOS strategy, to track instances from previous to current frame
                 VOS_in_channels = in_channels
@@ -355,17 +355,19 @@ class STMask(nn.Module):
                 index[:n_frame_clip] = 1
             else:
                 pred_outs_all += pred_outs_cur[T:]
-                index[T:n_frame_clip] = 1
+                min_idx = (n_clip+1)*(n_frame_clip-T)-1
+                max_idx = min_idx + (n_frame_clip-T)
+                index[min_idx:max_idx] = 1
 
             n_clip += 1
-            candidate_clip = candidate_clip[T:]
-            img_meta_clip = img_meta_clip[T:]
+            candidate_clip = candidate_clip[T+1:]
+            img_meta_clip = img_meta_clip[T+1:]
 
         if last_clip:
             if len(candidate_clip) > T:
                 pred_outs_cur = self.Track_TF_Clip(self, candidate_clip, img_meta_clip)
-                pred_outs_all += pred_outs_cur[T+1:]
-                index[T:] = 1
+                pred_outs_all += pred_outs_cur[T:]
+                index[T-len(candidate_clip):] = 1
 
         return index, pred_outs_all
 
@@ -419,6 +421,7 @@ class STMask(nn.Module):
                     self.candidate_clip += candidate_after_NMS
                     self.img_meta_clip += img_meta
                     n_frames_cur_clip = len(self.candidate_clip)
+                    out_imgs, out_img_metas = [], []
                     if n_frames_cur_clip >= n_frame_eval_clip:
                         is_first_idx = [i for i in range(1, n_frames_cur_clip) if self.img_meta_clip[i]['is_first']]
 
@@ -444,23 +447,21 @@ class STMask(nn.Module):
                         # to remove frames that has been processed
                         # the last T frames will be leaved to guarantee overlapped frames in two adjacent clips
                         # for tracking between clips
-                        keep = index > 0
-                        keep_idx = (torch.arange(n_frames_cur_clip)[keep]).tolist()
-                        out_imgs = self.imgs_clip[min(keep_idx):max(keep_idx)+1]
-                        out_img_metas = self.img_meta_clip[min(keep_idx):max(keep_idx)+1]
-                        if len(is_first_idx) == 0:
-                            self.candidate_clip = self.candidate_clip[T+1:]
-                            self.img_meta_clip = self.img_meta_clip[T+1:]
-                            self.imgs_clip = self.imgs_clip[T+1:]
-                        else:
-                            keep_idx = (torch.arange(len(index2))[index2 == 0]).tolist()
-                            self.candidate_clip = self.candidate_clip[is_first_idx[0]:][min(keep_idx):max(keep_idx)+1]
-                            self.img_meta_clip = self.img_meta_clip[is_first_idx[0]:][min(keep_idx):max(keep_idx)+1]
-                            self.imgs_clip = self.imgs_clip[is_first_idx[0]:][min(keep_idx):max(keep_idx)+1]
 
-                        return pred_outs_after_track, out_imgs, out_img_metas
-                    else:
-                        return pred_outs_after_track, [], []
+                        keep = index > 0
+                        if keep.sum() > 0:
+                            keep_idx = (torch.arange(n_frames_cur_clip)[keep]).tolist()
+                            out_imgs = self.imgs_clip[min(keep_idx):max(keep_idx)+1]
+                            out_img_metas = self.img_meta_clip[min(keep_idx):max(keep_idx)+1]
+                            self.candidate_clip = self.candidate_clip[max(keep_idx)+1-T:]
+                            self.img_meta_clip = self.img_meta_clip[max(keep_idx)+1-T:]
+                            self.imgs_clip = self.imgs_clip[max(keep_idx)+1-T:]
+                        else:
+                            self.candidate_clip = self.candidate_clip[T:]
+                            self.img_meta_clip = self.img_meta_clip[T:]
+                            self.imgs_clip = self.imgs_clip[T:]
+
+                    return pred_outs_after_track, out_imgs, out_img_metas
 
             else:
                 # detect instances by NMS for each single frame

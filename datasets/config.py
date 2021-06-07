@@ -268,9 +268,15 @@ test_YouTube_VOS2021_dataset = dataset_base_vis.copy({
 
 train_OVIS_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/OVIS/train',
-    'ann_file': '../datasets/OVIS/annotations_train.json',
+    'ann_file': '../datasets/OVIS/annotations_train_sub.json',
     # 'extra_aug': dict(random_crop=dict(min_ious=(0.1, 0.3, 0.5, 0.7, 0.9), min_crop_size=0.3)),
     # 'extra_aug': dict(expand=dict(mean=(123.675, 116.28, 103.53), to_rgb=True, ratio_range=(1, 3))),
+})
+
+valid_sub_OVIS_dataset = dataset_base_vis.copy({
+    'img_prefix': '../datasets/OVIS/train',
+    'ann_file': '../datasets/OVIS/annotations_valid_sub.json',
+    'test_mode': False,
 })
 
 valid_OVIS_dataset = dataset_base_vis.copy({
@@ -691,8 +697,8 @@ STMask_base_config = base_config.copy({
     'extra_head_net': [(256, 3, {'padding': 1})],
     'extra_layers': (2, 2, 2),
     'head_layer_params': {0: {'kernel_size': [3, 3], 'padding': (1, 1)},
-                          1: {'kernel_size': [3, 3], 'padding': (1, 1)},
-                          2: {'kernel_size': [3, 3], 'padding': (1, 1)}},
+                          1: {'kernel_size': [3, 5], 'padding': (1, 2)},
+                          2: {'kernel_size': [5, 3], 'padding': (2, 1)}},
 
     # Mask Settings
     'mask_alpha': 6.125,
@@ -713,7 +719,7 @@ STMask_base_config = base_config.copy({
     # train boxes
     'train_boxes': True,
     'train_class': True,
-    'train_centerness': False,
+    'train_centerness': True,
 
     # Track settings
     'train_track': True,
@@ -755,21 +761,22 @@ STMask_base_config = base_config.copy({
     'crowd_iou_threshold': 0.7,
     'use_conf_cross_frames': False,
     'use_boxiou_loss': True,
+    'use_repulsion_loss': True,
     'use_maskiou_loss': False,
     'use_semantic_segmentation_loss': False,
     'semantic_segmentation_alpha': 5,
 
     # eval
     'eval_frames_of_clip': 1,
-    'nms_conf_thresh': 0.1,  # 0.05,
+    'nms_conf_thresh': 0.05,
     'nms_thresh': 0.5,
-    'eval_conf_thresh': 0.1,  # 0.05,
-    'candidate_conf_thresh': 0.1,  # 0.05,
+    'eval_conf_thresh': 0.05,
+    'candidate_conf_thresh': 0.05,
     'nms_as_miou': True,
     'remove_false_inst': True,
     'add_missed_masks': False,
     'use_train_sub': False,
-    'use_valid_sub': False,
+    'use_valid_sub': True,
     'use_test': False,
     'only_calc_metrics': False,
     'only_count_classes': False,
@@ -875,7 +882,7 @@ STMask_plus_base_OVIS_config = STMask_plus_base_config.copy({
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
-    # 'valid_sub_dataset': valid_sub_YouTube_VOS_dataset,
+    'valid_sub_dataset': valid_sub_OVIS_dataset,
     'valid_dataset': valid_OVIS_dataset,
     'test_dataset': test_OVIS_dataset,
     'num_classes': 26,  # This should include the background class
@@ -887,7 +894,7 @@ STMask_plus_base_ada_OVIS_config = STMask_plus_base_ada_config.copy({
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
-    # 'valid_sub_dataset': valid_sub_YouTube_VOS_dataset,
+    'valid_sub_dataset': valid_sub_OVIS_dataset,
     'valid_dataset': valid_OVIS_dataset,
     'test_dataset': test_OVIS_dataset,
     'num_classes': 26,  # This should include the background class
@@ -899,7 +906,7 @@ STMask_plus_resnet50_OVIS_config = STMask_plus_resnet50_config.copy({
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
-    # 'valid_sub_dataset': valid_sub_YouTube_VOS_dataset,
+    'valid_sub_dataset': valid_sub_OVIS_dataset,
     'valid_dataset': valid_OVIS_dataset,
     'test_dataset': test_OVIS_dataset,
     'num_classes': 26,  # This should include the background class
@@ -911,7 +918,7 @@ STMask_plus_resnet50_ada_OVIS_config = STMask_plus_resnet50_ada_config.copy({
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
-    # 'valid_sub_dataset': valid_sub_YouTube_VOS_dataset,
+    'valid_sub_dataset': valid_sub_OVIS_dataset,
     'valid_dataset': valid_OVIS_dataset,
     'test_dataset': test_OVIS_dataset,
     'num_classes': 26,  # This should include the background class

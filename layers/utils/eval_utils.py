@@ -88,10 +88,9 @@ def results2json_videoseg(dataset, results, out_file, sampler_img_ids=None):
                 data['score'] = np.array(obj['scores']).mean().item()
                 # majority voting of those frames with top k highest scores for sequence catgory
                 scores_sorted_idx = np.argsort(-1 * np.stack(obj['scores'], axis=0))
-                cats_with_highest_scores = np.stack(obj['cats'], axis=0)[scores_sorted_idx[:5]]
+                cats_with_highest_scores = np.stack(obj['cats'], axis=0)[scores_sorted_idx[:10]]
                 data['category_id'] = np.bincount(cats_with_highest_scores).argmax().item()
-                # print(data['category_id'])
-                # data['category_id'] = np.stack(obj['cats'], axis=0).sum(0).argmax().item()+1
+
                 # majority voting for sequence category
                 # data['category_id'] = np.bincount(np.array(obj['cats'])).argmax().item()
                 vid_seg = []

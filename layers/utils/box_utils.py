@@ -3,10 +3,12 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import mmcv
+import cv2
+from datasets import STD, MEANS, cfg
 from utils import timer
 import math
 
-from datasets import cfg
+from ..visualization import display_pos_smaples
 
 @torch.jit.script
 def point_form(boxes):
@@ -114,7 +116,8 @@ def change(gt, priors):
     return -torch.sqrt( (diff ** 2).sum(dim=2) )
 
 
-def match(pos_thresh, neg_thresh, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t, ids_t, idx):
+def match(pos_thresh, neg_thresh, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t, ids_t, idx,
+          img_gpu=None):
     """Match each prior box with the ground truth box of the highest jaccard
     overlap, encode the bounding boxes, then return the matched indices
     corresponding to both confidence and location preds.
@@ -138,14 +141,14 @@ def match(pos_thresh, neg_thresh, bbox, labels, ids, crowd_boxes, priors, loc_da
     decoded_priors = decode(loc_data, priors, cfg.use_yolo_regressors) if cfg.use_prediction_matching else point_form(priors)
     
     # Size [num_objects, num_priors]
-    overlaps = jaccard(bbox, decoded_priors) if not cfg.use_change_matching else change(bbox, decoded_priors)
+    overlaps = compute_DIoU(bbox, decoded_priors) if not cfg.use_change_matching else change(bbox, decoded_priors)
 
     # Size [num_priors] best ground truth for each prior
     best_truth_overlap, best_truth_idx = overlaps.max(0)
 
-    # delete the bboxes that inlcude more than two instance with a high BIoU
-    multi_instance_in_box = (overlaps > pos_thresh-0.1).sum(0) > 1
-    best_truth_overlap[multi_instance_in_box] = (pos_thresh + neg_thresh) / 2
+    # if a bbox is matched with two or more groundtruth boxes, this bbox will be assigned as -1
+    multiple_bbox = (overlaps > neg_thresh).sum(dim=0) > 1
+    best_truth_overlap[multiple_bbox] = 0.5 * (pos_thresh + neg_thresh)
 
     # We want to ensure that each gt gets used at least once so that we don't
     # waste any training data. In order to do that, find the max overlap anchor
@@ -174,6 +177,10 @@ def match(pos_thresh, neg_thresh, bbox, labels, ids, crowd_boxes, priors, loc_da
     conf = labels[best_truth_idx]               # Shape: [num_priors]
     conf[best_truth_overlap < pos_thresh] = -1  # label as neutral
     conf[best_truth_overlap < neg_thresh] = 0   # label as background
+
+    if img_gpu is not None:
+        pos = conf > 0
+        display_pos_smaples(pos, img_gpu, decoded_priors, bbox)
 
     # Deal with crowd annotations for COCO
     if crowd_boxes is not None and cfg.crowd_iou_threshold < 1:
@@ -327,6 +334,7 @@ def crop(masks, boxes, padding:int=1):
     if d_masks == 3:
         masks = masks.unsqueeze(2)
     h, w, c, n = masks.size()
+
     x1, x2 = sanitize_coordinates(boxes[:, 0], boxes[:, 2], w, padding, cast=False)
     y1, y2 = sanitize_coordinates(boxes[:, 1], boxes[:, 3], h, padding, cast=False)
 
@@ -414,29 +422,6 @@ def index2d(src, idx):
     return src.view(-1)[idx.view(-1)].view(idx.size())
 
 
-def DIoU(det_bbox, prev_det_bbox):
-    n_dets = det_bbox.size(0)
-    n_prev = prev_det_bbox.size(0)
-    # calculate the diagonal length of the smallest enclosing box
-    x_label = torch.cat([det_bbox[:, ::2].view(-1, 1, 2).repeat(1, n_prev, 1),
-                         prev_det_bbox[:, ::2].view(1, -1, 2).repeat(n_dets, 1, 1)], dim=2)  # [n_pos, n_dets, 4]
-    y_label = torch.cat([det_bbox[:, 1::2].view(-1, 1, 2).repeat(1, n_prev, 1),
-                         prev_det_bbox[:, 1::2].view(1, -1, 2).repeat(n_dets, 1, 1)], dim=2)  # [n_pos, n_dets, 4]
-    c2 = (x_label.max(dim=2)[0] - x_label.min(dim=2)[0]) ** 2 + (
-            y_label.max(dim=2)[0] - y_label.min(dim=2)[0]) ** 2  # [n_pos, n_dets]
-
-    # get the distance between centers of pred_bbox and gt_bbox
-    det_bbox_c = det_bbox[:, :2] / 2 + det_bbox[:, 2:] / 2
-    prev_det_bbox_c = prev_det_bbox[:, :2] / 2 + prev_det_bbox[:, 2:] / 2
-    det_bbox_c = det_bbox_c.view(-1, 1, 2).repeat(1, n_prev, 1)  # [n_pos, n_dets, 2]
-    prev_det_bbox_c = prev_det_bbox_c.view(1, -1, 2).repeat(n_dets, 1, 1)  # [n_pos, n_dets, 2]
-    d2 = ((det_bbox_c - prev_det_bbox_c) ** 2).sum(dim=2)  # [n_pos, n_dets]
-    # print('bbox_iou:', bbox_ious)
-    # print('new_iou:', d2/c2)
-
-    return d2 / c2
-
-
 def gaussian_kl_divergence(bbox_gt, bbox_pred):
     cwh_gt = bbox_gt[:, 2:] - bbox_gt[:, :2]
     cwh_pred = bbox_pred[:, 2:] - bbox_pred[:, :2]
@@ -452,6 +437,38 @@ def gaussian_kl_divergence(bbox_gt, bbox_pred):
     loss = 0.25 * (kl_div0 + kl_div1).sum(-1)
 
     return loss
+
+
+def compute_DIoU(boxes_a, boxes_b):
+    '''
+    :param boxes_a: [n_a, 4]
+    :param boxes_b: [n_b, 4]
+    :return: [n_a, n_b]
+    '''
+    n_a, n_b = boxes_a.size(0), boxes_b.size(0)
+
+    # calculate bbox IoUs between pos_pred_boxes and pos_gt_boxes, [n_a, n_b]
+    IoU = jaccard(boxes_a, boxes_b)
+
+    # calculate the diagonal length of the smallest enclosing box, [n_a, n_b, 4]
+    x_label = torch.cat([boxes_a[:, ::2].unsqueeze(1).repeat(1, n_b, 1),
+                         boxes_b[:, ::2].unsqueeze(0).repeat(n_a, 1, 1)], dim=-1)
+    y_label = torch.cat([boxes_a[:, 1::2].unsqueeze(1).repeat(1, n_b, 1),
+                         boxes_b[:, 1::2].unsqueeze(0).repeat(n_a, 1, 1)], dim=-1)
+    c2 = (x_label.max(dim=-1)[0] - x_label.min(dim=-1)[0])**2 + (y_label.max(dim=-1)[0] - y_label.min(dim=-1)[0])**2
+    c2 = torch.clamp(c2, min=1e-10)
+
+    # get the distance of centres between pred_bbox and gt_bbox
+    boxes_a_cxy = 0.5 * (boxes_a[:, :2] + boxes_a[:, 2:])
+    boxes_b_cxy = 0.5 * (boxes_b[:, :2] + boxes_b[:, 2:])
+    d2 = ((boxes_a_cxy.unsqueeze(1).repeat(1, n_b, 1) - boxes_b_cxy.unsqueeze(0).repeat(n_a, 1, 1))**2).sum(dim=-1)
+    d2 = torch.clamp(d2, min=1e-5)
+
+    # DIoU: value in [-1, 1], size is [n_a, n_b]
+    # 1-DIoU: value in [0, 2]
+    DIoU = IoU - d2/c2
+
+    return DIoU
 
 
 

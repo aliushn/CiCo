@@ -193,8 +193,8 @@ class YTVOSDataset(CustomDataset):
         clip_frame_ids = self.sample_ref(idx) + [frame_id]
         clip_frame_ids.sort()
         imgs = []
-        for frame_id in clip_frame_ids:
-            imgs.append(mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][frame_id])))
+        for clip_frame_id in clip_frame_ids:
+            imgs.append(mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][clip_frame_id])))
         imgs = np.stack(imgs, axis=0)
         # load proposals if necessary
         if self.proposals is not None:
@@ -216,8 +216,8 @@ class YTVOSDataset(CustomDataset):
 
         # load annotation of ref_frames
         bboxes, labels, ids, masks, bboxes_ignore = [], [], [], [], []
-        for frame_id in clip_frame_ids:
-            ann = self.get_ann_info(vid, frame_id)
+        for clip_frame_id in clip_frame_ids:
+            ann = self.get_ann_info(vid, clip_frame_id)
             bboxes.append(ann['bboxes'])
             labels.append(ann['labels'])
             # obj ids attribute does not exist in current annotation
@@ -378,6 +378,11 @@ class YTVOSDataset(CustomDataset):
         gt_labels = []
         gt_ids = []
         gt_bboxes_ignore = []
+        if 'occlusion' in ann_info[0].keys():
+            with_occlusion = True
+            occlusion = []
+        else:
+            with_occlusion = False
         # Two formats are provided.
         # 1. mask: a binary map of the same size of the image.
         # 2. polys: each mask consists of one or several polys, each poly is a
@@ -415,6 +420,8 @@ class YTVOSDataset(CustomDataset):
                 poly_lens = [len(p) for p in mask_polys]
                 gt_mask_polys.append(mask_polys)
                 gt_poly_lens.extend(poly_lens)
+            if with_occlusion:
+                occlusion.append(ann['occlusion'][frame_id])
         if gt_bboxes:
             gt_bboxes = np.array(gt_bboxes, dtype=np.float32)
             gt_labels = np.array(gt_labels, dtype=np.int64)
@@ -435,4 +442,6 @@ class YTVOSDataset(CustomDataset):
             # poly format is not used in the current implementation
             ann['mask_polys'] = gt_mask_polys
             ann['poly_lens'] = gt_poly_lens
+        if with_occlusion:
+            ann['occlusion'] = occlusion
         return ann

@@ -1,5 +1,5 @@
 import torch
-from layers.utils import jaccard, mask_iou, crop, generate_mask
+from layers.utils import jaccard, mask_iou, crop, generate_mask, compute_DIoU, center_size
 from utils import timer
 from datasets import cfg
 import torch.nn.functional as F
@@ -57,7 +57,10 @@ class Detect_TF(object):
         centerness_scores = candidate['centerness'] if cfg.train_centerness else None
 
         if boxes.size(0) == 0:
-            out_aft_nms = {'box': boxes, 'mask_coeff': mask_coeff, 'class': torch.Tensor(), 'score': torch.Tensor()}
+            out_aft_nms = {'box': boxes, 'mask_coeff': mask_coeff, 'class': torch.Tensor(), 'score': torch.Tensor(),
+                           'mask': torch.Tensor()}
+            if centerness_scores is not None:
+                out_aft_nms['centerness'] = torch.Tensor()
 
         else:
             if self.use_cross_class_nms:
@@ -80,26 +83,37 @@ class Detect_TF(object):
             scores, classes = scores[1:].max(dim=0)   # [n_dets]
 
         if centerness_scores is not None:
-            scores = scores * centerness_scores.view(1, -1)
+            scores = scores * centerness_scores.view(-1)
 
-        _, idx = scores.sort(0, descending=True)
-        idx = idx[:top_k]
+        det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
+
+        # if area_box / area_mask < 0.2 and score < 0.2, the box is likely to be wrong.
+        h, w = det_masks_soft.size()[1:]
+        boxes_c = center_size(boxes)
+        area_box = boxes_c[:, 2] * boxes_c[:, 3] * h * w
+        area_mask = det_masks_soft.gt(0.5).float().sum(dim=(1, 2))
+        area_rate = area_mask / area_box
+
+        _, idx = (area_rate * scores).sort(0, descending=True)
+        keep_idx = (area_rate > 0.2)[idx]
+        idx = idx[keep_idx][:top_k]
 
         if len(idx) == 0:
             out_after_NMS = {'box': torch.Tensor(), 'mask_coeff': torch.Tensor(), 'class': torch.Tensor(),
-                             'score': torch.Tensor()}
+                             'score': torch.Tensor(), 'mask': torch.Tensor()}
+            if centerness_scores is not None:
+                out_after_NMS['centerness'] = torch.Tensor()
 
         else:
-            det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
 
             # Compute the pairwise IoU between the boxes
             boxes_idx = boxes[idx]
-            iou = jaccard(boxes_idx, boxes_idx)
+            iou = compute_DIoU(boxes_idx, boxes_idx)
             det_masks_idx = det_masks_soft[idx].gt(0.5).float()
 
             if cfg.nms_as_miou:
                 m_iou = mask_iou(det_masks_idx, det_masks_idx)
-                iou = iou * 0.5 + m_iou * 0.5
+                iou = iou * 0.6 + m_iou * 0.4
 
             # Zero out the lower triangle of the cosine similarity matrix and diagonal
             iou = torch.triu(iou, diagonal=1)
@@ -118,7 +132,7 @@ class Detect_TF(object):
             det_masks_soft = det_masks_soft[idx_out]
 
             if cfg.train_class:
-                classes = classes[idx_out]
+                classes = classes[idx_out] + 1
                 scores = scores[idx_out]
             else:
                 # For a specific instance, we only take the fired area into account to calculate its category
@@ -167,6 +181,8 @@ class Detect_TF(object):
         if len(idx) == 0:
             out_after_NMS = {'box': torch.Tensor(), 'mask_coeff': torch.Tensor(), 'class': torch.Tensor(),
                              'score': torch.Tensor()}
+            if centerness_scores is not None:
+                out_after_NMS['centerness'] = torch.Tensor()
 
         else:
             num_classes, num_dets = idx.size()

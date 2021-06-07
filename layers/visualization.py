@@ -1,14 +1,47 @@
 import torch
 import numpy as np
 import cv2
-from datasets import cfg_vis, MEANS_vis, STD_vis
+from datasets import cfg, MEANS, STD
 import random
 from math import sqrt
 import matplotlib.pyplot as plt
 import mmcv
 import torch.nn.functional as F
 
-cfg, MEANS, STD = cfg_vis, MEANS_vis, STD_vis
+
+def display_pos_smaples(pos, img_gpu, decoded_priors, bbox):
+    h, w = 384, 640
+    img_numpy = img_gpu.squeeze(0).permute(1, 2, 0).cpu().numpy()
+    img_numpy = img_numpy[:, :, (2, 1, 0)]  # To BRG
+    img_numpy = (img_numpy * np.array(STD) + np.array(MEANS)) / 255.0
+    img_numpy = np.clip(img_numpy, 0, 1)
+    img_gpu = torch.Tensor(img_numpy).cuda()
+    image = (img_gpu * 255).byte().cpu().numpy()
+
+    pos_decoded_priors = decoded_priors[pos]
+    # Create a named colour
+    green = [0, 255, 0]
+    blue = [255, 0, 0]
+    epsilon = [0, 0, 1]
+
+    def list_add(a, b):
+        c = []
+        w = torch.randint(255, (1,)).tolist()[0]
+        for i in range(len(a)):
+            c.append(a[i] + b[i] * w)
+        return c
+
+    # plot anchors of positive samples
+    for i in range(pos.sum()):
+        cv2.rectangle(image, (pos_decoded_priors[i, 0] * w, pos_decoded_priors[i, 1] * h),
+                      (pos_decoded_priors[i, 2] * w, pos_decoded_priors[i, 3] * h), list_add(blue, epsilon), 1)
+
+    # plot GT boxes of positive samples
+    for i in range(bbox.size(0)):
+        cv2.rectangle(image, (bbox[i, 0] * w, bbox[i, 1] * h),
+                      (bbox[i, 2] * w, bbox[i, 3] * h), green, 2)
+    path = ''.join(['weights/pos_samples_OVIS/', str(torch.randint(1000, (1,)).tolist()[0]), '.png'])
+    cv2.imwrite(path, image)
 
 
 def display_box_shift(box, box_shift, conf=None, img_gpu=None, img_meta=None, idx=0):

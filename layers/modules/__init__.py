@@ -6,7 +6,9 @@ from .prediction_head_FC import PredictionModule_FC
 from .prediction_head import PredictionModule
 from .make_net import make_net
 from .Featurealign import FeatureAlign
+from .Temporal_feature_calibration import TemporalFeatureCalibration
 
 __all__ = ['MultiBoxLoss', 'FPN', 'FastMaskIoUNet',
            'TemporalNet', 'bbox_feat_extractor',
-           'PredictionModule', 'PredictionModule_FC', 'make_net', 'FeatureAlign']
+           'PredictionModule', 'PredictionModule_FC', 'make_net', 'FeatureAlign',
+           'TemporalFeatureCalibration']

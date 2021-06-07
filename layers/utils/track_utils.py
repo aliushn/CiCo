@@ -79,10 +79,14 @@ def generate_track_gaussian(track_data, masks=None, boxes=None):
                                    mode='bilinear', align_corners=False).gt(0.5).squeeze(1)
         if boxes is not None:
             # For small objects, masks are too small to embed distinct Gaussian distribution
-            small_obj = used_masks.sum(dim=(1, 2)) <= h*w*0.1
-            if small_obj.sum() > 0:
-                crop_masks_small, _ = crop(used_masks[small_obj].permute(1, 2, 0).contiguous(), boxes[small_obj])
-                used_masks[small_obj] = used_masks[small_obj] & crop_masks_small.permute(2, 0, 1).contiguous().bool()
+            non_small_obj = used_masks.sum(dim=(1, 2)) > h*w*0.1
+            if non_small_obj.sum() > 0:
+                boxes_c = center_size(boxes)
+                boxes_c[non_small_obj, 2:] = boxes_c[non_small_obj, 2:] * 1.2
+                boxes = point_form(boxes_c)
+            boxes = torch.clamp(boxes, min=0, max=1)
+            crop_masks, _ = crop(used_masks.permute(1, 2, 0).contiguous(), boxes)
+            used_masks = used_masks & crop_masks.permute(2, 0, 1).contiguous().bool()
         cropped_track_data = track_data * used_masks.unsqueeze(-1)   # [n_pos, h, w, 3]
 
     else:
@@ -120,9 +124,13 @@ def compute_kl_div(p_mu, p_var, q_mu=None, q_var=None):
         q_mu, q_var = p_mu, p_var
 
     use_batch = True
-    if p_mu.dim() == 2:
+    if p_mu.dim() == 2 and q_mu.dim() == 2:
         use_batch = False
         p_mu, p_var = p_mu.unsqueeze(0), p_var.unsqueeze(0)
+        q_mu, q_var = q_mu.unsqueeze(0), q_var.unsqueeze(0)
+    elif p_mu.dim() == 2:
+        p_mu, p_var = p_mu.unsqueeze(0), p_var.unsqueeze(0)
+    elif q_mu.dim() == 2:
         q_mu, q_var = q_mu.unsqueeze(0), q_var.unsqueeze(0)
 
     p_var = torch.clamp(p_var, min=1e-5)

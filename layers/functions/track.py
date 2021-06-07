@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from layers.utils import jaccard, mask_iou, DIoU, generate_mask, compute_comp_scores, generate_rel_coord
+from layers.utils import jaccard, mask_iou, compute_DIoU, generate_mask, compute_comp_scores, generate_rel_coord
 from utils import timer
 
 from datasets import cfg
@@ -110,7 +110,7 @@ class Track(object):
             cos_sim = torch.cat([torch.zeros(n_dets, 1), cos_sim], dim=1)
             cos_sim = (cos_sim + 1) / 2  # [0, 1]
 
-            bbox_ious = jaccard(det_bbox, self.prev_det_bbox)
+            bbox_ious = compute_DIoU(det_bbox, self.prev_det_bbox)
             # mask_ious = mask_iou(det_masks, self.prev_det_masks)
             mask_ious = []
             det_bbox = torch.clamp(det_bbox, min=0, max=1)
@@ -123,10 +123,6 @@ class Track(object):
                 mask_ious.append(mask_iou(det_masks_shift, self.prev_det_masks[i].unsqueeze(0)))  # [n_dets, 1]
 
             mask_ious = torch.cat(mask_ious, dim=1)
-
-            if cfg.use_DIoU_in_comp_scores:
-                term_DIoU = DIoU(det_bbox, self.prev_det_bbox)
-                bbox_ious = bbox_ious - term_DIoU
 
             # compute comprehensive score
             label_delta = (self.prev_det_labels == det_labels.view(-1, 1)).float()
