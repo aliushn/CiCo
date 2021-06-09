@@ -292,6 +292,7 @@ class Track_TF_Clip(object):
                 for idx, base_info_candidate in enumerate(base_info_candidates):
                     if missed_frames[idx]:
                         # to predict masks from selected frame to the missed frame
+                        # TODO: add img_meta and img for display_box_shift.py
                         candidate_shift_cur = CandidateShift(net, base_info_candidate, selected_candidate)
                         for k, v in selected_candidate.items():
                             if k not in candidate_shift_cur.keys():

@@ -6,9 +6,10 @@ from datasets import cfg
 from utils import timer
 import matplotlib.pyplot as plt
 import os
+from ..visualization import display_box_shift, display_correlation_map
 
 
-def CandidateShift(net, candidate, ref_candidate, img_meta=None, update_track=False):
+def CandidateShift(net, candidate, ref_candidate, img=None, img_meta=None, update_track=False, display=False):
         """
         The function try to shift the candidates of reference frame to that of target frame.
         The most important step is to shift the bounding box of reference frame to that of target frame
@@ -35,10 +36,11 @@ def CandidateShift(net, candidate, ref_candidate, img_meta=None, update_track=Fa
 
             if cfg.temporal_fusion_module:
                 # we only use the features in the P3 layer to perform correlation operation
-                corr = correlate_operator(fpn_feat_next, fpn_feat_ref,
-                                          patch_size=cfg.correlation_patch_size, kernel_size=3, dilation_patch=1)
+                corr = correlate_operator(fpn_feat_ref, fpn_feat_next,
+                                          patch_size=cfg.correlation_patch_size,
+                                          kernel_size=3)
                 # display_correlation_map(fpn_ref, img_meta, idx)
-                concatenated_features = F.relu(torch.cat([corr, fpn_feat_next, fpn_feat_ref], dim=1))
+                concatenated_features = torch.cat([fpn_feat_ref, corr, fpn_feat_next], dim=1)
 
                 # extract features on the predicted bbox
                 box_ref_c = center_size(ref_candidate['box'])
@@ -46,14 +48,21 @@ def CandidateShift(net, candidate, ref_candidate, img_meta=None, update_track=Fa
                 box_ref_crop = point_form(torch.cat([box_ref_c[:, :2],
                                                      torch.clamp(box_ref_c[:, 2:] * 1.2, min=0, max=1)], dim=1))
                 bbox_feat_input = bbox_feat_extractor(concatenated_features, box_ref_crop, 7)
-                loc_ref_shift, mask_coeff_shift = net.TemporalNet(bbox_feat_input)
-                box_ref_shift = torch.cat([(loc_ref_shift[:, :2] * box_ref_c[:, 2:] + box_ref_c[:, :2]),
-                                           torch.exp(loc_ref_shift[:, 2:]) * box_ref_c[:, 2:]], dim=1)
-                box_ref_shift = point_form(box_ref_shift)
+                if cfg.maskshift_loss:
+                    loc_ref_shift, mask_coeff_shift = net.TemporalNet(bbox_feat_input)
+                    ref_candidate_shift['mask_coeff'] = ref_candidate['mask_coeff'].clone() + mask_coeff_shift
+                else:
+                    loc_ref_shift = net.TemporalNet(bbox_feat_input)
+                    ref_candidate_shift['mask_coeff'] = ref_candidate['mask_coeff'].clone()
+                box_ref_shift = decode(loc_ref_shift, box_ref_c)
 
-                ref_candidate_shift = {'box': box_ref_shift.clone()}
+                display = True
+                if display:
+                    display_correlation_map(corr, img_meta=img_meta)
+                    display_box_shift(ref_candidate['box'], box_ref_shift, img_meta=img_meta, img_gpu=img)
+
+                ref_candidate_shift['box'] = box_ref_shift.clone()
                 ref_candidate_shift['score'] = ref_candidate['score'].clone() * 0.8
-                ref_candidate_shift['mask_coeff'] = ref_candidate['mask_coeff'].clone() + mask_coeff_shift
                 pred_masks_next = generate_mask(proto_next, ref_candidate_shift['mask_coeff'], box_ref_shift)
 
             else:
@@ -108,7 +117,7 @@ def CandidateShift(net, candidate, ref_candidate, img_meta=None, update_track=Fa
                     pred_masks_next = pred_masks_next_ori * heat_map
 
             ref_candidate_shift['mask'] = pred_masks_next
-            if update_track and 'track' in ref_candidate_shift.keys():
+            if cfg.track_by_Gaussian and update_track:
                 track_embed_next = F.normalize(ref_candidate_shift['track'], dim=-1).squeeze(0)
                 mu_next, var_next = generate_track_gaussian(track_embed_next, pred_masks_next.gt(0.5))
                 ref_candidate_shift['track_mu'] = mu_next

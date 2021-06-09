@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from layers.utils import decode, jaccard, mask_iou, crop, generate_mask
+from layers.utils import decode, jaccard, mask_iou, crop, generate_mask, compute_DIoU, center_size
 from utils import timer
 
 from datasets import cfg
@@ -62,12 +62,9 @@ class Detect(object):
         centerness_data = predictions['centerness'] if cfg.train_centerness else None
         proto_data = predictions['proto']
         mask_data  = predictions['mask_coeff']
-        track_data = predictions['track'] if cfg.train_track else None
         prior_data = predictions['priors'].squeeze(0)
 
-        inst_data  = predictions['inst'] if 'inst' in predictions else None
-
-        out = []
+        results = []
 
         with timer.env('Detect'):
             batch_size = loc_data.size(0)
@@ -77,64 +74,55 @@ class Detect(object):
 
             for batch_idx in range(batch_size):
                 decoded_boxes = decode(loc_data[batch_idx], prior_data)
+                centerness_data_cur = centerness_data[batch_idx] if centerness_data is not None else None
+                sem_data_cur = sem_data[batch_idx] if sem_data is not None else None
 
-                result = self.detect(batch_idx, scores, decoded_boxes, centerness_data,
-                                     mask_data, proto_data, sem_data, inst_data)
+                result = self.detect(scores[batch_idx], decoded_boxes, centerness_data_cur,
+                                     mask_data[batch_idx], proto_data[batch_idx], sem_data_cur)
 
-                if track_data is not None:
-                    result['track'] = track_data
-
-                if result is not None and proto_data is not None:
-                    result['proto'] = proto_data[batch_idx]
+                for k in predictions.keys():
+                    if k in {'proto', 'track'}:
+                        result[k] = predictions[k][batch_idx]
                 
-                out.append({'detection': result, 'net': net})
+                results.append(result)
 
-        return out
+        return results
 
-    def detect(self, batch_idx, scores, decoded_boxes, center_data,
-               mask_data, proto_data, sem_data, inst_data):
+    def detect(self, scores, decoded_boxes, center_data, mask_data, proto_data, sem_data):
         """ Perform nms for only the max scoring class that isn't background (class 0) """
         assert cfg.train_class or cfg.use_semantic_segmentation_loss, \
             'The training process should include train_class or train_stuff.'
 
         if cfg.train_class:
-            cur_scores = scores[batch_idx, 1:, :]
+            cur_scores = scores[1:, :]
             conf_scores, _ = torch.max(cur_scores, dim=0)
-            keep = (conf_scores > self.conf_thresh)
+            keep = conf_scores > self.conf_thresh
             scores = cur_scores[:, keep]
         else:
-            conf_scores = scores[batch_idx].squeeze(0)
-            keep = (conf_scores > self.conf_thresh)
-            scores = conf_scores[keep]
+            keep = scores > self.conf_thresh
+            scores = scores[keep]
 
         if center_data is not None:
-            center_data = center_data[batch_idx, keep].view(-1)
+            center_data = center_data[keep].view(-1)
 
         boxes = decoded_boxes[keep, :]
-        masks_coeff = mask_data[batch_idx, keep, :]
-        proto_data = proto_data[batch_idx]
+        masks_coeff = mask_data[keep, :]
 
-        if inst_data is not None:
-            inst = inst_data[batch_idx, keep, :]
-    
         if boxes.size(0) == 0:
-            out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': torch.Tensor(), 'score': torch.Tensor()}
+            out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': torch.Tensor(), 'score': torch.Tensor(),
+                             'mask': torch.Tensor()}
+
         else:
-        
+
             if self.use_fast_nms:
                 if self.use_cross_class_nms:
-                    boxes_aft_nms, masks_aft_nms, classes_aft_nms, scores_aft_nms, center_score_aft_nms = \
-                        self.cc_fast_nms(boxes, masks_coeff, proto_data, scores, sem_data[batch_idx], center_data,
-                                         self.nms_thresh, self.top_k)
+                    out_after_NMS = self.cc_fast_nms(boxes, masks_coeff, proto_data, scores, sem_data, center_data,
+                                                     self.nms_thresh, self.top_k)
                 else:
-                    boxes_aft_nms, masks_aft_nms, classes_aft_nms, scores_aft_nms = \
-                        self.fast_nms(boxes, masks_coeff, proto_data, scores, self.nms_thresh, self.top_k)
+                    out_after_NMS = self.fast_nms(boxes, masks_coeff, proto_data, scores, sem_data,
+                                                  self.nms_thresh, self.top_k)
             else:
-                boxes_aft_nms, masks_aft_nms, classes_aft_nms, scores_aft_nms = \
-                    self.traditional_nms(boxes, masks_coeff, scores, self.nms_thresh, self.conf_thresh)
-
-            out_after_NMS = {'box': boxes_aft_nms, 'mask_coeff': masks_aft_nms, 'class': classes_aft_nms,
-                             'score': scores_aft_nms}
+                out_after_NMS = self.traditional_nms(boxes, masks_coeff, scores, self.nms_thresh, self.conf_thresh)
 
         return out_after_NMS
 
@@ -147,16 +135,29 @@ class Detect(object):
         if centerness_scores is not None:
             scores = scores * centerness_scores
 
-        _, idx = scores.sort(0, descending=True)
+        det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
+
+        # if area_box / area_mask < 0.2 and score < 0.2, the box is likely to be wrong.
+        h, w = det_masks_soft.size()[1:]
+        boxes_c = center_size(boxes)
+        area_box = boxes_c[:, 2] * boxes_c[:, 3] * h * w
+        area_mask = det_masks_soft.gt(0.5).float().sum(dim=(1, 2))
+        area_rate = area_mask / area_box
+
+        _, idx = (scores * area_rate).sort(0, descending=True)
+        # keep_idx = (area_rate > 0.2)[idx]
         idx = idx[:top_k]
+
+        if len(idx) == 0:
+            out_after_NMS = {'box': torch.Tensor(), 'mask_coeff': torch.Tensor(), 'class': torch.Tensor(),
+                             'score': torch.Tensor(), 'mask': torch.Tensor()}
+            return out_after_NMS
 
         # Compute the pairwise IoU between the boxes
         boxes_idx = boxes[idx]
-        iou = jaccard(boxes_idx, boxes_idx)
-
-        det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
-        det_masks_idx = det_masks_soft[idx].gt(0.5).float().unsqueeze(1)  # [n, 1, h, w]
+        iou = compute_DIoU(boxes_idx, boxes_idx)
         if cfg.nms_as_miou:
+            det_masks_idx = det_masks_soft[idx].gt(0.5).float()  # [n, h, w]
             m_iou = mask_iou(det_masks_idx, det_masks_idx)
             iou = iou * 0.5 + m_iou * 0.5
 
@@ -186,10 +187,12 @@ class Detect(object):
             max_miou, classes = MIoU.max(dim=1)
             classes = classes.view(-1)
 
+        out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': classes, 'score': scores,
+                         'mask': det_masks_soft}
         if centerness_scores is not None:
-            centerness_scores = centerness_scores[idx_out]
+            out_after_NMS['centerness'] = centerness_scores[idx_out]
 
-        return boxes, masks_coeff, classes, scores, centerness_scores
+        return out_after_NMS
 
     def coefficient_nms(self, coeffs, scores, cos_threshold=0.9, top_k=400):
         _, idx = scores.sort(0, descending=True)
@@ -213,29 +216,39 @@ class Detect(object):
         
         return idx_out, idx_out.size(0)
 
-    def fast_nms(self, boxes, masks_coeff, proto_data, scores,
+    def fast_nms(self, boxes, masks_coeff, proto_data, scores, sem_data,
                  iou_threshold:float=0.5, top_k:int=200, second_threshold:bool=True):
-        scores, idx = scores.sort(1, descending=True)  # [num_classes, num_dets]
 
+        det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
+        det_masks = det_masks_soft.gt(0.5).float()
+        mask_h, mask_w = det_masks.size()[1:]
+
+        if not cfg.train_class:
+            # For a specific instance, we only take the fired area into account to calculate its category
+            # Step 1: multiply instances' masks and semantic segmentation to filter fired area
+            # step 2: mean of all pixels in the fired area as its classification confidence
+            sem_data = sem_data.permute(2, 0, 1).contiguous().unsqueeze(0)
+            sem_data = (sem_data * det_masks.unsqueeze(1)).gt(0.3).float()
+            miou_scores = mask_iou(sem_data[:, 1:], det_masks.unsqueeze(1))  # [n, n_class]
+            scores = scores.view(1, -1) * miou_scores.t()
+            # MIou_sorted,  MIou_sorted_idx = MIoU.sort(1, descending=True)
+            # print(MIou_sorted[:, :3].reshape(-1), MIou_sorted_idx[:, :3].reshape(-1), scores[idx_out])
+            # max_miou, classes = MIoU.max(dim=1)
+            # classes = classes.view(-1) + 1
+            # scores = max_miou.view(-1)
+
+        num_classes, num_dets = scores.size()
+        scores, idx = scores.sort(1, descending=True)  # [num_classes, num_dets]
         idx = idx[:, :top_k].contiguous()
         scores = scores[:, :top_k]
-    
-        num_classes, num_dets = idx.size()
 
         boxes = boxes[idx.view(-1), :].view(num_classes, num_dets, 4)
-        masks_coeff = masks_coeff[idx.view(-1), :].view(num_classes, num_dets, -1)
+        det_masks_soft = det_masks_soft[idx.view(-1)].view(num_classes, num_dets, mask_h, mask_w)
 
-        iou = jaccard(boxes, boxes)  # [num_classes, num_dets, num_dets]
+        iou = jaccard(boxes, boxes)                  # [num_classes, num_dets, num_dets]
         if cfg.nms_as_miou:
-            det_masks = cfg.mask_proto_coeff_activation(masks_coeff) @ proto_data.permute(2, 0, 1).contiguous()
-            det_masks = cfg.mask_proto_mask_activation(det_masks)  # [n_class, num_dets, h, w]
-            det_masks = det_masks.permute(0, 3, 2, 1).contiguous()
-            det_masks_crop = []
-            for i in range(num_classes):
-                _, det_masks_cur = crop(det_masks[i], boxes[i])
-                det_masks_crop.append(det_masks_cur)
-            det_masks = torch.stack(det_masks_crop, dim=0).permute(0, 3, 1, 2).contiguous().gt(0.5).float()
-            m_iou = mask_iou(det_masks, det_masks)  # [n_class, num_dets, num_dets]
+            det_masks = det_masks_soft.gt(0.5).float()
+            m_iou = mask_iou(det_masks, det_masks)   # [num_class, num_dets, num_dets]
             iou = iou * 0.5 + m_iou * 0.5
 
         iou.triu_(diagonal=1)
@@ -257,21 +270,23 @@ class Detect(object):
         classes = classes[keep]
 
         boxes = boxes[keep]
-        masks = masks_coeff[keep]
+        masks_coeff = masks_coeff[keep]
         scores = scores[keep]
-        idx_out = idx[keep]
+        masks = det_masks_soft[keep]
 
         # Only keep the top cfg.max_num_detections highest scores across all classes
         scores, idx = scores.sort(0, descending=True)
         idx = idx[:cfg.max_num_detections]
         scores = scores[:cfg.max_num_detections]
-
-        classes = classes[idx]
+        classes = classes[idx] + 1
         boxes = boxes[idx]
+        masks_coeff = masks_coeff[idx]
         masks = masks[idx]
-        idx_out = idx_out[idx]
 
-        return boxes, masks, classes+1, scores
+        out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': classes, 'score': scores,
+                         'mask': det_masks_soft}
+
+        return out_after_NMS
 
     def traditional_nms(self, boxes, masks, scores, iou_threshold=0.5, conf_thresh=0.05):
         num_classes = scores.size(0)

@@ -204,9 +204,8 @@ def plot_path(mask_alpha=0.45):
                         cv2.circle(key_img, (cxy_list[0][0], cxy_list[0][1]), 1, color, 4)
                         # link the locations from the last frame to the current frame by line with arrow
                         for cxy_idx, cxy in enumerate(cxy_list[1:]):
-                            start_point = (cxy_list[cxy_idx][0], cxy_list[cxy_idx][1])
-                            end_point = (cxy[0], cxy[1])
-                            print(start_point, end_point)
+                            start_point = (int(cxy_list[cxy_idx][0].item()), int(cxy_list[cxy_idx][1].item()))
+                            end_point = (int(cxy[0].item()), int(cxy[1].item()))
                             cv2.arrowedLine(key_img, start_point, end_point, color, 5, 8, 0, 0.2)
 
                     # plot the image with path of instances
@@ -230,12 +229,11 @@ def plot_path(mask_alpha=0.45):
             bboxes_cur[:, 1::2] = bboxes_cur[:, 1::2] * ori_h
             cxy_bboxes_cur = center_size(bboxes_cur)[:, :2]
             for idx, id in enumerate(gt_ids_cur):
-                print(id)
-                print(id.tolist()[0])
-                if id not in video_cxy.keys():
-                    video_cxy[id] = [cxy_bboxes_cur[idx]]
+                k = id.item()
+                if k not in video_cxy.keys():
+                    video_cxy[k] = [cxy_bboxes_cur[idx]]
                 else:
-                    video_cxy[id].append(cxy_bboxes_cur[idx])
+                    video_cxy[k].append(cxy_bboxes_cur[idx])
 
             if n_cur > n_max_inst:
                 n_max_inst = n_cur

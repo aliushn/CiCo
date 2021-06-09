@@ -723,8 +723,9 @@ STMask_base_config = base_config.copy({
 
     # Track settings
     'train_track': True,
+    'track_by_Gaussian': True,
     'match_coeff': [0, 0.7, 0.3, 0],   # scores, mask_iou, box_iou, label
-    'track_n': 64,
+    'track_dim': 64,
     'track_crop_with_pred_mask': False,
     'track_crop_with_pred_box': False,
 
@@ -732,13 +733,15 @@ STMask_base_config = base_config.copy({
     'use_temporal_info': True,
 
     # temporal fusion module settings
-    'temporal_fusion_module': False,
+    'temporal_fusion_module': True,
     'correlation_patch_size': 11,
     'correlation_selected_layer': 1,
     'boxshift_with_pred_box': False,
-    'boxshift_alpha': 10,
+    'boxshift_alpha': 5,
     'maskshift_alpha': 6.125,
-    'maskshift_loss': True,
+    'maskshift_loss': False,
+    'forward_flow': True,
+    'backward_flow': False,
 
     # FEELVOS settings
     'use_FEELVOS': False,

@@ -59,7 +59,7 @@ class STMask(nn.Module):
             cfg.mask_dim += 1
 
         if cfg.train_track:
-            track_arch = [(proto_channles, 3, {'padding': 1})] + [(cfg.track_n, 1, {})]
+            track_arch = [(proto_channles, 3, {'padding': 1})] + [(cfg.track_dim, 1, {})]
             self.track_conv, _ = make_net(proto_channles, track_arch, include_last_relu=False)
         if cfg.use_semantic_segmentation_loss:
             sem_seg_head = [(proto_channles, 3, {'padding': 1})] + [(cfg.num_classes, 1, {})]
@@ -389,7 +389,7 @@ class STMask(nn.Module):
 
             return pred_outs
         else:
-            bs = x.size(0)
+
             fpn_outs, pred_outs = self.forward_single(x)
 
             if cfg.train_class:
@@ -405,13 +405,12 @@ class STMask(nn.Module):
                 pred_outs['fpn_feat'] = fpn_outs[1]
                 candidate = generate_candidate(pred_outs)
                 candidate_after_NMS = self.Detect_TF(candidate)
-                pred_outs_after_track = []
+
                 if cfg.eval_frames_of_clip == 1:
                     # two-frames
-                    for i in range(bs):
-                        pred_outs_after_track.append(self.Track_TF(self, candidate_after_NMS[i], img_meta[i], img=x))
+                    pred_outs_after_NMS = self.Track_TF(self, candidate_after_NMS, img_meta, img=x)
 
-                    return pred_outs_after_track, x, img_meta
+                    return pred_outs_after_NMS, x, img_meta
 
                 else:
                     # two-clips
@@ -470,5 +469,5 @@ class STMask(nn.Module):
                 if cfg.train_track:
                     pred_outs_after_NMS = self.Track(pred_outs_after_NMS, img_meta)
 
-                return pred_outs_after_NMS
+                return pred_outs_after_NMS, x, img_meta
 

@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import os
 import cv2
 from datasets import cfg, MEANS, STD
 import random
@@ -7,6 +8,25 @@ from math import sqrt
 import matplotlib.pyplot as plt
 import mmcv
 import torch.nn.functional as F
+
+
+# Quick and dirty lambda for selecting the color for a particular index
+# Also keeps track of a per-gpu color cache for maximum speed
+def get_color(j, color_type, on_gpu=None, undo_transform=True):
+    global color_cache
+    color_idx = color_type[j] * 5 % len(cfg.COLORS)
+
+    if on_gpu is not None and color_idx in color_cache[on_gpu]:
+        return color_cache[on_gpu][color_idx]
+    else:
+        color = cfg.COLORS[color_idx]
+        if not undo_transform:
+            # The image might come in as RGB or BRG, depending
+            color = (color[2], color[1], color[0])
+        if on_gpu is not None:
+            color = torch.Tensor(color).to(on_gpu).float() / 255.
+            color_cache[on_gpu][color_idx] = color
+        return color
 
 
 def display_pos_smaples(pos, img_gpu, decoded_priors, bbox):
@@ -44,21 +64,19 @@ def display_pos_smaples(pos, img_gpu, decoded_priors, bbox):
     cv2.imwrite(path, image)
 
 
-def display_box_shift(box, box_shift, conf=None, img_gpu=None, img_meta=None, idx=0):
-    if img_meta is not None:
-        path = ''.join(['results/results_1024_2/box_shift1/', str(img_meta[0]['video_id']), '_',
-                        str(img_meta[0]['frame_id']), '_', str(idx), '.png'])
-        path_ori = ''.join(['results/results_1024_2/box_shift1/', str(img_meta[0]['video_id']), '_',
-                           str(img_meta[0]['frame_id']), '_', str(idx), '_ori.png'])
-    else:
-        path = 'results/results_1024_2/box_shift/0.png'
-        path_ori = 'results/results_1024_2/box_shift/0_ori.png'
+def display_box_shift(box, box_shift, img_meta, img_gpu=None, conf=None):
+    save_dir = 'weights/OVIS/weights_r101_t2s_forward_flow/box_shift/'
+    save_dir = os.path.join(save_dir, str(img_meta['video_id']))
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    path = ''.join([save_dir, '/', str(img_meta['frame_id']), '.png'])
 
-    h, w = 384, 640
     # Make empty black image
     if img_gpu is None:
+        h, w = 384, 640
         image = np.ones((h, w, 3), np.uint8) * 255
     else:
+        h, w = img_gpu.size()[1:]
         img_numpy = img_gpu.squeeze(0).permute(1, 2, 0).cpu().numpy()
         img_numpy = img_numpy[:, :, (2, 1, 0)]  # To BRG
         img_numpy = (img_numpy * np.array(STD) + np.array(MEANS)) / 255.0
@@ -69,21 +87,17 @@ def display_box_shift(box, box_shift, conf=None, img_gpu=None, img_meta=None, id
 
     if conf is not None:
         scores, classes = conf[:, 1:].max(dim=1)
-    display_labels = False
-    # cv2.imwrite(path_ori, image)
 
-    # Create a named colour
-    red = [0, 0, 255]
-    black = [0, 0, 0]
     # plot pred bbox
+    color_type = range(box.size(0))
     for i in range(box.size(0)):
-        cv2.rectangle(image, (box[i, 0]*w, box[i, 1]*h), (box[i, 2]*w, box[i, 3]*h), black, 4)
+        color = get_color(i, color_type)
+        cv2.rectangle(image, (box[i, 0]*w, box[i, 1]*h), (box[i, 2]*w, box[i, 3]*h), color, 2)
 
-    for i in range(box.size(0)):
         cv2.rectangle(image, (box_shift[i, 0] * w, box_shift[i, 1] * h),
-                             (box_shift[i, 2] * w, box_shift[i, 3] * h), red, 4)
+                             (box_shift[i, 2] * w, box_shift[i, 3] * h), color, 4)
 
-        if conf is not None and display_labels:
+        if conf is not None:
             text_str = '%s: %.2f' % (classes[i].item()+1, scores[i])
 
             font_face = cv2.FONT_HERSHEY_DUPLEX
@@ -173,20 +187,26 @@ def display_feature_align_dcn(detection, offset, loc_data, img_gpu=None, img_met
     cv2.imwrite(path, image)
 
 
-def display_correlation_map(x_corr, img_meta=None, idx=0):
-    x_corr = x_corr[:, :36]
+def display_correlation_map(x_corr, img_meta=None):
+    save_dir = 'weights/OVIS/weights_r101_t2s_forward_flow/box_shift/'
+    save_dir = os.path.join(save_dir, str(img_meta['video_id']))
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    # x_corr = x_corr[:, :36]
     bs, ch, h, w = x_corr.size()
+    # x_corr = F.normalize(x_corr, dim=1)
     r = int(sqrt(ch))
-    x_show = x_corr.view(r, r, h, w).permute(0, 2, 1, 3).contiguous()
-    x_show = x_show.view(h*r, r*w)
+    x_show = x_corr.view(r, r, h, w)
+
+    x_show = x_show.permute(0, 2, 1, 3).contiguous().view(h*r, r*w)
     x_numpy = (x_show).cpu().numpy()
 
-    if img_meta is not None:
-        path = ''.join(['results/results_1024_2/fea_ref/', str(img_meta[0]['video_id']), '_',
-                        str(img_meta[0]['frame_id']), '_', str(idx), '.png'])
-    else:
-        path = 'results/results_1024_2/fea_ref/0.png'
+    path_max = ''.join([save_dir, '/', str(img_meta['frame_id']), '_max_corr.png'])
+    max_corr = x_corr.squeeze(0).max(dim=0)[0].cpu().numpy()
+    plt.imshow(max_corr)
+    plt.savefig(path_max)
 
+    path = ''.join([save_dir, '/', str(img_meta['frame_id']), '_corr.png'])
     plt.axis('off')
     plt.pcolormesh(x_numpy)
     plt.savefig(path)

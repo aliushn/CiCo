@@ -111,7 +111,7 @@ if torch.cuda.is_available():
 else:
     torch.set_default_tensor_type('torch.FloatTensor')
 
-loss_types = ['B', 'BIoU', 'Rep', 'C', 'stuff', 'M', 'MIoU', 'T', 'center', 'B_shift', 'M_shift', 'M_occluded',
+loss_types = ['B', 'BIoU', 'Rep', 'C', 'stuff', 'M', 'MIoU', 'T', 'center', 'B_shift', 'BIoU_shift', 'M_shift',
               'P', 'D', 'S', 'I']
 
 
@@ -285,9 +285,9 @@ def train():
                     log.log('train', loss=loss_info, epoch=epoch, iter=iteration,
                             lr=round(cur_lr, 10), elapsed=elapsed)
 
-                if i == 0 and epoch > 0:
-                    if epoch % args.save_interval == 0 and args.local_rank == 0:
-                # if iteration == 200 and args.local_rank == 0:
+                # if i == 0 and epoch > 0:
+                #     if epoch % args.save_interval == 0 and args.local_rank == 0:
+                if iteration == 100 and args.local_rank == 0:
                         if args.keep_latest:
                             latest = SavePath.get_latest(args.save_folder, cfg.name)
 

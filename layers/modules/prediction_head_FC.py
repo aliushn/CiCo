@@ -7,6 +7,7 @@ from .Featurealign import FeatureAlign
 from utils import timer
 from itertools import product
 from mmcv.ops import DeformConv2d
+import torch.nn.functional as F
 
 
 class PredictionModule_FC(nn.Module):
@@ -41,6 +42,7 @@ class PredictionModule_FC(nn.Module):
         self.out_channels = out_channels
         self.num_classes = cfg.num_classes
         self.mask_dim = cfg.mask_dim
+        self.track_dim = cfg.track_dim
         self.num_priors = len(pred_scales)
         self.deform_groups = deform_groups
         self.pred_aspect_ratios = pred_aspect_ratios
@@ -59,6 +61,9 @@ class PredictionModule_FC(nn.Module):
 
             # init single or multi kernel prediction modules
             self.bbox_layer, self.mask_layer = nn.ModuleList([]), nn.ModuleList([])
+
+            if not cfg.track_by_Gaussian:
+                self.track_layer = nn.ModuleList([])
 
             if cfg.train_centerness:
                 self.centerness_layer = nn.ModuleList([])
@@ -102,6 +107,18 @@ class PredictionModule_FC(nn.Module):
                     self.mask_layer.append(nn.Conv2d(self.out_channels, self.num_priors*self.mask_dim,
                                                      **cfg.head_layer_params[k]))
 
+                if cfg.train_track and not cfg.track_by_Gaussian:
+                    if cfg.use_dcn_track:
+                        self.track_layer.append(FeatureAlign(self.out_channels,
+                                                             self.num_priors * self.track_dim,
+                                                             kernel_size=kernel_size,
+                                                             deformable_groups=self.deform_groups,
+                                                             use_pred_offset=cfg.use_pred_offset))
+                    else:
+                        self.track_layer.append(nn.Conv2d(self.out_channels,
+                                                          self.num_priors * self.trck_dim,
+                                                          **cfg.head_layer_params[k]))
+
             # What is this ugly lambda doing in the middle of all this clean prediction module code?
             def make_extra(num_layers, out_channels):
                 if num_layers == 0:
@@ -117,7 +134,9 @@ class PredictionModule_FC(nn.Module):
                 self.conf_extra = make_extra(cfg.extra_layers[0], self.out_channels)
             else:
                 self.stuff_extra = make_extra(cfg.extra_layers[0], self.out_channels)
-            self.bbox_extra, self.mask_extra = [make_extra(x, self.out_channels) for x in cfg.extra_layers[:2]]
+            self.bbox_extra, self.mask_extra = [make_extra(x, self.out_channels) for x in cfg.extra_layers[1:3]]
+            if cfg.train_track and not cfg.track_by_Gaussian:
+                self.track_extra = make_extra(cfg.extra_layers[-1], self.out_channels)
 
     def forward(self, x):
         """
@@ -141,17 +160,17 @@ class PredictionModule_FC(nn.Module):
 
         if cfg.train_class:
             conf_x = src.conf_extra(x)
-        else:
-            stuff_x = src.stuff_extra(x)
-        bbox_x = src.bbox_extra(x)
-        mask_x = src.mask_extra(x)
-
-        bbox, centerness_data, mask = [], [], []
-        if cfg.train_class:
             conf = []
         else:
+            stuff_x = src.stuff_extra(x)
             stuff = []
+        bbox_x = src.bbox_extra(x)
+        mask_x = src.mask_extra(x)
+        if cfg.train_track and not cfg.track_by_Gaussian:
+            track_x = src.track_extra(x)
+            track = []
 
+        bbox, centerness_data, mask, = [], [], []
         for k in range(len(cfg.head_layer_params)):
             if cfg.train_centerness:
                 centerness_cur = src.centerness_layer[k](bbox_x)
@@ -176,6 +195,13 @@ class PredictionModule_FC(nn.Module):
                 mask_cur = src.mask_layer[k](mask_x)
             mask.append(mask_cur.permute(0, 2, 3, 1).contiguous())
 
+            if cfg.train_track and not cfg.track_by_Gaussian:
+                    if cfg.use_dcn_track:
+                        track_cur = src.track_layer[k](track_x, bbox_cur.detach())
+                    else:
+                        track_cur = src.track_layer[k](track_x)
+                    track.append(track_cur.permute(0, 2, 3, 1).contiguous())
+
         # cat for all anchors
         if cfg.train_boxes:
             bbox = torch.cat(bbox, dim=-1).view(x.size(0), -1, 4)
@@ -187,7 +213,9 @@ class PredictionModule_FC(nn.Module):
         else:
             stuff = torch.cat(stuff, dim=-1).view(x.size(0), -1, 1)
         mask = torch.cat(mask, dim=-1).view(x.size(0), -1, src.mask_dim)
-        # mask = cfg.mask_proto_coeff_activation(mask)
+        if cfg.train_track and not cfg.track_by_Gaussian:
+            track = torch.cat(track, dim=-1).view(x.size(0), -1, src.track_dim)
+            track = F.normalize(track, dim=-1)
 
         # See box_utils.decode for an explanation of this
         if cfg.use_yolo_regressors:

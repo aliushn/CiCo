@@ -14,10 +14,11 @@ class TemporalNet(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.pool = nn.AvgPool2d((7, 7), stride=1)
         self.fc = nn.Linear(1024, 4)
-        if cfg.use_sipmask:
-            self.fc_coeff = nn.Linear(1024, mask_proto_n * cfg.sipmask_head)
-        else:
-            self.fc_coeff = nn.Linear(1024, mask_proto_n)
+        if cfg.maskshift_loss:
+            if cfg.use_sipmask:
+                self.fc_coeff = nn.Linear(1024, mask_proto_n * cfg.sipmask_head)
+            else:
+                self.fc_coeff = nn.Linear(1024, mask_proto_n)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -29,12 +30,14 @@ class TemporalNet(nn.Module):
         x = self.pool(x)
         x = x.view(x.size(0), -1)
         x_reg = self.fc(x)
-        x_coeff = self.fc_coeff(x)
 
-        variances = [0.1, 0.2]
-        x_reg = torch.cat([x_reg[:, :2] * variances[0], x_reg[:, 2:] * variances[1]], dim=1)
+        if cfg.maskshift_loss:
+            x_coeff = self.fc_coeff(x)
 
-        return x_reg, x_coeff
+            return x_reg, x_coeff
+
+        else:
+            return x_reg
 
 
 def bbox_feat_extractor(feature_maps, boxes, pool_size):

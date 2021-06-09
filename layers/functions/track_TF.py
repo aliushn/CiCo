@@ -25,7 +25,7 @@ class Track_TF(object):
     def __init__(self):
         self.prev_candidate = None
 
-    def __call__(self, net, candidate, img_meta, img=None):
+    def __call__(self, net, candidates, imgs_meta, img=None):
         """
         Args:
              loc_data: (tensor) Loc preds from loc layers
@@ -38,11 +38,14 @@ class Track_TF(object):
             Note that the outputs are sorted only if cross_class_nms is False
         """
 
-        with timer.env('Track'):
-            # only support batch_size = 1 for video test
-            result = self.track(net, candidate, img_meta, img=img)
+        with timer.env('Track_TF'):
+            batch_size = len(candidates)
 
-        return result
+            # only support batch_size = 1 for video test
+            for batch_idx in range(batch_size):
+                candidates[batch_idx] = self.track(net, candidates[batch_idx], imgs_meta[batch_idx], img=img[batch_idx])
+
+        return candidates
 
     def track(self, net, candidate, img_meta, img=None):
         # only support batch_size = 1 for video test
@@ -63,45 +66,52 @@ class Track_TF(object):
         if cfg.use_semantic_segmentation_loss:
             sem_seg = candidate['sem_seg'].squeeze(0).permute(2, 0, 1).contiguous()
 
-        det_track_embed = F.normalize(candidate['track'], dim=-1).squeeze(0)
-        det_track_mu, det_track_var = generate_track_gaussian(det_track_embed, det_masks_soft, det_bbox)
-        candidate['track_mu'] = det_track_mu
-        candidate['track_var'] = det_track_var
+        det_track_embed = candidate['track']
+        if cfg.track_by_Gaussian:
+            det_track_mu, det_track_var = generate_track_gaussian(det_track_embed.squeeze(0), det_masks_soft, det_bbox)
+            candidate['track_mu'] = det_track_mu
+            candidate['track_var'] = det_track_var
 
         n_dets = det_bbox.size(0)
 
         # compared bboxes in current frame with bboxes in previous frame to achieve tracking
         if is_first or (not is_first and self.prev_candidate is None):
             # save bbox and features for later matching
-            self.prev_candidate = candidate
+            self.prev_candidate = dict()
+            for k, v in candidate.items():
+                self.prev_candidate[k] = v.clone()
             self.prev_candidate['tracked_mask'] = torch.zeros(n_dets)
+
         else:
 
             assert self.prev_candidate is not None
 
             # tracked mask: to track masks from previous frames to current frame
-            prev_candidate_shift = CandidateShift(net, candidate, self.prev_candidate, img_meta=[img_meta])
+            prev_candidate_shift = CandidateShift(net, candidate, self.prev_candidate, img=img, img_meta=img_meta)
             for k, v in prev_candidate_shift.items():
                 self.prev_candidate[k] = v.clone()
             self.prev_candidate['tracked_mask'] = self.prev_candidate['tracked_mask'] + 1
 
             # calculate KL divergence for Gaussian distribution of isntances
             n_prev = self.prev_candidate['box'].size(0)
-            prev_track_mu = self.prev_candidate['track_mu']
-            prev_track_var = self.prev_candidate['track_var']
 
-            kl_divergence = compute_kl_div(prev_track_mu, prev_track_var,
-                                           det_track_mu, det_track_var)    # value in [[0, +infinite]]
-            sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10  # threshold for kl_divergence = 10
-            # from [0, +infinite] to [0, 1]: sim = 1/ (exp(0.1*kl_div))
-            sim = torch.div(1., torch.exp(0.1 * torch.cat([sim_dummy, kl_divergence], dim=-1)))
+            if cfg.track_by_Gaussian:
+                kl_divergence = compute_kl_div(self.prev_candidate['track_mu'], self.prev_candidate['track_var'],
+                                               det_track_mu, det_track_var)    # value in [[0, +infinite]]
+                sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10  # threshold for kl_divergence = 10
+                # from [0, +infinite] to [0, 1]: sim = 1/ (exp(0.1*kl_div))
+                sim = torch.div(1., torch.exp(0.1 * torch.cat([sim_dummy, kl_divergence], dim=-1)))
+            else:
+                cos_sim = det_track_embed @ self.prev_candidate['track'].t()  # [n_dets, n_prev], val in [-1, 1]
+                cos_sim = torch.cat([torch.zeros(n_dets, 1), cos_sim], dim=1)
+                sim = (cos_sim + 1) / 2  # [0, 1]
 
             # Calculate BIoU and MIoU between detected masks and tracked masks for assign IDs
             bbox_ious = compute_DIoU(det_bbox, self.prev_candidate['box'])  # [n_dets, n_prev]
             mask_ious = mask_iou(det_masks_soft.gt(0.5).float(), self.prev_candidate['mask'].gt(0.5))  # [n_dets, n_prev]
+            label_delta = (self.prev_candidate['class'] == det_labels.view(-1, 1)).float()
 
             # compute comprehensive score
-            label_delta = (self.prev_candidate['class'] == det_labels.view(-1, 1)).float()
             comp_scores = compute_comp_scores(sim,
                                               det_score.view(-1, 1),
                                               bbox_ious,

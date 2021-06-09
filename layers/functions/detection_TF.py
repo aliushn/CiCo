@@ -130,6 +130,7 @@ class Detect_TF(object):
             boxes = boxes[idx_out]
             masks_coeff = masks_coeff[idx_out]
             det_masks_soft = det_masks_soft[idx_out]
+            det_masks = det_masks_soft.gt(0.5).float()
 
             if cfg.train_class:
                 classes = classes[idx_out] + 1
@@ -139,8 +140,8 @@ class Detect_TF(object):
                 # Step 1: multiply instances' masks and semantic segmentation to filter fired area
                 # step 2: mean of all pixels in the fired area as its classification confidence
                 sem_data = sem_data.permute(2, 0, 1).contiguous().unsqueeze(0)
-                sem_data = (sem_data * det_masks_soft.gt(0.5).float().unsqueeze(1)).gt(0.3).float()
-                MIoU = mask_iou(sem_data[:, 1:], det_masks_soft.unsqueeze(1))  # [n, n_class, 1]
+                sem_data = (sem_data * det_masks.unsqueeze(1)).gt(0.3).float()
+                MIoU = mask_iou(sem_data[:, 1:], det_masks.unsqueeze(1))  # [n, n_class, 1]
                 # MIou_sorted,  MIou_sorted_idx = MIoU.sort(1, descending=True)
                 # print(MIou_sorted[:, :3].reshape(-1), MIou_sorted_idx[:, :3].reshape(-1), scores[idx_out])
                 max_miou, classes = MIoU.max(dim=1)
