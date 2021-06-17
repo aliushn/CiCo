@@ -2,13 +2,13 @@ from datasets import *
 import os
 import cv2
 import torch
+import json
 from datasets import get_dataset, prepare_data
 import torch.utils.data as data
 import argparse
 import torch.nn.functional as F
+import pycocotools.mask as mask_util
 
-# Oof
-import eval as eval_script
 from collections import defaultdict
 import matplotlib.pyplot as plt
 from layers.utils import undo_image_transformation, center_size
@@ -22,8 +22,8 @@ parser = argparse.ArgumentParser(
     description='Yolact Training Script')
 parser.add_argument('--batch_size', default=1, type=int,
                     help='Batch size for training')
-parser.add_argument('--num_workers', default=1, type=int,
-                    help='Number of workers used in data_loading')
+parser.add_argument('--display_ori_shape', default=True, type=str2bool,
+                    help='display original shape of images')
 parser.add_argument('--cuda', default=True, type=str2bool,
                     help='Use CUDA to train model')
 parser.add_argument('--config', default='STMask_plus_base_config',
@@ -42,46 +42,61 @@ if args.config is not None:
 color_cache = defaultdict(lambda: {})
 
 
-def train(mask_alpha=0.45):
-    cfg.valid_sub_dataset.test_mode = False
-    cfg.valid_sub_dataset.flip_ratio = 0
-    train_dataset = get_dataset(cfg.valid_sub_dataset)
-    data_loader = data.DataLoader(train_dataset, args.batch_size,
-                                  num_workers=args.num_workers,
-                                  shuffle=False,
-                                  collate_fn=detection_collate_vis,
-                                  pin_memory=True)
-
-    print()
-    # try-except so you can use ctrl+c to save early and stop training
+def plt_masks_from_json(data_loader, type='gt', anns=None, mask_alpha=0.45):
     # for datum in data_loader:
     for data_batch in data_loader:
-        imgs, gt_bboxes, gt_labels, gt_masks, gt_ids, imgs_meta = prepare_data(data_batch,
-                                                                               devices=torch.cuda.current_device())
+
+        if type == 'gt':
+            imgs, gt_bboxes, gt_labels, gt_masks, gt_ids, imgs_meta = prepare_data(data_batch,
+                                                                                   devices=torch.cuda.current_device())
+        else:
+            assert anns is not None
+            imgs, imgs_meta = prepare_data(data_batch, train_mode=False, devices=torch.cuda.current_device())
 
         batch_size = imgs.size(0)
         for i in range(0, batch_size, 2):
-            n_cur = gt_masks[i].size(0)
-            gt_masks_cur = gt_masks[i]
-            img_cur = imgs[i]
-            gt_ids_cur = gt_ids[i]
-            bboxes_cur = gt_bboxes[i]
-            labels_cur = gt_labels[i]
             img_meta = imgs_meta[i]
             ori_h, ori_w = img_meta['ori_shape'][:2]
             img_h, img_w = img_meta['img_shape'][:2]
-            pad_h, pad_w = img_meta['pad_shape'][:2]
-            s_h, s_w = pad_h / img_h, pad_w / img_w
 
-            if img_meta['is_first']:
-                min_id = gt_ids_cur[0]
-            gt_ids_cur = gt_ids_cur - min_id
+            img_cur = imgs[i]
+            if type == 'gt':
+                gt_masks_cur = gt_masks[i]
+                gt_ids_cur = gt_ids[i]
+                labels_cur = gt_labels[i]
+                if img_meta['is_first']:
+                    min_id = gt_ids_cur[0]
+                gt_ids_cur = gt_ids_cur - min_id
 
-            img_numpy = undo_image_transformation(img_cur, img_meta, pad_h, pad_w)
+            else:
+
+                gt_bboxes, gt_ids, gt_labels, gt_masks = [], [], [], []
+                frame_id = img_meta['frame_id']
+                id = -1
+                for ann in anns:
+                    if ann['video_id'] - 1 == img_meta['video_id']:
+                        mask_rle = ann['segmentations'][frame_id]
+                        if mask_rle is None:
+                            mask_binary = torch.zeros(ori_h, ori_w)
+                        else:
+                            mask_binary = torch.tensor(mask_util.decode(mask_rle)).float()
+
+                        gt_masks.append(mask_binary)
+                        gt_labels.append(ann['category_id'])
+                        id += 1
+                        gt_ids.append(id)
+
+                gt_ids_cur = gt_ids
+                gt_masks_cur = torch.stack(gt_masks, dim=0).cuda()
+                gt_masks_cur = F.interpolate(gt_masks_cur.unsqueeze(0), (img_h, img_w)).squeeze(0)
+                labels_cur = gt_labels
+
+            n_cur = gt_masks_cur.size(0)
+            img_numpy = undo_image_transformation(img_cur, img_meta)
             img_cur = torch.Tensor(img_numpy).cuda()  # [360, 640, 3]
 
             # Undo padding for masks
-            gt_masks_cur = gt_masks_cur[:, :img_h, :img_w].float()
+            # gt_masks_cur = gt_masks_cur[:, :img_h, :img_w].float()
             gt_masks_cur = gt_masks_cur.unsqueeze(-1).repeat(1, 1, 1, 3)
             # This is 1 everywhere except for 1-mask_alpha where the mask is
             inv_alph_masks = gt_masks_cur.sum(0) * (-mask_alpha) + 1
@@ -93,15 +108,16 @@ def train(mask_alpha=0.45):
                 gt_masks_cur_color.append(gt_masks_cur[j] * colors * mask_alpha)
             gt_masks_cur_color = torch.stack(gt_masks_cur_color, dim=0).sum(0)
 
-            img_color = (img_cur * inv_alph_masks + gt_masks_cur_color).permute(2, 0, 1).contiguous()
-            img_color = F.interpolate(img_color.unsqueeze(0), (ori_h, ori_w), mode='bilinear',
-                                      align_corners=False).squeeze(0)
-            img_color = img_color.permute(1, 2, 0).contiguous()
+            img_color = (img_cur * inv_alph_masks + gt_masks_cur_color)
+            if args.display_ori_shape:
+                img_color = img_color.permute(2, 0, 1).contiguous()
+                img_color = F.interpolate(img_color.unsqueeze(0), (ori_h, ori_w), mode='bilinear',
+                                          align_corners=False).squeeze(0)
+                img_color = img_color.permute(1, 2, 0).contiguous()
             img_numpy = img_color.cpu().numpy()
 
-            if args.display_bboxes:
-                bboxes_cur[:, ::2] = bboxes_cur[:, ::2] * s_w
-                bboxes_cur[:, 1::2] = bboxes_cur[:, 1::2] * s_h
+            if type == 'gt' and args.display_bboxes:
+                bboxes_cur = gt_bboxes[i]
                 bboxes_cur = torch.clamp(bboxes_cur, min=1e-3, max=1-1e-3)
                 bboxes_cur[:, ::2] = bboxes_cur[:, ::2] * ori_w
                 bboxes_cur[:, 1::2] = bboxes_cur[:, 1::2] * ori_h
@@ -155,6 +171,7 @@ def get_color(j, color_type, on_gpu=None, undo_transform=True):
         return color
 
 
+# display motion path of instance in the video
 def plot_path(mask_alpha=0.45):
     root_dir = os.path.join(args.save_path, 'out_path')
     if not os.path.exists(root_dir):
@@ -237,7 +254,7 @@ def plot_path(mask_alpha=0.45):
 
             if n_cur > n_max_inst:
                 n_max_inst = n_cur
-                img_numpy = undo_image_transformation(img_cur, img_meta, pad_h, pad_w)
+                img_numpy = undo_image_transformation(img_cur, img_meta)
                 img_cur = torch.Tensor(img_numpy).cuda()  # [360, 640, 3]
 
                 # Undo padding for masks
@@ -282,5 +299,31 @@ def plot_path(mask_alpha=0.45):
 
 
 if __name__ == '__main__':
-    # train()
-    plot_path()
+    type = 'pred'
+
+    if type == 'gt':
+        # display GT masks on valid_sub data
+        cfg.valid_sub_dataset.test_mode = True
+        cfg.valid_sub_dataset.flip_ratio = 0
+        dataset = get_dataset(cfg.valid_sub_dataset)
+        data_loader = data.DataLoader(dataset, args.batch_size,
+                                      shuffle=False,
+                                      collate_fn=detection_collate_vis,
+                                      pin_memory=True)
+
+        plt_masks_from_json(data_loader, type)
+
+    else:
+        # display predicted masks on valid data
+        cfg.valid_dataset.test_mode = True
+        cfg.valid_dataset.flip_ratio = 0
+        dataset = get_dataset(cfg.valid_dataset)
+        data_loader = data.DataLoader(dataset, args.batch_size,
+                                      shuffle=False,
+                                      collate_fn=detection_collate_vis,
+                                      pin_memory=True)
+
+        # path of the .json file that stores your predicted masks
+        ann_file = '../STMask/weights/YTVIS2019/weights_r50_new/results.json'
+        anns = json.load(open(ann_file, 'r'))
+        plt_masks_from_json(data_loader, type, anns=anns)

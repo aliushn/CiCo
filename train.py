@@ -287,7 +287,7 @@ def train():
 
                 # if i == 0 and epoch > 0:
                 #     if epoch % args.save_interval == 0 and args.local_rank == 0:
-                if iteration == 100 and args.local_rank == 0:
+                if iteration == 5000 and args.local_rank == 0:
                         if args.keep_latest:
                             latest = SavePath.get_latest(args.save_folder, cfg.name)
 

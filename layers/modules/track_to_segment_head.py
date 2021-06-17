@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from datasets import cfg
 from mmcv.ops import roi_align
+from layers.utils import sanitize_coordinates_hw
 
 
 class TemporalNet(nn.Module):
@@ -14,6 +15,7 @@ class TemporalNet(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.pool = nn.AvgPool2d((7, 7), stride=1)
         self.fc = nn.Linear(1024, 4)
+
         if cfg.maskshift_loss:
             if cfg.use_sipmask:
                 self.fc_coeff = nn.Linear(1024, mask_proto_n * cfg.sipmask_head)
@@ -40,13 +42,14 @@ class TemporalNet(nn.Module):
             return x_reg
 
 
-def bbox_feat_extractor(feature_maps, boxes, pool_size):
+def bbox_feat_extractor(feature_maps, boxes_w_norm, h, w, pool_size):
     """
         feature_maps: size:1*C*h*w
-        boxes: Mx5 float box with (y1, x1, y2, x2) **with normalization**
+        boxes_w_norm: Mx5 float box with (x1, y1, x2, y2) **without normalization**
     """
     # Currently only supports batch_size 1
-    boxes = boxes[:, [1, 0, 3, 2]]
+    # from [0, 1] to [0, h or w]
+    boxes = sanitize_coordinates_hw(boxes_w_norm, h, w)
 
     # Crop and Resize
     # Result: [num_boxes, pool_height, pool_width, channels]

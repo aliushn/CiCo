@@ -127,7 +127,7 @@ class Detect(object):
         return out_after_NMS
 
     def cc_fast_nms(self, boxes, masks_coeff, proto_data, scores, sem_data, centerness_scores,
-                    iou_threshold: float = 0.5, top_k: int = 200):
+                    iou_threshold: float = 0.5, top_k: int = 100):
         if cfg.train_class:
             # Collapse all the classes into 1
             scores, classes = scores.max(dim=0)
@@ -194,7 +194,7 @@ class Detect(object):
 
         return out_after_NMS
 
-    def coefficient_nms(self, coeffs, scores, cos_threshold=0.9, top_k=400):
+    def coefficient_nms(self, coeffs, scores, cos_threshold=0.9, top_k=200):
         _, idx = scores.sort(0, descending=True)
         idx = idx[:top_k]
         coeffs_norm = F.normalize(coeffs[idx], dim=1)
@@ -217,7 +217,7 @@ class Detect(object):
         return idx_out, idx_out.size(0)
 
     def fast_nms(self, boxes, masks_coeff, proto_data, scores, sem_data,
-                 iou_threshold:float=0.5, top_k:int=200, second_threshold:bool=True):
+                 iou_threshold:float=0.5, top_k:int=100, second_threshold:bool=True):
 
         det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
         det_masks = det_masks_soft.gt(0.5).float()

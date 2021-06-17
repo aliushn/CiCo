@@ -290,7 +290,7 @@ test_OVIS_dataset = dataset_base_vis.copy({
 
     'img_prefix': '../datasets/OVIS/test',
     'ann_file': '../datasets/OVIS/annotations_test.json',
-    'has_gt': False,
+    'test_mode': True,
 })
 
 
@@ -494,7 +494,7 @@ base_config = Config({
     'eval_mask_branch': True,
 
     # Top_k examples to consider for NMS
-    'nms_top_k': 200,
+    'nms_top_k': 100,
     # Examples with confidence less than this are not considered by NMS
     'nms_conf_thresh': 0.3,
     # Boxes with IoU overlap greater than this threshold will be culled during NMS
@@ -704,13 +704,13 @@ STMask_base_config = base_config.copy({
     'mask_alpha': 6.125,
     'mask_proto_src': 0,
     'mask_proto_crop': True,
-    'mask_proto_crop_outside': False,
     'mask_dim': 16,
     'mask_proto_net': [(256, 3, {'padding': 1})] * 3 + [(None, -2, {})],
     'mask_proto_normalize_emulate_roi_pooling': False,
     'discard_mask_area': 5 * 5,
     'mask_proto_coeff_diversity_loss': False,
     'mask_proto_crop_with_pred_box': False,
+    'mask_proto_coeff_occlusion': True,
 
     # Proto_net settings
     'backbone_C2_as_features': False,
@@ -724,7 +724,7 @@ STMask_base_config = base_config.copy({
     # Track settings
     'train_track': True,
     'track_by_Gaussian': True,
-    'match_coeff': [0, 0.7, 0.3, 0],   # scores, mask_iou, box_iou, label
+    'match_coeff': [0, 2, 1, 0],   # scores, mask_iou, box_iou, label
     'track_dim': 64,
     'track_crop_with_pred_mask': False,
     'track_crop_with_pred_box': False,
@@ -737,7 +737,6 @@ STMask_base_config = base_config.copy({
     'correlation_patch_size': 11,
     'correlation_selected_layer': 1,
     'boxshift_with_pred_box': False,
-    'boxshift_alpha': 5,
     'maskshift_alpha': 6.125,
     'maskshift_loss': False,
     'forward_flow': True,

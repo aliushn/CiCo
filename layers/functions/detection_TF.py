@@ -83,7 +83,9 @@ class Detect_TF(object):
             scores, classes = scores[1:].max(dim=0)   # [n_dets]
 
         if centerness_scores is not None:
-            scores = scores * centerness_scores.view(-1)
+            scores_used = scores * centerness_scores.view(-1)
+        else:
+            scores_used = scores
 
         det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
 
@@ -94,7 +96,7 @@ class Detect_TF(object):
         area_mask = det_masks_soft.gt(0.5).float().sum(dim=(1, 2))
         area_rate = area_mask / area_box
 
-        _, idx = (area_rate * scores).sort(0, descending=True)
+        _, idx = (area_rate * scores_used).sort(0, descending=True)
         keep_idx = (area_rate > 0.2)[idx]
         idx = idx[keep_idx][:top_k]
 

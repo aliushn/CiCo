@@ -5,6 +5,7 @@ from utils import timer
 from utils.functions import SavePath
 from utils.augmentations import BaseTransform
 from layers.utils.output_utils import postprocess_ytbvis, undo_image_transformation
+from layers.visualization import draw_dotted_rectangle, get_color
 
 from datasets import get_dataset, prepare_data
 import mmcv
@@ -14,6 +15,7 @@ import torch.backends.cudnn as cudnn
 import torch.utils.data as data
 import argparse
 import random
+import numpy as np
 import os
 from collections import defaultdict
 from layers.utils.eval_utils import bbox2result_with_id, results2json_videoseg, calc_metrics
@@ -136,7 +138,7 @@ coco_cats_inv = {}
 color_cache = defaultdict(lambda: {})
 
 
-def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_transform=True, mask_alpha=0.45,
+def prep_display(dets_out, img, img_ids=None, img_meta=None, undo_transform=True, mask_alpha=0.45,
                  fps_str=''):
     """
     Note: If undo_transform=False then im_h and im_w are allowed to be None.
@@ -144,20 +146,21 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
     """
 
     if undo_transform:
-        img_numpy = undo_image_transformation(img, img_meta, pad_h, pad_w)
+        img_numpy = undo_image_transformation(img, img_meta)
         img_gpu = torch.Tensor(img_numpy).cuda()
     else:
         img_gpu = img / 255.0
-        pad_h, pad_w, _ = img.shape
+
     ori_h, ori_w, _ = img_meta['ori_shape']
+    img_h, img_w, _ = img_meta['img_shape']
 
     with timer.env('Postprocess'):
         cfg.mask_proto_debug = args.mask_proto_debug
         # cfg.preserve_aspect_ratio = False
-        dets_out = postprocess_ytbvis(dets_out, pad_h, pad_w, img_meta, display_mask=True,
+        dets_out = postprocess_ytbvis(dets_out, img_meta, display_mask=True,
                                       visualize_lincomb=args.display_lincomb,
                                       crop_masks=args.crop,
-                                      score_threshold=cfg.eval_conf_thresh,
+                                      # score_threshold=cfg.eval_conf_thresh,
                                       img_ids=img_ids,
                                       mask_det_file=args.mask_det_file)
         torch.cuda.synchronize()
@@ -244,10 +247,9 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
             x1, y1, x2, y2 = boxes[j, :]
             color = get_color(j, color_type)
             # plot priors
-            h, w, _ = img_meta['img_shape']
 
-            max_w = ori_w if cfg.preserve_aspect_ratio else pad_w
-            max_h = ori_h if cfg.preserve_aspect_ratio else pad_h
+            max_w = ori_w if cfg.preserve_aspect_ratio else img_w
+            max_h = ori_h if cfg.preserve_aspect_ratio else img_h
             x = torch.clamp(torch.tensor([x1, x2]), min=2, max=max_w).tolist(),
             y = torch.clamp(torch.tensor([y1, y2]), min=2, max=max_h).tolist(),
             x, y = x[0], y[0]
@@ -255,7 +257,10 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
             score = scores[j]
 
             if args.display_bboxes:
-                cv2.rectangle(img_numpy, (x[0], y[0]), (x[1], y[1]), color, 2)
+                if dets_out['tracked_mask'][j] > 0:
+                    draw_dotted_rectangle(img_numpy, x[0], y[0], x[1], y[1], color, 2, gap=10)
+                else:
+                    cv2.rectangle(img_numpy, (x[0], y[0]), (x[1], y[1]), color, 2)
 
             if args.display_text:
                 if classes[j] - 1 < 0:
@@ -292,26 +297,7 @@ def prep_display(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_
     return img_numpy
 
 
-# Quick and dirty lambda for selecting the color for a particular index
-# Also keeps track of a per-gpu color cache for maximum speed
-def get_color(j, color_type, on_gpu=None, undo_transform=True):
-    global color_cache
-    color_idx = (color_type[j] * 5) % len(cfg.COLORS)
-
-    if on_gpu is not None and color_idx in color_cache[on_gpu]:
-        return color_cache[on_gpu][color_idx]
-    else:
-        color = cfg.COLORS[color_idx]
-        if not undo_transform:
-            # The image might come in as RGB or BRG, depending
-            color = (color[2], color[1], color[0])
-        if on_gpu is not None:
-            color = torch.Tensor(color).to(on_gpu).float() / 255.
-            color_cache[on_gpu][color_idx] = color
-        return color
-
-
-def prep_display_single(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None, undo_transform=True, mask_alpha=0.45,
+def prep_display_single(dets_out, img, img_ids=None, img_meta=None, undo_transform=True, mask_alpha=0.45,
                         fps_str='', display_mode=None):
     """
     Note: If undo_transform=False then im_h and im_w are allowed to be None.
@@ -319,16 +305,18 @@ def prep_display_single(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None
     """
 
     if undo_transform:
-        img_numpy = undo_image_transformation(img, img_meta, pad_h, pad_w)
+        img_numpy = undo_image_transformation(img, img_meta)
         img_gpu = torch.Tensor(img_numpy).cuda()
     else:
         img_gpu = img / 255.0
-        pad_h, pad_w, _ = img.shape
+
+    ori_h, ori_w, _ = img_meta['ori_shape']
+    img_h, img_w, _ = img_meta['img_shape']
 
     with timer.env('Postprocess'):
         cfg.mask_proto_debug = args.mask_proto_debug
         cfg.preserve_aspect_ratio = False
-        dets_out = postprocess_ytbvis(dets_out, pad_h, pad_w, img_meta, display_mask=True,
+        dets_out = postprocess_ytbvis(dets_out, img_meta, display_mask=True,
                                       visualize_lincomb=args.display_lincomb,
                                       crop_masks=args.crop,
                                       score_threshold=cfg.eval_conf_thresh,
@@ -409,10 +397,9 @@ def prep_display_single(dets_out, img, pad_h, pad_w, img_ids=None, img_meta=None
             x1, y1, x2, y2 = boxes[j, :]
             color = get_color(j, color_type)
             # plot priors
-            h, w, _ = img_meta['img_shape']
             priors = dets_out['priors'].detach().cpu().numpy()
             if j < dets_out['priors'].size(0):
-                cpx, cpy, pw, ph = priors[j, :] * [w, h, w, h]
+                cpx, cpy, pw, ph = priors[j, :] * [img_w, img_h, img_w, img_h]
                 px1, py1 = cpx - pw / 2.0, cpy - ph / 2.0
                 px2, py2 = cpx + pw / 2.0, cpy + ph / 2.0
                 px1, py1, px2, py2 = int(px1), int(py1), int(px2), int(py2)
@@ -516,8 +503,7 @@ def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None
 
                 for pred, img_meta in zip(preds, images_meta):
                     cfg.preserve_aspect_ratio = True
-                    preds_cur = postprocess_ytbvis(pred, pad_h, pad_w, img_meta,
-                                                   score_threshold=cfg.eval_conf_thresh)
+                    preds_cur = postprocess_ytbvis(pred, img_meta)
                     segm_results = bbox2result_with_id(preds_cur, cfg.classes)
                     results.append(segm_results)
 
@@ -580,7 +566,6 @@ def evaluate(net: STMask, dataset):
 
             with timer.env('Load Data'):
                 images, images_meta = prepare_data(data_batch, train_mode=False, devices=torch.cuda.current_device())
-                pad_h, pad_w = images.size()[2:4]
 
             with timer.env('Network Extra'):
                 preds, out_images, out_img_metas = net(images, img_meta=images_meta)
@@ -596,7 +581,7 @@ def evaluate(net: STMask, dataset):
                         if not os.path.exists(root_dir):
                             os.makedirs(root_dir)
                         if not cfg.display_mask_single:
-                            img_numpy = prep_display(pred, out_images[batch_id], pad_h, pad_w,
+                            img_numpy = prep_display(pred, out_images[batch_id],
                                                      img_meta=out_img_metas[batch_id], img_ids=img_id)
                             plt.imshow(img_numpy)
                             plt.axis('off')
@@ -612,7 +597,7 @@ def evaluate(net: STMask, dataset):
                                         preds_single[k] = v[p]
 
                                 preds_single['box_ids'] = torch.tensor(-1)
-                                img_numpy = prep_display(preds_single, out_images[batch_id], pad_h, pad_w,
+                                img_numpy = prep_display(preds_single, out_images[batch_id],
                                                          img_meta=out_img_metas[batch_id], img_ids=img_id)
                                 plt.imshow(img_numpy)
                                 plt.axis('off')
@@ -621,8 +606,7 @@ def evaluate(net: STMask, dataset):
 
                     else:
                         cfg.preserve_aspect_ratio = True
-                        preds_cur = postprocess_ytbvis(pred, pad_h, pad_w, out_img_metas[batch_id],
-                                                       score_threshold=cfg.eval_conf_thresh)
+                        preds_cur = postprocess_ytbvis(pred, out_img_metas[batch_id])
                         segm_results = bbox2result_with_id(preds_cur, cfg.classes)
                         results.append(segm_results)
 

@@ -115,6 +115,7 @@ def generate_mask(proto_data, mask_coeff, bbox=None):
     :param bbox: [n, 4]
     :return:
     '''
+
     # get masks
     if cfg.use_sipmask:
         pred_masks00 = cfg.mask_proto_mask_activation(proto_data @ mask_coeff[:, :cfg.mask_proto_n].t())
@@ -140,7 +141,8 @@ def generate_mask(proto_data, mask_coeff, bbox=None):
         else:
             print('please input the proto_data with size [h, w, c] or [n, h, w, c]')
 
-        pred_masks = cfg.mask_proto_mask_activation(pred_masks)
+        if not cfg.mask_proto_coeff_occlusion:
+            pred_masks = cfg.mask_proto_mask_activation(pred_masks)
         if bbox is not None:
             _, pred_masks = crop(pred_masks, bbox)  # [mask_h, mask_w, n]
 

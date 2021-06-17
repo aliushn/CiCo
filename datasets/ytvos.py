@@ -378,11 +378,13 @@ class YTVOSDataset(CustomDataset):
         gt_labels = []
         gt_ids = []
         gt_bboxes_ignore = []
-        if 'occlusion' in ann_info[0].keys():
-            with_occlusion = True
-            occlusion = []
-        else:
-            with_occlusion = False
+
+        with_occlusion = False
+        if len(ann_info) > 0:
+            if 'occlusion' in ann_info[0].keys():
+                with_occlusion = True
+                occlusion = []
+
         # Two formats are provided.
         # 1. mask: a binary map of the same size of the image.
         # 2. polys: each mask consists of one or several polys, each poly is a

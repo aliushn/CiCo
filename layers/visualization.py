@@ -13,20 +13,16 @@ import torch.nn.functional as F
 # Quick and dirty lambda for selecting the color for a particular index
 # Also keeps track of a per-gpu color cache for maximum speed
 def get_color(j, color_type, on_gpu=None, undo_transform=True):
-    global color_cache
     color_idx = color_type[j] * 5 % len(cfg.COLORS)
 
-    if on_gpu is not None and color_idx in color_cache[on_gpu]:
-        return color_cache[on_gpu][color_idx]
-    else:
-        color = cfg.COLORS[color_idx]
-        if not undo_transform:
-            # The image might come in as RGB or BRG, depending
-            color = (color[2], color[1], color[0])
-        if on_gpu is not None:
-            color = torch.Tensor(color).to(on_gpu).float() / 255.
-            color_cache[on_gpu][color_idx] = color
-        return color
+    color = cfg.COLORS[color_idx]
+    if not undo_transform:
+        # The image might come in as RGB or BRG, depending
+        color = (color[2], color[1], color[0])
+    if on_gpu is not None:
+        color = torch.Tensor(color).to(on_gpu).float() / 255.
+
+    return color
 
 
 def display_pos_smaples(pos, img_gpu, decoded_priors, bbox):
@@ -65,11 +61,11 @@ def display_pos_smaples(pos, img_gpu, decoded_priors, bbox):
 
 
 def display_box_shift(box, box_shift, img_meta, img_gpu=None, conf=None):
-    save_dir = 'weights/OVIS/weights_r101_t2s_forward_flow/box_shift/'
+    save_dir = 'weights/OVIS/weights_r101_t2s_forward_B/box_shift/'
     save_dir = os.path.join(save_dir, str(img_meta['video_id']))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
-    path = ''.join([save_dir, '/', str(img_meta['frame_id']), '.png'])
+    path = ''.join([save_dir, '/', str(img_meta['frame_id']), '_c10.png'])
 
     # Make empty black image
     if img_gpu is None:
@@ -94,8 +90,8 @@ def display_box_shift(box, box_shift, img_meta, img_gpu=None, conf=None):
         color = get_color(i, color_type)
         cv2.rectangle(image, (box[i, 0]*w, box[i, 1]*h), (box[i, 2]*w, box[i, 3]*h), color, 2)
 
-        cv2.rectangle(image, (box_shift[i, 0] * w, box_shift[i, 1] * h),
-                             (box_shift[i, 2] * w, box_shift[i, 3] * h), color, 4)
+        draw_dotted_rectangle(image, box_shift[i, 0] * w, box_shift[i, 1] * h,
+                              box_shift[i, 2] * w, box_shift[i, 3] * h, color, 2, gap=10)
 
         if conf is not None:
             text_str = '%s: %.2f' % (classes[i].item()+1, scores[i])
@@ -188,29 +184,36 @@ def display_feature_align_dcn(detection, offset, loc_data, img_gpu=None, img_met
 
 
 def display_correlation_map(x_corr, img_meta=None):
-    save_dir = 'weights/OVIS/weights_r101_t2s_forward_flow/box_shift/'
-    save_dir = os.path.join(save_dir, str(img_meta['video_id']))
+    if img_meta is not None:
+        video_id, frame_id = img_meta['video_id'], img_meta['frame_id']
+    else:
+        video_id, frame_id = 0, 0
+
+    save_dir = 'weights/OVIS/weights_r101_t2s_forward_B/box_shift/'
+    save_dir = os.path.join(save_dir, str(video_id))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
-    # x_corr = x_corr[:, :36]
+    # x_corr = x_corr[0, :, :18, :]**2
     bs, ch, h, w = x_corr.size()
     # x_corr = F.normalize(x_corr, dim=1)
     r = int(sqrt(ch))
-    x_show = x_corr.view(r, r, h, w)
+    for i in range(bs):
+        x_corr_cur = x_corr[i]
+        x_show = x_corr_cur.view(r, r, h, w)
 
-    x_show = x_show.permute(0, 2, 1, 3).contiguous().view(h*r, r*w)
-    x_numpy = (x_show).cpu().numpy()
+        x_show = x_show.permute(0, 2, 1, 3).contiguous().view(h*r, r*w)
+        x_numpy = x_show.detach().cpu().numpy()
 
-    path_max = ''.join([save_dir, '/', str(img_meta['frame_id']), '_max_corr.png'])
-    max_corr = x_corr.squeeze(0).max(dim=0)[0].cpu().numpy()
-    plt.imshow(max_corr)
-    plt.savefig(path_max)
+        path_max = ''.join([save_dir, '/', str(frame_id), '_', str(i), '_max_corr_patch.png'])
+        max_corr = x_corr_cur.max(dim=0)[0].detach().cpu().numpy()
+        plt.imshow(max_corr)
+        plt.savefig(path_max)
 
-    path = ''.join([save_dir, '/', str(img_meta['frame_id']), '_corr.png'])
-    plt.axis('off')
-    plt.pcolormesh(x_numpy)
-    plt.savefig(path)
-    plt.clf()
+        path = ''.join([save_dir, '/', str(frame_id), '_', str(i), '_corr_patch.png'])
+        plt.axis('off')
+        plt.pcolormesh(x_numpy)
+        plt.savefig(path)
+        plt.clf()
 
 
 def display_embedding_map(matching_map_all, idx, img_meta=None):
@@ -260,6 +263,31 @@ def display_shifted_masks(shifted_masks, img_meta=None):
         plt.pcolormesh(mmcv.imflip(shifted_masks_numpy*10, direction='vertical'))
         plt.savefig(path)
         plt.clf()
+
+
+def draw_dotted_rectangle(img, x0, y0, x1, y1, color, thickness=1, gap=20):
+
+    draw_dotted_line(img, (x0, y0), (x0, y1), color, thickness, gap, vertical=True)
+    draw_dotted_line(img, (x0, y0), (x1, y0), color, thickness, gap)
+    draw_dotted_line(img, (x0, y1), (x1, y1), color, thickness, gap)
+    draw_dotted_line(img, (x1, y0), (x1, y1), color, thickness, gap, vertical=True)
+
+
+def draw_dotted_line(img, pt1, pt2, color, thickness=1, gap=20, vertical=False):
+    dist = ((pt1[0]-pt2[0])**2 + (pt1[1]-pt2[1])**2)**.5
+    pts = []
+    for i in range(0, int(dist), gap):
+        r = i/dist
+        x = int((pt1[0]*(1-r)+pt2[0]*r)+.5)
+        y = int((pt1[1]*(1-r)+pt2[1]*r)+.5)
+        p = (x, y)
+        pts.append(p)
+
+    for p in pts:
+        if vertical:
+            cv2.line(img, p, (p[0], p[1] + int(gap//3)), color, thickness)
+        else:
+            cv2.line(img, p, (p[0] + int(gap//3), p[1]), color, thickness)
 
 
 

@@ -11,8 +11,7 @@ from datasets import cfg, MEANS, STD, activation_func
 from utils.augmentations import Resize
 from utils import timer
 import os
-from .box_utils import crop, sanitize_coordinates, center_size
-from .mask_utils import generate_mask
+from ..utils import sanitize_coordinates, center_size, generate_mask
 
 
 def postprocess(det_output, w, h, batch_idx=0, interpolation_mode='bilinear',
@@ -36,8 +35,6 @@ def postprocess(det_output, w, h, batch_idx=0, interpolation_mode='bilinear',
     """
 
     dets = det_output[batch_idx]
-    net = dets['net']
-    dets = dets['detection']
 
     if dets is None:
         return [torch.Tensor()] * 4  # Warning, this is 4 copies of the same thing
@@ -86,7 +83,7 @@ def postprocess(det_output, w, h, batch_idx=0, interpolation_mode='bilinear',
     return classes, scores, boxes, masks
 
 
-def postprocess_ytbvis(detection, pad_h, pad_w, img_meta, interpolation_mode='bilinear',
+def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
                        display_mask=False, visualize_lincomb=False, crop_masks=True, score_threshold=0,
                        img_ids=None, mask_det_file=None):
     """
@@ -113,6 +110,7 @@ def postprocess_ytbvis(detection, pad_h, pad_w, img_meta, interpolation_mode='bi
 
     ori_h, ori_w = img_meta['ori_shape'][:2]
     img_h, img_w = img_meta['img_shape'][:2]
+    pad_h, pad_w = img_meta['pad_shape'][:2]
     s_w, s_h = (img_w / pad_w, img_h / pad_h)
 
     if dets['box'].nelement() == 0:
@@ -192,13 +190,14 @@ def postprocess_ytbvis(detection, pad_h, pad_w, img_meta, interpolation_mode='bi
     return dets
 
 
-def undo_image_transformation(img, img_meta, pad_h, pad_w, interpolation_mode='bilinear'):
+def undo_image_transformation(img, img_meta, interpolation_mode='bilinear'):
     """
     Takes a transformed image tensor and returns a numpy ndarray that is untransformed.
     Arguments w and h are the original height and width of the image.
     """
-    ori_h, ori_w = img_meta['ori_shape'][0:2]
-    img_h, img_w = img_meta['img_shape'][0:2]
+    ori_h, ori_w = img_meta['ori_shape'][:2]
+    img_h, img_w = img_meta['img_shape'][:2]
+    pad_h, pad_w = img_meta['pad_shape'][:2]
     s_w, s_h = (img_w / pad_w, img_h / pad_h)
 
     # Undo padding
@@ -226,7 +225,7 @@ def undo_image_transformation(img, img_meta, pad_h, pad_w, interpolation_mode='b
 
 def display_lincomb(proto_data, masks, img_ids=None, mask_det_file=None):
     proto_data = proto_data.squeeze()
-    out_masks = torch.matmul(proto_data, masks.t())
+    out_masks = torch.matmul(proto_data, -masks.t())
     out_masks = cfg.mask_proto_mask_activation(out_masks)
 
     for kdx in range(1):
@@ -305,3 +304,5 @@ def display_fpn_outs(outs, img_ids=None, mask_det_file=None):
                 plt.title(str(img_ids))
                 plt.savefig(''.join([mask_det_file, str(img_ids), 'outs', str(batch_idx), str(idx), '.png']))
             plt.show()
+
+

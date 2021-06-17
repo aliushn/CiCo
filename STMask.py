@@ -342,14 +342,15 @@ class STMask(nn.Module):
 
         return fpn_outs, pred_outs
 
-    def track_clip(self, candidate_clip, img_meta_clip, first_clip=False, last_clip=False):
+    def track_clip(self, candidate_clip, img_meta_clip, img_clip=None, first_clip=False, last_clip=False):
         # n_frame_clip = 2T+1
         n_frame_clip = cfg.eval_frames_of_clip
         T = n_frame_clip // 2
         n_clip, pred_outs_all = 0, []
         index = torch.zeros(len(candidate_clip))
         while len(candidate_clip) >= n_frame_clip:
-            pred_outs_cur = self.Track_TF_Clip(self, candidate_clip[:n_frame_clip], img_meta_clip[:n_frame_clip])
+            pred_outs_cur = self.Track_TF_Clip(self, candidate_clip[:n_frame_clip], img_meta_clip[:n_frame_clip],
+                                               img_clip[:n_frame_clip])
             if first_clip and n_clip == 0:
                 pred_outs_all += pred_outs_cur
                 index[:n_frame_clip] = 1
@@ -365,7 +366,7 @@ class STMask(nn.Module):
 
         if last_clip:
             if len(candidate_clip) > T:
-                pred_outs_cur = self.Track_TF_Clip(self, candidate_clip, img_meta_clip)
+                pred_outs_cur = self.Track_TF_Clip(self, candidate_clip, img_meta_clip, img_clip)
                 pred_outs_all += pred_outs_cur[T:]
                 index[T-len(candidate_clip):] = 1
 
@@ -420,22 +421,25 @@ class STMask(nn.Module):
                     self.candidate_clip += candidate_after_NMS
                     self.img_meta_clip += img_meta
                     n_frames_cur_clip = len(self.candidate_clip)
-                    out_imgs, out_img_metas = [], []
+                    pred_outs_after_track, out_imgs, out_img_metas = [], [], []
                     if n_frames_cur_clip >= n_frame_eval_clip:
                         is_first_idx = [i for i in range(1, n_frames_cur_clip) if self.img_meta_clip[i]['is_first']]
 
                         if len(is_first_idx) == 0:
                             # All frames of the clip come from a video
                             index, pred_outs_after_track = self.track_clip(self.candidate_clip, self.img_meta_clip,
+                                                                           img_clip=self.imgs_clip,
                                                                            first_clip=self.img_meta_clip[0]['is_first'])
 
                         elif len(is_first_idx) == 1:
                             # The frames of the clip consist of two videos, we need to process them one-by-one
                             index1, pred_outs1 = self.track_clip(self.candidate_clip[:is_first_idx[0]],
                                                                  self.img_meta_clip[:is_first_idx[0]],
+                                                                 img_clip=self.imgs_clip,
                                                                  first_clip=False, last_clip=True)
                             index2, pred_outs2 = self.track_clip(self.candidate_clip[is_first_idx[0]:],
                                                                  self.img_meta_clip[is_first_idx[0]:],
+                                                                 img_clip=self.imgs_clip,
                                                                  first_clip=True, last_clip=False)
                             pred_outs_after_track = pred_outs1 + pred_outs2
                             index = torch.cat((index1, index2))
@@ -463,7 +467,7 @@ class STMask(nn.Module):
                     return pred_outs_after_track, out_imgs, out_img_metas
 
             else:
-                # detect instances by NMS for each single frame
+                # detect instances by NMS for each single frame on COCO datasets
                 pred_outs_after_NMS = self.detect(pred_outs, self)
 
                 if cfg.train_track:

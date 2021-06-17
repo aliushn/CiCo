@@ -1,5 +1,5 @@
 import torch
-from layers.utils import compute_DIoU,  mask_iou, generate_track_gaussian, compute_comp_scores, generate_mask, compute_kl_div
+from layers.utils import compute_DIoU,  mask_iou, generate_track_gaussian, compute_comp_scores, generate_mask, compute_kl_div, center_size
 from .TF_utils import CandidateShift
 from utils import timer
 
@@ -142,7 +142,7 @@ class Track_TF(object):
                     # multiple candidate might match with previous object, here we choose the one with
                     # largest comprehensive score
                     obj_id = match_id - 1
-                    match_score = det_score[idx]  # match_likelihood[idx]
+                    match_score = match_likelihood[idx]
                     if match_score > best_match_scores[obj_id]:
                         if best_match_idx[obj_id] != -1:
                             det_obj_ids[int(best_match_idx[obj_id])] = -1
@@ -158,10 +158,19 @@ class Track_TF(object):
         # whether add some tracked masks
         cond1 = self.prev_candidate['tracked_mask'] <= 5
         # whether tracked masks are greater than a small threshold, which removes some false positives
-        cond2 = self.prev_candidate['mask'].gt(0.5).sum([1, 2]) > 1
+        cond2 = self.prev_candidate['mask'].gt(0.5).sum([1, 2]) > 0
         # a declining weights (0.8) to remove some false positives that cased by consecutively track to segment
         cond3 = self.prev_candidate['score'].clone().detach() > cfg.eval_conf_thresh
         keep = cond1 & cond2 & cond3
+
+        # missed_idx = self.prev_candidate['tracked_mask'] > 0
+        # if area_box / area_mask < 0.2 and score < 0.2, the box is likely to be wrong.
+        # h, w = det_masks_soft.size()[1:]
+        # boxes_c = center_size(self.prev_candidate['box'])
+        # area_box = boxes_c[:, 2] * boxes_c[:, 3] * h * w
+        # area_mask = self.prev_candidate['mask'].gt(0.5).float().sum(dim=(1, 2))
+        # area_rate = area_mask / area_box
+        # cond4 = area_rate > 0.1
 
         if keep.sum() == 0:
             detection = {'box': torch.Tensor(), 'box_ids': torch.Tensor(), 'mask_coeff': torch.Tensor(),
@@ -171,7 +180,8 @@ class Track_TF(object):
             detection = {'box': self.prev_candidate['box'][keep], 'box_ids': det_obj_ids[keep],
                          'class': self.prev_candidate['class'][keep], 'score': self.prev_candidate['score'][keep],
                          'mask_coeff': self.prev_candidate['mask_coeff'][keep], 'proto': self.prev_candidate['proto'],
-                         'mask': self.prev_candidate['mask'][keep]}
+                         'mask': self.prev_candidate['mask'][keep],
+                         'tracked_mask': self.prev_candidate['tracked_mask'][keep]}
             if cfg.train_centerness:
                 detection['centerness'] = self.prev_candidate['centerness'][keep]
 

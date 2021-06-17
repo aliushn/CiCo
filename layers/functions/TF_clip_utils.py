@@ -1,7 +1,7 @@
 import torch
 
 
-def UnFold_candidate_clip(candidate_clip, remove_blank=True):
+def UnFold_candidate_clip(candidate_clip, remove_blank=False):
     '''
     UnFold candidate_clip to multi-frame candidates.
     For example, the size of 'box' in the candidates are [n1, 4], ..., [n_k, 4],
@@ -64,25 +64,46 @@ def Fold_candidates(candidates, img_metas=None):
     return candidate_clip
 
 
-def Anchor_independented_info(candidates, img_metas=None):
+def Fold_candidates_by_order(candidates, img_metas=None):
     '''
-    select the information of candidates which is independented with anchors, such as proto_data.
-    This will be used to predict masks from time t to t+k
-    :param candidates: [candidate_1, ..., candidate_k]
+    Fold candidates of multi-frames to a clip candidate.
+    For example, the size of 'box' in the candidates are [n1, 4], ..., [n_k, 4],
+    the size of 'box' in the clip candidate should be [n1+..+nk, 4].
+    :param candidates: [candidate_1, ..., candidate_k], where instances in each candidate is sorted by order
     :param img_metas: [img_meta1, ..., img_meat_k]
-    :return: [anchor_independented_candidate1, ..., anchor_independented_candidate_k]
+    :return: a clip candidate
     '''
-    # add frames_ids for every objects in the clip
-    anchor_independented_clip = []
-    for i, candidate in enumerate(candidates):
-        if img_metas is not None:
-            anchor_indepented_cur = {'frame_id': torch.tensor(img_metas[i]['frame_id']).view(1)}
+
+    n_dets = candidates[0]['box'].size(0)
+
+    candidate_clip = dict()
+    for k in candidates[0].keys():
+        if k in {'fpn_feat', 'proto', 'track', 'sem_seg'}:
+            # [T, n_dets, h, w, -1]
+            candidate_clip[k] = torch.stack([candidate[k] for candidate in candidates], dim=0).repeat(1, n_dets, 1, 1, 1)
         else:
-            anchor_indepented_cur = {}
+            candidate_clip[k] = torch.stack([candidate[k] for candidate in candidates], dim=0)  # [T, n_cur, -1]
 
-        for k, v in candidate.items():
-            if k in {'fpn_feat', 'proto', 'track', 'sem_seg'}:
-                anchor_indepented_cur[k] = v
-        anchor_independented_clip.append(anchor_indepented_cur)
+    if img_metas is not None:
+        frame_id_clip = torch.tensor([img_meta['frame_id'] for img_meta in img_metas]).view(-1, 1, 1)
+        candidate_clip['frame_id'] = frame_id_clip.repeat(1, n_dets, 1)  # [T, 1, 1]
 
-    return anchor_independented_clip
+    return candidate_clip
+
+
+def select_distinct_track(candidate_clip):
+    distinct_track = dict()
+    for k, v in candidate_clip.items():
+        distinct_track[k] = []
+
+    n_frames, n_dets = candidate_clip['box'].size()[:2]
+    for i_obj in range(n_dets):
+        _, sorted_idx = candidate_clip['score'][:, i_obj].sort(0, descending=True)
+        distinct_idx = sorted_idx[0]
+        for k, v in candidate_clip.items():
+            distinct_track[k].append(v[distinct_idx, i_obj])
+
+    for k, v in distinct_track.items():
+        distinct_track[k] = torch.stack(v, dim=0)
+
+    return distinct_track

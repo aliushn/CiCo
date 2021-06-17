@@ -1,10 +1,10 @@
 from datasets import COCODetection, get_label_map, MEANS, COLORS, cfg, set_cfg, set_dataset
 from STMask import STMask
 from utils.augmentations import BaseTransform, FastBaseTransform, Resize
-from utils.functions import MovingAverage, ProgressBar
+from utils.functions import MovingAverage, ProgressBar, SavePath
 from layers.utils import jaccard, center_size, mask_iou, postprocess, undo_image_transformation
 from utils import timer
-from utils.functions import SavePath
+from layers.visualization import get_color
 import pycocotools
 
 import numpy as np
@@ -169,24 +169,6 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
         if scores[j] < args.score_threshold:
             num_dets_to_consider = j
             break
-
-    # Quick and dirty lambda for selecting the color for a particular index
-    # Also keeps track of a per-gpu color cache for maximum speed
-    def get_color(j, on_gpu=None):
-        global color_cache
-        color_idx = (classes[j] * 5 if class_color else j * 5) % len(COLORS)
-
-        if on_gpu is not None and color_idx in color_cache[on_gpu]:
-            return color_cache[on_gpu][color_idx]
-        else:
-            color = COLORS[color_idx]
-            if not undo_transform:
-                # The image might come in as RGB or BRG, depending
-                color = (color[2], color[1], color[0])
-            if on_gpu is not None:
-                color = torch.Tensor(color).to(on_gpu).float() / 255.
-                color_cache[on_gpu][color_idx] = color
-            return color
 
     # First, draw the masks on the GPU where we can do it really fast
     # Beware: very fast but possibly unintelligible mask-drawing code ahead
@@ -379,18 +361,6 @@ class Detections:
             json.dump(output, f)
 
 
-def _mask_iou(mask1, mask2, iscrowd=False):
-    with timer.env('Mask IoU'):
-        ret = mask_iou(mask1, mask2)
-    return ret.cpu()
-
-
-def _bbox_iou(bbox1, bbox2, iscrowd=False):
-    with timer.env('BBox IoU'):
-        ret = jaccard(bbox1, bbox2, iscrowd)
-    return ret.cpu()
-
-
 def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, detections: Detections = None):
     """ Returns a list of APs for this image, with each element being for a class  """
     if not args.output_coco_json:
@@ -399,7 +369,7 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, de
             gt_boxes[:, [0, 2]] *= w
             gt_boxes[:, [1, 3]] *= h
             gt_classes = list(gt[:, 4].astype(int))
-            gt_masks = torch.Tensor(gt_masks).view(-1, h * w)
+            gt_masks = torch.Tensor(gt_masks)
 
             if num_crowd > 0:
                 split = lambda x: (x[-num_crowd:], x[:-num_crowd])
@@ -422,7 +392,6 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, de
             scores = list(scores.cpu().numpy().astype(float))
             box_scores = scores
             mask_scores = scores
-        masks = masks.view(-1, h * w).cuda()
         boxes = boxes.cuda()
 
     if args.output_coco_json:
@@ -440,12 +409,12 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, de
         num_pred = len(classes)
         num_gt = len(gt_classes)
 
-        mask_iou_cache = _mask_iou(masks, gt_masks)
-        bbox_iou_cache = _bbox_iou(boxes.float(), gt_boxes.float())
+        mask_iou_cache = mask_iou(masks, gt_masks)
+        bbox_iou_cache = jaccard(boxes.float(), gt_boxes.float())
 
         if num_crowd > 0:
-            crowd_mask_iou_cache = _mask_iou(masks, crowd_masks, iscrowd=True)
-            crowd_bbox_iou_cache = _bbox_iou(boxes.float(), crowd_boxes.float(), iscrowd=True)
+            crowd_mask_iou_cache = mask_iou(masks, crowd_masks)
+            crowd_bbox_iou_cache = jaccard(boxes.float(), crowd_boxes.float(), iscrowd=True)
         else:
             crowd_mask_iou_cache = None
             crowd_bbox_iou_cache = None
@@ -473,7 +442,7 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, de
             for iou_type, iou_func, crowd_func, score_func, indices in iou_types:
                 gt_used = [False] * len(gt_classes)
 
-                ap_obj = ap_data[iou_type][iouIdx][_class]
+                ap_obj = ap_data[iou_type][iouIdx][_class-1]
                 ap_obj.add_gt_positives(num_gt_for_class)
 
                 for i in indices:
@@ -965,7 +934,7 @@ def evaluate(net: STMask, dataset, train_mode=False, iteration=None):
                     batch = batch.cuda()
 
             with timer.env('Network Extra'):
-                preds = net(batch)
+                preds, _, _ = net(batch)
             # Perform the meat of the operation here depending on our mode.
             if args.display:
                 img_numpy = prep_display(preds, img, h, w)
