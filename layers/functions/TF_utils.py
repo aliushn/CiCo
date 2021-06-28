@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from layers.utils import center_size, point_form, decode, crop, generate_mask, correlate_operator, generate_track_gaussian, sanitize_coordinates
+from layers.utils import center_size, point_form, decode, generate_mask, correlate_operator, generate_track_gaussian, mask_iou
 from layers.modules import bbox_feat_extractor
 from datasets import cfg
 from utils import timer
@@ -9,7 +9,8 @@ import os
 from ..visualization import display_box_shift, display_correlation_map
 
 
-def CandidateShift(net, candidate, ref_candidate, img=None, img_meta=None, update_track=False, display=False):
+def CandidateShift(net, candidate, ref_candidate, img=None, img_meta=None, update_track=False,
+                   remove_FP=False, display=False):
         """
         The function try to shift the candidates of reference frame to that of target frame.
         The most important step is to shift the bounding box of reference frame to that of target frame
@@ -42,8 +43,11 @@ def CandidateShift(net, candidate, ref_candidate, img=None, img_meta=None, updat
 
                 # extract features on the predicted bbox
                 box_ref = ref_candidate['box'].clone()
+                box_ref_c = center_size(box_ref)
+                box_ref_c[:, 2:] = box_ref_c[:, 2:] * 1.2
+                box_ref_crop = point_form(box_ref_c)
                 feat_h, feat_w = fpn_feat_ref.size()[2:]
-                bbox_feat_input = bbox_feat_extractor(concatenated_features, box_ref, feat_h, feat_w, 7)
+                bbox_feat_input = bbox_feat_extractor(concatenated_features, box_ref_crop, feat_h, feat_w, 7)
                 if cfg.maskshift_loss:
                     loc_ref_shift, mask_coeff_shift = net.TemporalNet(bbox_feat_input)
                     ref_candidate_shift['mask_coeff'] = ref_candidate['mask_coeff'].clone() + mask_coeff_shift
@@ -51,19 +55,29 @@ def CandidateShift(net, candidate, ref_candidate, img=None, img_meta=None, updat
                     loc_ref_shift = net.TemporalNet(bbox_feat_input)
                     ref_candidate_shift['mask_coeff'] = ref_candidate['mask_coeff'].clone()
                 box_ref_shift = decode(loc_ref_shift, center_size(box_ref))
+                # temp = loc_ref_shift[:, :2] * 0.1 * center_size(box_ref)[:, 2:]
+                # print(torch.stack([temp[:, 0]*640, temp[:, 1]*384], dim=-1))
+                # print('shift_BIoU', jaccard(box_ref_shift, box_ref_shift))
 
                 # display = True
                 if display:
-                    display_correlation_map(bbox_feat_input[:, 256:377], img_meta=img_meta)
+                    # display_correlation_map(bbox_feat_input[:, 256:377], img_meta=img_meta)
                     display_box_shift(box_ref, box_ref_shift, img_meta=img_meta, img_gpu=img)
 
                 ref_candidate_shift['box'] = box_ref_shift.clone()
-                if 'frame_id' in candidate.keys():
-                    decay_rate = 0.8 ** abs(ref_candidate['frame_id'].item() - candidate['frame_id'].item())
+                # if 'frame_id' in candidate.keys():
+                #     decay_rate = 0.8 ** abs(ref_candidate['frame_id'].item() - candidate['frame_id'].item())
+                # else:
+                #     decay_rate = 0.8
+                ref_candidate_shift['score'] = ref_candidate['score'].clone() * 0.9
+
+                if cfg.mask_proto_coeff_occlusion:
+                    pred_masks_all = generate_mask(proto_next, ref_candidate_shift['mask_coeff'], box_ref_shift)
+                    pred_masks_all = F.softmax(pred_masks_all, dim=-1)
+                    pred_masks_next = pred_masks_all[:, :, :, 1]
+                    pred_masks_next_non_target = pred_masks_all[:, :, :, -1]
                 else:
-                    decay_rate = 0.8
-                ref_candidate_shift['score'] = ref_candidate['score'].clone() * decay_rate
-                pred_masks_next = generate_mask(proto_next, ref_candidate_shift['mask_coeff'], box_ref_shift)
+                    pred_masks_next = generate_mask(proto_next, ref_candidate_shift['mask_coeff'], box_ref_shift)
 
             else:
 
@@ -116,14 +130,31 @@ def CandidateShift(net, candidate, ref_candidate, img=None, img_meta=None, updat
                     pred_masks_next_ori = generate_mask(proto_next, ref_candidate['mask_coeff'])
                     pred_masks_next = pred_masks_next_ori * heat_map
 
+            if remove_FP:
+                _, sort_idx = ref_candidate['tracked_mask'].sort(descending=True)
+                miou = mask_iou(pred_masks_next[sort_idx].gt(0.5), pred_masks_next[sort_idx].gt(0.5))
+                miou.triu_(diagonal=1)
+                miou_max, _ = torch.max(miou, dim=1)
+                FP_idx = sort_idx[miou_max > 0.85]
+                ref_candidate['tracked_mask'][FP_idx] = 100
+                ref_candidate_shift['tracked_mask'] = ref_candidate['tracked_mask'].clone()
+
             ref_candidate_shift['mask'] = pred_masks_next
+            if cfg.mask_proto_coeff_occlusion:
+                ref_candidate_shift['mask_non_target'] = pred_masks_next_non_target
+
             if 'frame_id' in candidate.keys():
                 ref_candidate_shift['frame_id'] = candidate['frame_id']
             if cfg.track_by_Gaussian and update_track:
-                track_embed_next = F.normalize(ref_candidate_shift['track'], dim=-1).squeeze(0)
-                mu_next, var_next = generate_track_gaussian(track_embed_next, pred_masks_next.gt(0.5))
+                mu_next, var_next = generate_track_gaussian(ref_candidate_shift['track'], pred_masks_next.gt(0.5),
+                                                            box_ref_shift)
                 ref_candidate_shift['track_mu'] = mu_next
                 ref_candidate_shift['track_var'] = var_next
+
+            if remove_FP:
+                for k, v in ref_candidate_shift.items():
+                    if k not in {'proto', 'fpn_feat', 'track', 'sem_seg', 'tracked_mask'}:
+                        ref_candidate_shift[k][FP_idx] = 0
 
         return ref_candidate_shift
 

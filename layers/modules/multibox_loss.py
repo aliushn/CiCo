@@ -599,9 +599,9 @@ class MultiBoxLoss(nn.Module):
                 loss_weights = torch.triu(loss_weights, diagonal=1) + torch.triu(loss_weights.t(), diagonal=1).t()
 
                 # If they are the same instance, use cosine distance, else use consine similarity
-                # pos: log(kl_divergence+1), neg: 4 / exp(0.1*kl_divergence)
-                pre_loss = inst_eq * (kl_divergence + 1).log() \
-                           + (1. - inst_eq) * torch.exp(-1 * kl_divergence)
+                # pos: log(1+kl), neg: exp(1-kl)
+                pre_loss = inst_eq * (1 + 2 * kl_divergence).log() \
+                           + (1. - inst_eq) * torch.exp(1 - 0.1 * kl_divergence)
                 loss += (pre_loss * loss_weights).sum() / loss_weights.sum()
 
         losses = {'T': cfg.track_alpha * loss / torch.clamp(n_bs_track, min=1)}
@@ -828,10 +828,12 @@ class MultiBoxLoss(nn.Module):
                           priors, proto_data, masks_gt, gt_box_t, interpolation_mode='bilinear'):
 
         loss_m, loss_m_occluded, loss_miou = 0, 0, 0
+        _, mask_h, mask_w = masks_gt[0].size()
 
         for idx in range(mask_coeff.size(0)):
             cur_pos = pos[idx]
-            if cur_pos.sum() == 0:
+            n_cur_pos = cur_pos.sum()
+            if n_cur_pos == 0:
                 continue
 
             if cfg.mask_proto_crop:
@@ -849,9 +851,18 @@ class MultiBoxLoss(nn.Module):
                 pos_gt_box_t = torch.clamp(pos_gt_box_t, min=1e-5, max=1)
 
             pos_idx_t = idx_t[idx, cur_pos]
-            mask_t = masks_gt[idx][pos_idx_t].float()       # [n, mask_h, mask_w]
+            masks_gt_cur = masks_gt[idx]
+            if masks_gt_cur.size(0) > 1 and cfg.mask_proto_coeff_occlusion:
+                # assign non-target objects as 2, then target objects as 1, background as 0
+                masks_gt_cur_all = masks_gt_cur.sum(dim=0)
+                for mask_idx in range(masks_gt_cur.size(0)):
+                    target_object = masks_gt_cur[mask_idx] > 0
+                    non_target_objects = (masks_gt_cur_all > 0) * ~target_object
+                    masks_gt_cur[mask_idx][non_target_objects] = 2
+
+            mask_t = masks_gt_cur[pos_idx_t]                # [n, mask_h, mask_w]
             proto_masks = proto_data[idx]                   # [mask_h, mask_w, 32]
-            proto_coeff = mask_coeff[idx, cur_pos, :]         # [num_pos, 32, Class+1]
+            proto_coeff = mask_coeff[idx, cur_pos, :]       # [num_pos, 32, Class+1]
 
             # get mask loss for ono-occluded part
             # pred_masks = generate_mask(proto_masks, proto_coef, pos_gt_box_t)
@@ -860,14 +871,37 @@ class MultiBoxLoss(nn.Module):
                 pred_masks = generate_mask(proto_masks, proto_coeff, pos_gt_box_t)
             else:
                 pred_masks = generate_mask(proto_masks, proto_coeff)
-            upsampled_pred_masks = F.interpolate(pred_masks.unsqueeze(0).float(),
-                                                 (mask_gt_h, mask_gt_w),
-                                                 mode=interpolation_mode, align_corners=False).squeeze(0)
 
-            if cfg.mask_proto_mask_activation == activation_func.sigmoid:
-                pre_loss = F.binary_cross_entropy(torch.clamp(upsampled_pred_masks, 0, 1), mask_t, reduction='none')
+            if not cfg.mask_proto_coeff_occlusion:
+                # [n, h, w] => [n, 1, h, w]
+                upsampled_pred_masks = F.interpolate(pred_masks.unsqueeze(1).float(),
+                                                     (mask_gt_h, mask_gt_w),
+                                                     mode=interpolation_mode,
+                                                     align_corners=False).squeeze(1)
+                if cfg.mask_proto_mask_activation == activation_func.sigmoid:
+                    pre_loss = F.binary_cross_entropy(torch.clamp(upsampled_pred_masks, 0, 1),
+                                                      mask_t.float(),
+                                                      reduction='none')
+
+                else:
+                    pre_loss = F.smooth_l1_loss(upsampled_pred_masks, mask_t.float(), reduction='none')
+
             else:
-                pre_loss = F.smooth_l1_loss(upsampled_pred_masks, mask_t, reduction='none')
+                # [n, h, w, 3] => [n, 3, h, w]
+                pred_masks = pred_masks.permute(0, 3, 1, 2).contiguous()
+                upsampled_pred_masks = F.interpolate(pred_masks.float(),
+                                                     (mask_gt_h, mask_gt_w),
+                                                     mode=interpolation_mode,
+                                                     align_corners=False)
+                # [n, 3, h, w] => [n, h, w, 3]
+                upsampled_pred_masks = upsampled_pred_masks.permute(0, 2, 3, 1).contiguous()
+                pre_loss = F.cross_entropy(upsampled_pred_masks.view(-1, 3),
+                                           mask_t.view(-1).long(),
+                                           reduction='none')
+                pre_loss = pre_loss.view(n_cur_pos, mask_h, mask_w).permute(1, 2, 0).contiguous()
+                if cfg.mask_proto_crop:
+                    _, pre_loss = crop(pre_loss, pos_gt_box_t)     # [h, w, n]
+                    pre_loss = pre_loss.permute(2, 0, 1).contiguous()
 
             if cfg.mask_proto_crop:
                 pos_gt_box_wh = center_size(pos_gt_box_t)[:, :2]

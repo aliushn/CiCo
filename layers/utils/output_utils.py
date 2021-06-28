@@ -135,7 +135,7 @@ def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
             if k not in {'proto'}:
                 dets[k] = v[not_outside]
 
-    if dets['score'].size(0) == 0:
+    if dets['score'].nelement() == 0:
         dets['segm'] = torch.Tensor()
         return dets
 
@@ -143,9 +143,14 @@ def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
     boxes = dets['box']
     mask_coeff = dets['mask_coeff']
     masks = dets['mask']
+    if cfg.mask_proto_coeff_occlusion:
+        masks_non_target = dets['mask_non_target']
+        masks = torch.clamp(masks - masks_non_target, min=0)
+    else:
+        masks_non_target = None
 
     if visualize_lincomb:
-        display_lincomb(dets['proto'], mask_coeff, img_ids, mask_det_file)
+        display_lincomb(dets['proto'], masks, mask_coeff, img_ids, mask_det_file, masks_non_target)
 
     # Undo padding for masks
     masks = masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
@@ -156,6 +161,7 @@ def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
     else:
         masks = F.interpolate(masks.unsqueeze(0), (img_h, img_w), mode=interpolation_mode,
                               align_corners=False).squeeze(0)
+
     # Binarize the masks
     masks.gt_(0.5)
 
@@ -223,21 +229,14 @@ def undo_image_transformation(img, img_meta, interpolation_mode='bilinear'):
     return img_numpy
 
 
-def display_lincomb(proto_data, masks, img_ids=None, mask_det_file=None):
-    proto_data = proto_data.squeeze()
-    out_masks = torch.matmul(proto_data, -masks.t())
-    out_masks = cfg.mask_proto_mask_activation(out_masks)
+def display_lincomb(proto_data, out_masks, masks_coeff=None, img_ids=None, mask_det_file=None, masks_non_target=None):
+    proto_data = proto_data[0]
 
     for kdx in range(1):
-        jdx = kdx + 0
         import matplotlib.pyplot as plt
-        coeffs = masks[jdx, :].cpu().numpy()
-        idx = np.argsort(-np.abs(coeffs))
-        # plt.bar(list(range(idx.shape[0])), coeffs[idx])
-        # plt.show()
 
-        coeffs_sort = coeffs[idx]
-        arr_h, arr_w = (2, 4)
+        arr_h, arr_w = (4, 4)
+        print(proto_data.size(), img_ids)
         proto_h, proto_w, _ = proto_data.size()
         arr_img = np.zeros([proto_h * arr_h, proto_w * arr_w])
         arr_run = np.zeros([proto_h * arr_h, proto_w * arr_w])
@@ -246,7 +245,7 @@ def display_lincomb(proto_data, masks, img_ids=None, mask_det_file=None):
         for y in range(arr_h):
             for x in range(arr_w):
                 i = arr_w * y + x
-                proto_data_cur = proto_data[:, :, idx[i]]
+                proto_data_cur = proto_data[:, :, i]
 
                 if i == 0:
                     running_total = proto_data_cur.cpu().numpy()   # * coeffs_sort[i]
@@ -261,7 +260,7 @@ def display_lincomb(proto_data, masks, img_ids=None, mask_det_file=None):
                     ((proto_data_cur - torch.min(proto_data_cur)) / torch.max(proto_data_cur)).cpu().numpy()   # * coeffs_sort[i]
                 arr_run[y * proto_h:(y + 1) * proto_h, x * proto_w:(x + 1) * proto_w] = (
                             running_total_nonlin > 0.5).astype(np.float)
-        plt.imshow(arr_img*10)
+        plt.imshow(arr_img)
         plt.axis('off')
         root_dir = ''.join([mask_det_file[:-12], 'out_proto/', str(img_ids[0]), '/'])
         if not os.path.exists(root_dir):
@@ -276,12 +275,17 @@ def display_lincomb(proto_data, masks, img_ids=None, mask_det_file=None):
         # plt.imshow(test)
         # plt.show()
 
-    for jdx in range(out_masks.size(2)):
-        plt.imshow(out_masks[:, :, jdx].cpu().numpy())
+    for jdx in range(out_masks.size(0)):
+        plt.imshow(out_masks[jdx].cpu().numpy())
         if img_ids is not None:
             plt.title(str(img_ids))
             plt.savefig(''.join([root_dir, str(img_ids[1]), '_', str(jdx), '_mask.png']))
         # plt.show()
+        if masks_non_target is not None:
+            plt.imshow(masks_non_target[jdx].cpu().numpy())
+            if img_ids is not None:
+                plt.title(str(img_ids))
+                plt.savefig(''.join([root_dir, str(img_ids[1]), '_', str(jdx), '_mask_non_target.png']))
 
 
 def display_fpn_outs(outs, img_ids=None, mask_det_file=None):

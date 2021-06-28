@@ -87,9 +87,17 @@ class Detect_TF(object):
         else:
             scores_used = scores
 
-        det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
+        if cfg.mask_proto_coeff_occlusion:
+            det_masks_all = generate_mask(proto_data, masks_coeff)
+            det_masks_all = F.softmax(det_masks_all, dim=-1)
+            _, det_masks_all = crop(det_masks_all.permute(1, 2, 3, 0).contiguous(), boxes)
+            det_masks_all = det_masks_all.permute(3, 0, 1, 2).contiguous()
+            det_masks_soft = det_masks_all[:, :, :, 1]
+            det_masks_soft_non_target = det_masks_all[:, :, :, -1]
+        else:
+            det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
 
-        # if area_box / area_mask < 0.2 and score < 0.2, the box is likely to be wrong.
+        # if area_mask / area_box < 0.2 and score < 0.2, the box is likely to be wrong.
         h, w = det_masks_soft.size()[1:]
         boxes_c = center_size(boxes)
         area_box = boxes_c[:, 2] * boxes_c[:, 3] * h * w
@@ -105,6 +113,8 @@ class Detect_TF(object):
                              'score': torch.Tensor(), 'mask': torch.Tensor()}
             if centerness_scores is not None:
                 out_after_NMS['centerness'] = torch.Tensor()
+            if cfg.mask_proto_coeff_occlusion:
+                out_after_NMS['mask_non_target'] = torch.Tensor()
 
         else:
 
@@ -115,7 +125,7 @@ class Detect_TF(object):
 
             if cfg.nms_as_miou:
                 m_iou = mask_iou(det_masks_idx, det_masks_idx)
-                iou = iou * 0.6 + m_iou * 0.4
+                iou = iou * 0.5 + m_iou * 0.5
 
             # Zero out the lower triangle of the cosine similarity matrix and diagonal
             iou = torch.triu(iou, diagonal=1)
@@ -155,6 +165,8 @@ class Detect_TF(object):
 
             if cfg.train_centerness:
                 out_after_NMS['centerness'] = centerness_scores[idx_out]
+            if cfg.mask_proto_coeff_occlusion:
+                out_after_NMS['mask_non_target'] = det_masks_soft_non_target[idx_out]
 
         return out_after_NMS
 

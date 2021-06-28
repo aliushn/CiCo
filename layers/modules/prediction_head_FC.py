@@ -53,6 +53,9 @@ class PredictionModule_FC(nn.Module):
         if cfg.use_sipmask:
             self.mask_dim = self.mask_dim * cfg.sipmask_head
 
+        if cfg.mask_proto_coeff_occlusion:
+            self.mask_dim = self.mask_dim * 3
+
         if parent is None:
             if cfg.extra_head_net is None:
                 self.out_channels = in_channels
@@ -89,7 +92,8 @@ class PredictionModule_FC(nn.Module):
                                                             self.num_priors * self.num_classes,
                                                             kernel_size=kernel_size,
                                                             deformable_groups=self.deform_groups,
-                                                            use_pred_offset=cfg.use_pred_offset))
+                                                            use_pred_offset=cfg.use_pred_offset,
+                                                            use_random_offset=cfg.use_random_offset))
                     else:
                         self.conf_layer.append(nn.Conv2d(self.out_channels, self.num_priors * self.num_classes,
                                                          **cfg.head_layer_params[k]))
@@ -102,7 +106,9 @@ class PredictionModule_FC(nn.Module):
                                                         self.num_priors * self.mask_dim,
                                                         kernel_size=kernel_size,
                                                         deformable_groups=self.deform_groups,
-                                                        use_pred_offset=cfg.use_pred_offset))
+                                                        use_pred_offset=cfg.use_pred_offset,
+                                                        use_random_offset=cfg.use_random_offset
+                                                        ))
                 else:
                     self.mask_layer.append(nn.Conv2d(self.out_channels, self.num_priors*self.mask_dim,
                                                      **cfg.head_layer_params[k]))
@@ -113,7 +119,9 @@ class PredictionModule_FC(nn.Module):
                                                              self.num_priors * self.track_dim,
                                                              kernel_size=kernel_size,
                                                              deformable_groups=self.deform_groups,
-                                                             use_pred_offset=cfg.use_pred_offset))
+                                                             use_pred_offset=cfg.use_pred_offset,
+                                                             use_random_offset=cfg.use_random_offset
+                                                             ))
                     else:
                         self.track_layer.append(nn.Conv2d(self.out_channels,
                                                           self.num_priors * self.trck_dim,
@@ -237,6 +245,9 @@ class PredictionModule_FC(nn.Module):
             preds['conf'] = conf
         else:
             preds['stuff'] = stuff
+
+        if cfg.train_track and not cfg.track_by_Gaussian:
+            preds['track'] = track
 
         return preds
 

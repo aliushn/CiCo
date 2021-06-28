@@ -52,6 +52,10 @@ def parse_args(argv=None):
                         help='Whether to use a faster, but not entirely correct version of NMS.')
     parser.add_argument('--cross_class_nms', default=False, type=str2bool,
                         help='Whether compute NMS cross-class or per-class.')
+    parser.add_argument('--display_single_mask', default=False, type=str2bool,
+                        help='Whether or not to display masks over bounding boxes')
+    parser.add_argument('--display_single_mask_occlusion', default=True, type=str2bool,
+                        help='Whether or not to display masks over bounding boxes')
     parser.add_argument('--display_masks', default=True, type=str2bool,
                         help='Whether or not to display masks over bounding boxes')
     parser.add_argument('--display_bboxes', default=True, type=str2bool,
@@ -491,7 +495,6 @@ def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None
             timer.reset()
             with timer.env('Load Data'):
                 images, images_meta = prepare_data(data_batch, devices=device, train_mode=False)
-                pad_h, pad_w = images.size()[2:4]
 
             with timer.env('Network Extra'):
                 preds, _, _ = net(images, img_meta=images_meta)
@@ -504,7 +507,7 @@ def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None
                 for pred, img_meta in zip(preds, images_meta):
                     cfg.preserve_aspect_ratio = True
                     preds_cur = postprocess_ytbvis(pred, img_meta)
-                    segm_results = bbox2result_with_id(preds_cur, cfg.classes)
+                    segm_results = bbox2result_with_id(preds_cur, img_meta, cfg.classes)
                     results.append(segm_results)
 
             # First couple of images take longer because we're constructing the graph.
@@ -527,13 +530,13 @@ def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None
         print('Dumping detections...')
 
         if not valid_data:
-            results2json_videoseg(dataset, results, args.mask_det_file)
+            results2json_videoseg(results, args.mask_det_file)
             print('calculate evaluation metrics ...')
             ann_file = cfg.valid_sub_dataset.ann_file
             dt_file = args.mask_det_file
             calc_metrics(ann_file, dt_file, output_file=output_metrics_file)
         else:
-            results2json_videoseg(dataset, results, output_metrics_file.replace('.txt', '.json'))
+            results2json_videoseg(results, output_metrics_file.replace('.txt', '.json'))
 
     except KeyboardInterrupt:
         print('Stopping...')
@@ -567,12 +570,17 @@ def evaluate(net: STMask, dataset):
             with timer.env('Load Data'):
                 images, images_meta = prepare_data(data_batch, train_mode=False, devices=torch.cuda.current_device())
 
+            if images_meta[0]['video_id'] > 6:
+                break
+
+            # if images_meta[0]['video_id'] > 135:
+            #     print(images_meta[0]['video_id'])
             with timer.env('Network Extra'):
                 preds, out_images, out_img_metas = net(images, img_meta=images_meta)
 
             n_preds = len(preds)
 
-            if n_preds > 0:
+            if n_preds > 0:   # and images_meta[0]['video_id'] > 135:
                 for batch_id, pred in enumerate(preds):
 
                     if args.display:
@@ -580,7 +588,7 @@ def evaluate(net: STMask, dataset):
                         root_dir = os.path.join(args.mask_det_file[:-12], 'out', str(img_id[0]))
                         if not os.path.exists(root_dir):
                             os.makedirs(root_dir)
-                        if not cfg.display_mask_single:
+                        if not args.display_single_mask:
                             img_numpy = prep_display(pred, out_images[batch_id],
                                                      img_meta=out_img_metas[batch_id], img_ids=img_id)
                             plt.imshow(img_numpy)
@@ -591,13 +599,12 @@ def evaluate(net: STMask, dataset):
 
                         else:
                             for p in range(pred['box'].size(0)):
-                                preds_single = {}
+                                pred_single = {'proto': pred['proto']}
                                 for k, v in pred.items():
                                     if k not in {'proto'}:
-                                        preds_single[k] = v[p]
+                                        pred_single[k] = v[p].unsqueeze(0)
 
-                                preds_single['box_ids'] = torch.tensor(-1)
-                                img_numpy = prep_display(preds_single, out_images[batch_id],
+                                img_numpy = prep_display(pred_single, out_images[batch_id],
                                                          img_meta=out_img_metas[batch_id], img_ids=img_id)
                                 plt.imshow(img_numpy)
                                 plt.axis('off')
@@ -607,7 +614,7 @@ def evaluate(net: STMask, dataset):
                     else:
                         cfg.preserve_aspect_ratio = True
                         preds_cur = postprocess_ytbvis(pred, out_img_metas[batch_id])
-                        segm_results = bbox2result_with_id(preds_cur, cfg.classes)
+                        segm_results = bbox2result_with_id(preds_cur, out_img_metas[batch_id], cfg.classes)
                         results.append(segm_results)
 
                 # First couple of images take longer because we're constructing the graph.
@@ -631,7 +638,7 @@ def evaluate(net: STMask, dataset):
             print()
             if args.output_json:
                 print('Dumping detections...')
-                results2json_videoseg(dataset, results, args.mask_det_file)
+                results2json_videoseg(results, args.mask_det_file)
 
                 if cfg.use_valid_sub or cfg.use_train_sub:
                     if cfg.use_valid_sub:

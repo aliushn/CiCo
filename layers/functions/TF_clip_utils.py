@@ -13,13 +13,20 @@ def UnFold_candidate_clip(candidate_clip, remove_blank=False):
     candidates = []
     T, N = candidate_clip['mask'].size()[:2]
     if remove_blank:
-        keep_clip = candidate_clip['mask'].gt(0.5).sum(dim=(2, 3)) > 7
+        # whether add some tracked masks
+        cond1 = candidate_clip['tracked_mask'] <= 10
+        # whether tracked masks are greater than a small threshold, which removes some false positives
+        cond2 = candidate_clip['mask'].gt(0.5).sum(dim=(2, 3)) > 2
+        # a declining weights (0.8) to remove some false positives that cased by consecutively track to segment
+        cond3 = candidate_clip['score'].clone() > 0.05
+        cond4 = candidate_clip['box_ids'].clone().squeeze(-1) > -1
+        keep_clip = cond1 & cond2 & cond3 & cond4
 
     for i in range(T):
         candidate_cur = {}
         for k, v in candidate_clip.items():
             if remove_blank:
-                candidate_cur[k] = v[i][keep_clip[i]]
+                candidate_cur[k] = v[i][keep_clip[i]].clone()
             else:
                 candidate_cur[k] = v[i]
         candidates.append(candidate_cur)
@@ -101,7 +108,13 @@ def select_distinct_track(candidate_clip):
         _, sorted_idx = candidate_clip['score'][:, i_obj].sort(0, descending=True)
         distinct_idx = sorted_idx[0]
         for k, v in candidate_clip.items():
-            distinct_track[k].append(v[distinct_idx, i_obj])
+            if k not in {'track_mu', 'track_var'}:
+                distinct_track[k].append(v[distinct_idx, i_obj])
+            else:
+                if k == 'track_mu':
+                    distinct_track[k].append(v[:, i_obj].sum(dim=0) / n_frames)
+                else:
+                    distinct_track[k].append(v[:, i_obj].sum(dim=0) / (n_frames**2))
 
     for k, v in distinct_track.items():
         distinct_track[k] = torch.stack(v, dim=0)

@@ -1,5 +1,5 @@
 import torch
-from layers.utils import compute_DIoU,  mask_iou, generate_track_gaussian, compute_comp_scores, generate_mask, compute_kl_div, center_size
+from layers.utils import compute_DIoU,  mask_iou, generate_track_gaussian, compute_comp_scores, compute_kl_div
 from .TF_utils import CandidateShift
 from utils import timer
 
@@ -24,6 +24,7 @@ class Track_TF(object):
 
     def __init__(self):
         self.prev_candidate = None
+        self.easy_match = False
 
     def __call__(self, net, candidates, imgs_meta, img=None):
         """
@@ -87,76 +88,110 @@ class Track_TF(object):
             assert self.prev_candidate is not None
 
             # tracked mask: to track masks from previous frames to current frame
-            prev_candidate_shift = CandidateShift(net, candidate, self.prev_candidate, img=img, img_meta=img_meta)
+            prev_candidate_shift = CandidateShift(net, candidate, self.prev_candidate, img=img, img_meta=img_meta,
+                                                  update_track=False)
+
             for k, v in prev_candidate_shift.items():
                 self.prev_candidate[k] = v.clone()
-            self.prev_candidate['tracked_mask'] = self.prev_candidate['tracked_mask'] + 1
+            self.prev_candidate['tracked_mask'] += 1
 
             # calculate KL divergence for Gaussian distribution of isntances
             n_prev = self.prev_candidate['box'].size(0)
+            mask_ious = mask_iou(det_masks_soft.gt(0.5).float(),
+                                 self.prev_candidate['mask'].gt(0.5))  # [n_dets, n_prev]
 
-            if cfg.track_by_Gaussian:
-                kl_divergence = compute_kl_div(self.prev_candidate['track_mu'], self.prev_candidate['track_var'],
-                                               det_track_mu, det_track_var)    # value in [[0, +infinite]]
-                sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10  # threshold for kl_divergence = 10
-                # from [0, +infinite] to [0, 1]: sim = 1/ (exp(0.1*kl_div))
-                sim = torch.div(1., torch.exp(0.1 * torch.cat([sim_dummy, kl_divergence], dim=-1)))
+            if self.easy_match:
+                FP_idx = self.prev_candidate['tracked_mask'] >= 100
+                mask_ious[:, FP_idx] = 0
+                max_miou, max_miou_ids = mask_ious.max(dim=-1)
+                keep_easy_match = max_miou > 0.9
+                easy_match_idx = torch.arange(n_dets)[keep_easy_match]
+                easy_match_ids = max_miou_ids[easy_match_idx]
             else:
-                cos_sim = det_track_embed @ self.prev_candidate['track'].t()  # [n_dets, n_prev], val in [-1, 1]
-                cos_sim = torch.cat([torch.zeros(n_dets, 1), cos_sim], dim=1)
-                sim = (cos_sim + 1) / 2  # [0, 1]
+                # totally False
+                keep_easy_match = mask_ious[:, 0] > 10
+                easy_match_idx, easy_match_ids = [], []
 
-            # Calculate BIoU and MIoU between detected masks and tracked masks for assign IDs
-            bbox_ious = compute_DIoU(det_bbox, self.prev_candidate['box'])  # [n_dets, n_prev]
-            mask_ious = mask_iou(det_masks_soft.gt(0.5).float(), self.prev_candidate['mask'].gt(0.5))  # [n_dets, n_prev]
-            label_delta = (self.prev_candidate['class'] == det_labels.view(-1, 1)).float()
-
-            # compute comprehensive score
-            comp_scores = compute_comp_scores(sim,
-                                              det_score.view(-1, 1),
-                                              bbox_ious,
-                                              mask_ious,
-                                              label_delta,
-                                              add_bbox_dummy=True,
-                                              bbox_dummy_iou=0.3,
-                                              match_coeff=cfg.match_coeff,
-                                              use_FEELVOS=cfg.use_FEELVOS)
-
-            match_likelihood, match_ids = torch.max(comp_scores, dim=1)
             # translate match_ids to det_obj_ids, assign new id to new objects
             # update tracking features/bboxes of exisiting object,
             # add tracking features/bboxes of new object
-            det_obj_ids = torch.ones(n_dets, dtype=torch.int32) * (-1)
+            det_obj_ids = torch.ones(n_dets, dtype=torch.int64) * (-1)
             best_match_scores = torch.ones(n_prev) * (-1)
-            best_match_idx = torch.ones(n_prev) * (-1)
-            for idx, match_id in enumerate(match_ids):
-                if match_id == 0:
-                    det_obj_ids[idx] = self.prev_candidate['box'].size(0)
+            best_match_idx = torch.ones(n_prev, dtype=torch.int64) * (-1)
+            if keep_easy_match.sum() > 0:
+                det_obj_ids[keep_easy_match] = easy_match_ids
+                best_match_scores[easy_match_ids] = 100
+                best_match_idx[easy_match_ids] = easy_match_idx
+
+                for obj_id, obj_idx in zip(easy_match_ids, easy_match_idx):
                     for k, v in self.prev_candidate.items():
                         if k not in {'proto', 'fpn_feat', 'track', 'sem_seg', 'tracked_mask'}:
-                            self.prev_candidate[k] = torch.cat([v, candidate[k][idx][None]], dim=0)
-                    self.prev_candidate['tracked_mask'] = torch.cat([self.prev_candidate['tracked_mask'],
-                                                                     torch.zeros(1)], dim=0)
+                            self.prev_candidate[k][obj_id] = candidate[k][obj_idx]
+                    self.prev_candidate['tracked_mask'][obj_id] = 0
 
+            if keep_easy_match.sum() < n_dets:
+
+                if cfg.track_by_Gaussian:
+                    kl_divergence = compute_kl_div(self.prev_candidate['track_mu'], self.prev_candidate['track_var'],
+                                                   det_track_mu, det_track_var)    # value in [[0, +infinite]]
+                    sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10.
+                    # from [0, +infinite] to [0, 1]: sim = 1/ (exp(0.1*kl_div)), threshold  = 10
+                    sim = torch.div(1., torch.exp(0.1 * torch.cat([sim_dummy, kl_divergence], dim=-1)))
+                    # from [0, +infinite] to [0, 1]: sim = exp(1-kl_div)), threshold  = 5
+                    # sim = torch.exp(1 - torch.cat([sim_dummy, kl_divergence], dim=-1))
                 else:
-                    # multiple candidate might match with previous object, here we choose the one with
-                    # largest comprehensive score
-                    obj_id = match_id - 1
-                    match_score = match_likelihood[idx]
-                    if match_score > best_match_scores[obj_id]:
-                        if best_match_idx[obj_id] != -1:
-                            det_obj_ids[int(best_match_idx[obj_id])] = -1
-                        det_obj_ids[idx] = obj_id
-                        best_match_scores[obj_id] = match_score
-                        best_match_idx[obj_id] = idx
-                        # udpate feature
+                    cos_sim = det_track_embed @ self.prev_candidate['track'].t()  # [n_dets, n_prev], val in [-1, 1]
+                    cos_sim = torch.cat([torch.zeros(n_dets, 1), cos_sim], dim=1)
+                    sim = (cos_sim + 1) / 2  # [0, 1]
+
+                # Calculate BIoU and MIoU between detected masks and tracked masks for assign IDs
+                bbox_ious = compute_DIoU(det_bbox, self.prev_candidate['box'])  # [n_dets, n_prev]
+                label_delta = (self.prev_candidate['class'] == det_labels.view(-1, 1)).float()
+
+                # compute comprehensive score
+                comp_scores = compute_comp_scores(sim,
+                                                  det_score.view(-1, 1),
+                                                  bbox_ious,
+                                                  mask_ious,
+                                                  label_delta,
+                                                  add_bbox_dummy=True,
+                                                  bbox_dummy_iou=0.3,
+                                                  match_coeff=cfg.match_coeff,
+                                                  use_FEELVOS=cfg.use_FEELVOS)
+                # only need to do that for isntances whose Mask IoU is lower than 0.9
+                hard_comp_scores = comp_scores[~keep_easy_match]
+                match_likelihood, hard_match_ids = torch.max(hard_comp_scores, dim=1)
+                hard_match_idx = torch.arange(n_dets)[~keep_easy_match]
+                idx = 0
+                for match_idx, match_id in zip(hard_match_idx, hard_match_ids):
+                    if match_id == 0:
+                        det_obj_ids[match_idx] = self.prev_candidate['box'].size(0)
                         for k, v in self.prev_candidate.items():
                             if k not in {'proto', 'fpn_feat', 'track', 'sem_seg', 'tracked_mask'}:
-                                self.prev_candidate[k][obj_id] = candidate[k][idx]
-                        self.prev_candidate['tracked_mask'][obj_id] = 0
+                                self.prev_candidate[k] = torch.cat([v, candidate[k][match_idx][None]], dim=0)
+                        self.prev_candidate['tracked_mask'] = torch.cat([self.prev_candidate['tracked_mask'],
+                                                                        torch.zeros(1)], dim=0)
+
+                    elif match_id-1 not in easy_match_ids:
+                        # multiple candidate might match with previous object, here we choose the one with
+                        # largest comprehensive score
+                        obj_id = match_id - 1
+                        match_score = match_likelihood[idx]
+                        if match_score > best_match_scores[obj_id]:
+                            if best_match_idx[obj_id] != -1:
+                                det_obj_ids[int(best_match_idx[obj_id])] = -1
+                            det_obj_ids[match_idx] = obj_id
+                            best_match_scores[obj_id] = match_score
+                            best_match_idx[obj_id] = match_idx
+                            # udpate feature
+                            for k, v in self.prev_candidate.items():
+                                if k not in {'proto', 'fpn_feat', 'track', 'sem_seg', 'tracked_mask'}:
+                                    self.prev_candidate[k][obj_id] = candidate[k][match_idx]
+                            self.prev_candidate['tracked_mask'][obj_id] = 0
+                    idx += 1
 
         # whether add some tracked masks
-        cond1 = self.prev_candidate['tracked_mask'] <= 5
+        cond1 = self.prev_candidate['tracked_mask'] <= 20
         # whether tracked masks are greater than a small threshold, which removes some false positives
         cond2 = self.prev_candidate['mask'].gt(0.5).sum([1, 2]) > 0
         # a declining weights (0.8) to remove some false positives that cased by consecutively track to segment
@@ -184,5 +219,7 @@ class Track_TF(object):
                          'tracked_mask': self.prev_candidate['tracked_mask'][keep]}
             if cfg.train_centerness:
                 detection['centerness'] = self.prev_candidate['centerness'][keep]
+            if cfg.mask_proto_coeff_occlusion:
+                detection['mask_non_target'] = self.prev_candidate['mask_non_target'][keep]
 
         return detection

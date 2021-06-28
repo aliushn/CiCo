@@ -9,13 +9,15 @@ class FeatureAlign(nn.Module):
                  out_channels,
                  kernel_size=(3, 3),
                  deformable_groups=4,
-                 use_pred_offset=True):
+                 use_pred_offset=True,
+                 use_random_offset=False):
         super(FeatureAlign, self).__init__()
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
         self.kernel_size = kernel_size
         self.padding = ((kernel_size[0] - 1) // 2, (kernel_size[1] - 1) // 2)
         self.use_pred_offset = use_pred_offset
+        self.use_random_offset = use_random_offset
 
         if self.use_pred_offset:
             offset_channels = kernel_size[0] * kernel_size[1] * 2

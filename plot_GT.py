@@ -30,8 +30,13 @@ parser.add_argument('--config', default='STMask_plus_base_config',
                     help='The config object to use.')
 parser.add_argument('--save_path', default='results/eval_mask_detections.json', type=str,
                     help='The output file for coco mask results if --coco_results is set.')
-parser.add_argument('--display_bboxes', default=True, type=str2bool,
+parser.add_argument('--display_bboxes', default=False, type=str2bool,
                     help='Whether or not to display bboxes around masks')
+parser.add_argument('--display_masks', default=True, type=str2bool,
+                    help='Whether or not to display bboxes around masks')
+parser.add_argument('--display_single_mask', default=False, type=str2bool,
+                    help='Whether or not to display bboxes around masks')
+
 
 parser.set_defaults(keep_latest=False, log=True, log_gpu=False, interrupt=True, autoscale=True)
 args = parser.parse_args()
@@ -74,7 +79,7 @@ def plt_masks_from_json(data_loader, type='gt', anns=None, mask_alpha=0.45):
                 frame_id = img_meta['frame_id']
                 id = -1
                 for ann in anns:
-                    if ann['video_id'] - 1 == img_meta['video_id']:
+                    if ann['video_id'] == img_meta['video_id']:
                         mask_rle = ann['segmentations'][frame_id]
                         if mask_rle is None:
                             mask_binary = torch.zeros(ori_h, ori_w)
@@ -91,65 +96,94 @@ def plt_masks_from_json(data_loader, type='gt', anns=None, mask_alpha=0.45):
                 gt_masks_cur = F.interpolate(gt_masks_cur.unsqueeze(0), (img_h, img_w)).squeeze(0)
                 labels_cur = gt_labels
 
+            print(img_meta['video_id'])
             n_cur = gt_masks_cur.size(0)
-            img_numpy = undo_image_transformation(img_cur, img_meta)
-            img_cur = torch.Tensor(img_numpy).cuda()  # [360, 640, 3]
+            if args.display_single_mask:
+                if img_meta['video_id'] == 35:
+                    video_id, frame_id = img_meta['video_id'], img_meta['frame_id']
+                    for j in range(n_cur):
+                        colors = get_color(j, gt_ids_cur, on_gpu=imgs.device.index).view(1, 1, 3)
+                        gt_masks_cur_color = gt_masks_cur[j].unsqueeze(-1) * colors * mask_alpha
 
-            # Undo padding for masks
-            # gt_masks_cur = gt_masks_cur[:, :img_h, :img_w].float()
-            gt_masks_cur = gt_masks_cur.unsqueeze(-1).repeat(1, 1, 1, 3)
-            # This is 1 everywhere except for 1-mask_alpha where the mask is
-            inv_alph_masks = gt_masks_cur.sum(0) * (-mask_alpha) + 1
-            gt_masks_cur_color = []
+                        if args.display_ori_shape:
+                            gt_masks_cur_color = gt_masks_cur_color.permute(2, 0, 1).contiguous()
+                            gt_masks_cur_color = F.interpolate(gt_masks_cur_color.unsqueeze(0), (ori_h, ori_w),
+                                                               mode='bilinear',
+                                                               align_corners=False).squeeze(0)
+                            gt_masks_cur_color = gt_masks_cur_color.permute(1, 2, 0).contiguous()
+                        img_numpy = gt_masks_cur_color.cpu().numpy()
 
-            # Prepare the RGB images for each mask given their color (size [num_dets, h, w, 1])
-            for j in range(n_cur):
-                colors = get_color(j, gt_ids_cur, on_gpu=imgs.device.index).view(1, 1, 3)
-                gt_masks_cur_color.append(gt_masks_cur[j] * colors * mask_alpha)
-            gt_masks_cur_color = torch.stack(gt_masks_cur_color, dim=0).sum(0)
+                        plt.imshow(img_numpy)
+                        plt.axis('off')
+                        root_dir = os.path.join(args.save_path, 'out', str(video_id))
+                        if not os.path.exists(root_dir):
+                            os.makedirs(root_dir)
+                        plt.savefig(''.join([root_dir, '/', str(frame_id), '_', str(j), '_mask.png']))
+                        plt.clf()
 
-            img_color = (img_cur * inv_alph_masks + gt_masks_cur_color)
-            if args.display_ori_shape:
-                img_color = img_color.permute(2, 0, 1).contiguous()
-                img_color = F.interpolate(img_color.unsqueeze(0), (ori_h, ori_w), mode='bilinear',
-                                          align_corners=False).squeeze(0)
-                img_color = img_color.permute(1, 2, 0).contiguous()
-            img_numpy = img_color.cpu().numpy()
+            else:
+                img_numpy = undo_image_transformation(img_cur, img_meta)
+                img_cur = torch.Tensor(img_numpy).cuda()  # [360, 640, 3]
 
-            if type == 'gt' and args.display_bboxes:
-                bboxes_cur = gt_bboxes[i]
-                bboxes_cur = torch.clamp(bboxes_cur, min=1e-3, max=1-1e-3)
-                bboxes_cur[:, ::2] = bboxes_cur[:, ::2] * ori_w
-                bboxes_cur[:, 1::2] = bboxes_cur[:, 1::2] * ori_h
-                for j in reversed(range(n_cur)):
-                    x1, y1, x2, y2 = bboxes_cur[j, :]
-                    color = get_color(j, gt_ids_cur)
-                    color = [c / 255. for c in color]
-                    cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 2)
+                # Undo padding for masks
+                # gt_masks_cur = gt_masks_cur[:, :img_h, :img_w].float()
+                gt_masks_cur = gt_masks_cur.unsqueeze(-1).repeat(1, 1, 1, 3)
+                # This is 1 everywhere except for 1-mask_alpha where the mask is
+                inv_alph_masks = gt_masks_cur.sum(0) * (-mask_alpha) + 1
+                gt_masks_cur_color = []
 
-                    _class = cfg.classes[labels_cur[j] - 1]
-                    text_str = '%s' % _class
-                    font_face = cv2.FONT_HERSHEY_DUPLEX
-                    font_scale = int(max(ori_h, ori_w) / 360.) * 0.5
-                    font_thickness = 2
-                    text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
+                if args.display_masks:
+                    # Prepare the RGB images for each mask given their color (size [num_dets, h, w, 1])
+                    for j in range(n_cur):
+                        colors = get_color(j, gt_ids_cur, on_gpu=imgs.device.index).view(1, 1, 3)
+                        gt_masks_cur_color.append(gt_masks_cur[j] * colors * mask_alpha)
+                    gt_masks_cur_color = torch.stack(gt_masks_cur_color, dim=0).sum(0)
 
-                    text_pt = (max(x1, 10), max(y1 - 3, 10))
-                    text_color = [1, 1, 1]
-                    cv2.rectangle(img_numpy, (max(x1, 10), max(y1, 10)), (x1 + text_w, y1 - text_h - 4), color, -1)
-                    cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness,
-                                cv2.LINE_AA)
+                    img_color = (img_cur * inv_alph_masks + gt_masks_cur_color)
+                else:
+                    img_color = img_cur
 
-            video_id, frame_id = imgs_meta[i]['video_id'], imgs_meta[i]['frame_id']
-            plt.imshow(img_numpy)
-            plt.axis('off')
-            plt.title(str(frame_id))
+                if args.display_ori_shape:
+                    img_color = img_color.permute(2, 0, 1).contiguous()
+                    img_color = F.interpolate(img_color.unsqueeze(0), (ori_h, ori_w), mode='bilinear',
+                                            align_corners=False).squeeze(0)
+                    img_color = img_color.permute(1, 2, 0).contiguous()
+                img_numpy = img_color.cpu().numpy()
 
-            root_dir = os.path.join(args.save_path, 'out', str(video_id))
-            if not os.path.exists(root_dir):
-                os.makedirs(root_dir)
-            plt.savefig(''.join([root_dir, '/', str(frame_id), '.png']))
-            plt.clf()
+                if type == 'gt' and args.display_bboxes:
+                    bboxes_cur = gt_bboxes[i]
+                    bboxes_cur = torch.clamp(bboxes_cur, min=1e-3, max=1-1e-3)
+                    bboxes_cur[:, ::2] = bboxes_cur[:, ::2] * ori_w
+                    bboxes_cur[:, 1::2] = bboxes_cur[:, 1::2] * ori_h
+                    for j in reversed(range(n_cur)):
+                        x1, y1, x2, y2 = bboxes_cur[j, :]
+                        color = get_color(j, gt_ids_cur)
+                        color = [c / 255. for c in color]
+                        cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 2)
+
+                        _class = cfg.classes[labels_cur[j] - 1]
+                        text_str = '%s' % _class
+                        font_face = cv2.FONT_HERSHEY_DUPLEX
+                        font_scale = int(max(ori_h, ori_w) / 360.) * 0.5
+                        font_thickness = 2
+                        text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
+
+                        text_pt = (max(x1, 10), max(y1 - 3, 10))
+                        text_color = [1, 1, 1]
+                        cv2.rectangle(img_numpy, (max(x1, 10), max(y1, 10)), (x1 + text_w, y1 - text_h - 4), color, -1)
+                        cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness,
+                                    cv2.LINE_AA)
+
+                video_id, frame_id = img_meta['video_id'], img_meta['frame_id']
+                plt.imshow(img_numpy)
+                plt.axis('off')
+                plt.title(str(frame_id))
+
+                root_dir = os.path.join(args.save_path, 'out', str(video_id))
+                if not os.path.exists(root_dir):
+                    os.makedirs(root_dir)
+                plt.savefig(''.join([root_dir, '/', str(frame_id), '_ori.png']))
+                plt.clf()
 
 
 # Quick and dirty lambda for selecting the color for a particular index
@@ -303,7 +337,7 @@ if __name__ == '__main__':
 
     if type == 'gt':
         # display GT masks on valid_sub data
-        cfg.valid_sub_dataset.test_mode = True
+        cfg.valid_sub_dataset.test_mode = False
         cfg.valid_sub_dataset.flip_ratio = 0
         dataset = get_dataset(cfg.valid_sub_dataset)
         data_loader = data.DataLoader(dataset, args.batch_size,
@@ -324,6 +358,6 @@ if __name__ == '__main__':
                                       pin_memory=True)
 
         # path of the .json file that stores your predicted masks
-        ann_file = '../STMask/weights/YTVIS2019/weights_r50_new/results.json'
+        ann_file = 'weights/OVIS/VisTR/results.json'
         anns = json.load(open(ann_file, 'r'))
         plt_masks_from_json(data_loader, type, anns=anns)

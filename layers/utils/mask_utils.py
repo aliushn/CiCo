@@ -116,39 +116,58 @@ def generate_mask(proto_data, mask_coeff, bbox=None):
     :return:
     '''
 
+    mask_coeff = cfg.mask_proto_coeff_activation(mask_coeff)
+    if cfg.mask_proto_coeff_activation == activation_func.sigmoid:
+        # hope to get mask coefficients with L0 sparsity
+        mask_coeff = mask_coeff * 2 - 1
+        mask_coeff = torch.clamp(mask_coeff, min=0)
+
     # get masks
     if cfg.use_sipmask:
-        pred_masks00 = cfg.mask_proto_mask_activation(proto_data @ mask_coeff[:, :cfg.mask_proto_n].t())
-        pred_masks01 = cfg.mask_proto_mask_activation(proto_data @ mask_coeff[:, cfg.mask_proto_n:cfg.mask_proto_n*2].t())
-        pred_masks10 = cfg.mask_proto_mask_activation(proto_data @ mask_coeff[:, cfg.mask_proto_n*2:cfg.mask_proto_n*3].t())
-        pred_masks11 = cfg.mask_proto_mask_activation(proto_data @ mask_coeff[:, cfg.mask_proto_n*3:].t())
-        if bbox is not None:
-            pred_masks = crop_sipmask(pred_masks00, pred_masks01, pred_masks10, pred_masks11, bbox)
-    else:
-        mask_coeff = cfg.mask_proto_coeff_activation(mask_coeff)
-        if cfg.mask_proto_coeff_activation == activation_func.sigmoid:
-            # hope to get mask coefficients with L0 sparsity
-            mask_coeff = mask_coeff * 2 - 1
-            mask_coeff = torch.clamp(mask_coeff, min=0)
+        pred_masks00 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data,  mask_coeff[:, :cfg.mask_dim]))
+        pred_masks01 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim:cfg.mask_dim*2]))
+        pred_masks10 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim*2:cfg.mask_dim*3]))
+        pred_masks11 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim*3:]))
+        pred_masks = crop_sipmask(pred_masks00, pred_masks01, pred_masks10, pred_masks11, bbox)
 
-        dim_proto = len(proto_data.size())
-        if dim_proto == 3:
-            pred_masks = proto_data @ mask_coeff.t()
-        elif dim_proto == 4:
-            # to generate masks for all objects in a video clip
-            pred_masks = (proto_data * mask_coeff.unsqueeze(1).unsqueeze(2)).sum(dim=-1)
-            pred_masks = pred_masks.permute(1, 2, 0).contiguous()
-        else:
-            print('please input the proto_data with size [h, w, c] or [n, h, w, c]')
+    else:
 
         if not cfg.mask_proto_coeff_occlusion:
+            pred_masks = generate_single_mask(proto_data, mask_coeff)
             pred_masks = cfg.mask_proto_mask_activation(pred_masks)
+        else:
+            # background
+            pred_masks_b = generate_single_mask(proto_data, mask_coeff[:, :cfg.mask_dim])
+            # target objects
+            pred_masks_t = generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim:cfg.mask_dim*2])
+            # parts from overlapped objects
+            pred_masks_o = generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim*2:])
+            pred_masks = torch.stack([pred_masks_b, pred_masks_t, pred_masks_o], dim=-2)    # [h, w, 3, n]
+
         if bbox is not None:
-            _, pred_masks = crop(pred_masks, bbox)  # [mask_h, mask_w, n]
+            _, pred_masks = crop(pred_masks, bbox)                                          # [h, w, n] or [h, w, 3, n]
 
-    det_masks = pred_masks.permute(2, 0, 1).contiguous()  # [n_masks, h, w]
+    if not cfg.mask_proto_coeff_occlusion:
+        pred_masks = pred_masks.permute(2, 0, 1).contiguous()                               # [n, h, w]
+    else:
+        pred_masks = pred_masks.permute(3, 0, 1, 2).contiguous()                            # [n, h, w, 3]
 
-    return det_masks
+    return pred_masks
+
+
+def generate_single_mask(proto_data, mask_coeff):
+    dim_proto = len(proto_data.size())
+    if dim_proto == 3:
+        pred_masks = proto_data @ mask_coeff.t()
+    elif dim_proto == 4:
+        # to generate masks for all objects in a video clip
+        pred_masks = (proto_data * mask_coeff.unsqueeze(1).unsqueeze(2)).sum(dim=-1)
+        pred_masks = pred_masks.permute(1, 2, 0).contiguous()
+    else:
+        pred_masks = None
+        print('please input the proto_data with size [h, w, c] or [n, h, w, c]')
+
+    return pred_masks
 
 
 def mask_iou(mask_a, mask_b):

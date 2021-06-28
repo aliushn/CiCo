@@ -268,7 +268,7 @@ test_YouTube_VOS2021_dataset = dataset_base_vis.copy({
 
 train_OVIS_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/OVIS/train',
-    'ann_file': '../datasets/OVIS/annotations_train_sub.json',
+    'ann_file': '../datasets/OVIS/annotations_valid_sub.json',
     # 'extra_aug': dict(random_crop=dict(min_ious=(0.1, 0.3, 0.5, 0.7, 0.9), min_crop_size=0.3)),
     # 'extra_aug': dict(expand=dict(mean=(123.675, 116.28, 103.53), to_rgb=True, ratio_range=(1, 3))),
 })
@@ -382,10 +382,10 @@ resnet50_backbone = resnet101_backbone.copy({
     'transform': resnet_transform,
 })
 
-resnet50_dcn_inter3_backbone = resnet50_backbone.copy({
+resnet50_dcn_inter2_backbone = resnet50_backbone.copy({
     'name': 'ResNet50_DCN_Interval3',
     'path': 'yolact_plus_resnet50_54.pth',
-    'args': ([3, 4, 6, 3], [0, 4, 6, 3], 3),
+    'args': ([3, 4, 6, 3], [0, 4, 6, 3], 2),
 })
 
 darknet53_backbone = backbone_base.copy({
@@ -695,7 +695,7 @@ STMask_base_config = base_config.copy({
     # FCA and prediction module settings
     'share_prediction_module': True,
     'extra_head_net': [(256, 3, {'padding': 1})],
-    'extra_layers': (2, 2, 2),
+    'extra_layers': (2, 2, 2, 2),
     'head_layer_params': {0: {'kernel_size': [3, 3], 'padding': (1, 1)},
                           1: {'kernel_size': [3, 5], 'padding': (1, 2)},
                           2: {'kernel_size': [5, 3], 'padding': (2, 1)}},
@@ -710,7 +710,7 @@ STMask_base_config = base_config.copy({
     'discard_mask_area': 5 * 5,
     'mask_proto_coeff_diversity_loss': False,
     'mask_proto_crop_with_pred_box': False,
-    'mask_proto_coeff_occlusion': True,
+    'mask_proto_coeff_occlusion': False,
 
     # Proto_net settings
     'backbone_C2_as_features': False,
@@ -724,7 +724,7 @@ STMask_base_config = base_config.copy({
     # Track settings
     'train_track': True,
     'track_by_Gaussian': True,
-    'match_coeff': [0, 2, 1, 0],   # scores, mask_iou, box_iou, label
+    'match_coeff': [0, 1, 1, 0],   # scores, mask_iou, box_iou, label
     'track_dim': 64,
     'track_crop_with_pred_mask': False,
     'track_crop_with_pred_box': False,
@@ -749,6 +749,7 @@ STMask_base_config = base_config.copy({
     # FCB settings
     # FCB_ada set 'use_pred_offset' as True, FCB_ali set 'use_pred_offset' as False
     'use_pred_offset': False,
+    'use_random_offset': False,
     'use_dcn_class': False,
     'use_dcn_track': False,
     'use_dcn_mask': False,
@@ -769,7 +770,7 @@ STMask_base_config = base_config.copy({
     'semantic_segmentation_alpha': 5,
 
     # eval
-    'eval_frames_of_clip': 1,
+    'eval_frames_of_clip': 21,
     'nms_conf_thresh': 0.05,
     'nms_thresh': 0.5,
     'eval_conf_thresh': 0.05,
@@ -778,13 +779,12 @@ STMask_base_config = base_config.copy({
     'remove_false_inst': True,
     'add_missed_masks': False,
     'use_train_sub': False,
-    'use_valid_sub': True,
+    'use_valid_sub': False,
     'use_test': False,
     'only_calc_metrics': False,
     'only_count_classes': False,
     'use_DIoU_in_comp_scores': False,
     'display_corr': False,
-    'display_mask_single': False,
     'eval_single_im': False,
 })
 
@@ -835,7 +835,7 @@ STMask_resnet50_config = STMask_base_config.copy({
 
 STMask_plus_resnet50_config = STMask_resnet50_config.copy({
     'name': 'STMask_plus_resnet50',
-    'backbone': resnet50_dcn_inter3_backbone.copy({
+    'backbone': resnet50_dcn_inter2_backbone.copy({
         'selected_layers': list(range(1, 4)),
 
         'pred_scales': STMask_base_config.backbone.pred_scales,
@@ -903,6 +903,18 @@ STMask_plus_base_ada_OVIS_config = STMask_plus_base_ada_config.copy({
     'classes': OVIS_CLASSES,
 })
 
+STMask_plus_base_ali_OVIS_config = STMask_plus_base_ali_config.copy({
+    'name': 'STMask_plus_base_ada_OVIS',
+
+    # Dataset stuff
+    'train_dataset': train_OVIS_dataset,
+    'valid_sub_dataset': valid_sub_OVIS_dataset,
+    'valid_dataset': valid_OVIS_dataset,
+    'test_dataset': test_OVIS_dataset,
+    'num_classes': 26,  # This should include the background class
+    'classes': OVIS_CLASSES,
+})
+
 STMask_plus_resnet50_OVIS_config = STMask_plus_resnet50_config.copy({
     'name': 'STMask_plus_resnet50_OVIS',
 
@@ -916,6 +928,18 @@ STMask_plus_resnet50_OVIS_config = STMask_plus_resnet50_config.copy({
 })
 
 STMask_plus_resnet50_ada_OVIS_config = STMask_plus_resnet50_ada_config.copy({
+    'name': 'STMask_plus_resnet50_ada_OVIS',
+
+    # Dataset stuff
+    'train_dataset': train_OVIS_dataset,
+    'valid_sub_dataset': valid_sub_OVIS_dataset,
+    'valid_dataset': valid_OVIS_dataset,
+    'test_dataset': test_OVIS_dataset,
+    'num_classes': 26,  # This should include the background class
+    'classes': OVIS_CLASSES,
+})
+
+STMask_plus_resnet50_ali_OVIS_config = STMask_plus_resnet50_ali_config.copy({
     'name': 'STMask_plus_resnet50_ada_OVIS',
 
     # Dataset stuff

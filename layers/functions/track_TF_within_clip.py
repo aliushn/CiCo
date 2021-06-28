@@ -54,7 +54,8 @@ def Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
             else:
 
                 # tracked mask: to track masks from previous frames to current frame
-                prev_candidate_shift = CandidateShift(net, candidate, prev_candidate, img=img, img_meta=img_meta)
+                prev_candidate_shift = CandidateShift(net, candidate, prev_candidate, img=img, img_meta=img_meta,
+                                                      update_track=False)
                 for k, v in prev_candidate_shift.items():
                     prev_candidate[k] = v.clone()
                 prev_candidate['tracked_mask'] = prev_candidate['tracked_mask'] + 1
@@ -83,9 +84,12 @@ def Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
                     if cfg.track_by_Gaussian:
                         kl_divergence = compute_kl_div(prev_candidate['track_mu'], prev_candidate['track_var'],
                                                        det_track_mu, det_track_var)    # value in [[0, +infinite]]
-                        sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10  # threshold for kl_divergence = 10
-                        # from [0, +infinite] to [0, 1]: sim = 1/ (exp(0.1*kl_div))
+                        sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10.
+                        # from [0, +infinite] to [0, 1]: sim = 1/ (exp(0.1*kl_div)), threshold=10
                         sim = torch.div(1., torch.exp(0.1 * torch.cat([sim_dummy, kl_divergence], dim=-1)))
+                        # from [0, +infinite] to [0, 1]: sim = exp(1-kl_div)), threshold  = 5
+                        # sim = torch.exp(1 - torch.cat([sim_dummy, kl_divergence], dim=-1))
+
                     else:
                         cos_sim = det_track_embed @ prev_candidate['track'].t()  # [n_dets, n_prev], val in [-1, 1]
                         cos_sim = torch.cat([torch.zeros(n_dets, 1), cos_sim], dim=1)
@@ -121,7 +125,7 @@ def Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
                                 if k not in {'proto', 'fpn_feat', 'track', 'sem_seg', 'tracked_mask'}:
                                     prev_candidate[k] = torch.cat([v, candidate[k][idx][None]], dim=0)
                             prev_candidate['tracked_mask'] = torch.cat([prev_candidate['tracked_mask'],
-                                                                    torch.zeros(1)], dim=0)
+                                                                        torch.zeros(1)], dim=0)
 
                         else:
                             # multiple candidate might match with previous object, here we choose the one with
@@ -189,7 +193,8 @@ def Backward_Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
                 else:
 
                     # tracked mask: to track masks from previous frames to current frame
-                    prev_candidate_shift = CandidateShift(net, candidate, prev_candidate, img=img, img_meta=img_meta)
+                    prev_candidate_shift = CandidateShift(net, candidate, prev_candidate,
+                                                          img=img, img_meta=img_meta, update_track=False)
                     for k, v in prev_candidate_shift.items():
                         prev_candidate[k] = v.clone()
                     prev_candidate['tracked_mask'] += 1
@@ -200,15 +205,15 @@ def Backward_Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
                             # estimated masks from closer frames will be given a priority
                             if candidate['tracked_mask'][idx_det] < prev_candidate['tracked_mask'][idx_prev]:
                                 for k, v in candidate.items():
-                                    if k in {'score', 'class', 'mask', 'mask_coeff', 'box', 'centerness', 'tracked_mask',
-                                             'track_mu', 'track_var'}:
+                                    if k not in {'proto', 'fpn_feat', 'track', 'sem_seg'}:
                                         prev_candidate[k][idx_prev] = v[idx_det].clone()
 
             result = dict()
             for k, v in prev_candidate.items():
-                if k in {'box', 'class', 'score', 'centerness', 'mask_coeff', 'mask', 'track_mu', 'track_var',
-                         'box_ids', 'tracked_mask'}:
+                if k not in {'proto', 'fpn_feat', 'track', 'sem_seg'}:
                     result[k] = v.clone()
+
+            result['proto'] = candidate['proto']
             results.append(result)
 
         return results[::-1]
