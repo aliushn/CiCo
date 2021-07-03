@@ -63,6 +63,7 @@ class Track_TF_Clip(object):
         return results
 
     def track_clips(self, net, candidates, is_first, img_metas=None, img=None):
+        n_frames = len(candidates)
 
         # forward_tracking: assign instances IDs for each frame
         results = Track_TF_within_clip(net, candidates, img_metas, img)
@@ -71,15 +72,16 @@ class Track_TF_Clip(object):
         results = Backward_Track_TF_within_clip(net, results[::-1], img_metas[::-1], img[::-1])
         results_clip = Fold_candidates_by_order(results, img_metas)
         # divide result_clip into results [result1, ..., result_T]
-        remove_blank = False
+        remove_blank = True
         if remove_blank:
-            # whether add some tracked masks
-            cond1 = results_clip['tracked_mask'] <= 2
+            threshold = min(1, n_frames//4)
+            # the instance need to be detected  at least 1 frame
+            cond1 = (results_clip['tracked_mask'][n_frames//2:] == 0).sum(dim=0) > threshold
             # whether tracked masks are greater than a small threshold, which removes some false positives
-            cond2 = results_clip['mask'].gt(0.5).sum(dim=(2, 3)) > 2
+            cond2 = (results_clip['mask'][n_frames//2:].gt(0.5).sum(dim=(2, 3)) > 2).sum(dim=0) > threshold
             # a declining weights (0.8) to remove some false positives that cased by consecutively track to segment
-            cond3 = results_clip['score'] > 0.05
-            keep_clip = (cond1 & cond2 & cond3).sum(dim=0) > 2
+            cond3 = (results_clip['score'][n_frames//2:] > 0.05).sum(dim=0) > threshold
+            keep_clip = cond1 & cond2 & cond3
             for k, v in results_clip.items():
                 results_clip[k] = v[:, keep_clip]
 

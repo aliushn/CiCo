@@ -176,7 +176,8 @@ def train():
         detection_collate = detection_collate_vis
 
     if args.is_distributed:
-        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[args.local_rank])
+        net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(net)
+        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[args.local_rank], broadcast_buffers=False)
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
         net = torch.nn.DataParallel(net, device_ids=range(torch.cuda.device_count()))
@@ -287,7 +288,7 @@ def train():
 
                 # if i == 0 and epoch > 0:
                 #     if epoch % args.save_interval == 0 and args.local_rank == 0:
-                if iteration == 200 and args.local_rank == 0:
+                if iteration == 2000 and args.local_rank == 0:
                         if args.keep_latest:
                             latest = SavePath.get_latest(args.save_folder, cfg.name)
 

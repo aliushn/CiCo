@@ -570,9 +570,6 @@ def evaluate(net: STMask, dataset):
             with timer.env('Load Data'):
                 images, images_meta = prepare_data(data_batch, train_mode=False, devices=torch.cuda.current_device())
 
-            if images_meta[0]['video_id'] > 6:
-                break
-
             # if images_meta[0]['video_id'] > 135:
             #     print(images_meta[0]['video_id'])
             with timer.env('Network Extra'):

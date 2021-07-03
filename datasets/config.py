@@ -362,6 +362,7 @@ resnet101_gn_backbone = backbone_base.copy({
     'pred_aspect_ratios': [[[0.66685089, 1.7073535, 0.87508774, 1.16524493, 0.49059086]]] * 6,
 })
 
+
 resnet101_dcn_inter3_backbone = resnet101_backbone.copy({
     'name': 'ResNet101_DCN_Interval3',
     # 'path': 'STMask_plus_base_kl_YTVIS2019.pth',
@@ -386,6 +387,19 @@ resnet50_dcn_inter2_backbone = resnet50_backbone.copy({
     'name': 'ResNet50_DCN_Interval3',
     'path': 'yolact_plus_resnet50_54.pth',
     'args': ([3, 4, 6, 3], [0, 4, 6, 3], 2),
+})
+
+resnet152_backbone = backbone_base.copy({
+    'name': 'ResNet152',
+    'path': 'resnet152-b121ed2d.pth',
+    'type': ResNetBackbone,
+    'args': ([3, 8, 36, 3],),
+    'transform': resnet_transform,
+})
+
+resnet152_dcn_inter3_backbone = resnet152_backbone.copy({
+    'name': 'ResNet152_DCN_Interval3',
+    'args': ([3, 8, 36, 3], [0, 8, 36, 3], 3),
 })
 
 darknet53_backbone = backbone_base.copy({
@@ -951,6 +965,16 @@ STMask_plus_resnet50_ali_OVIS_config = STMask_plus_resnet50_ali_config.copy({
     'classes': OVIS_CLASSES,
 })
 
+STMask_plus_resnet152_OVIS_config = STMask_plus_base_OVIS_config.copy({
+    'name': 'STMask_plus_resnet152_OVIS',
+    'backbone': resnet152_backbone.copy({
+        'selected_layers': list(range(1, 4)),
+        'pred_scales': STMask_base_config.backbone.pred_scales,
+        'pred_aspect_ratios': STMask_base_config.backbone.pred_aspect_ratios,
+    }),
+
+})
+
 
 STMask_plus_base_YTVIS2021_config = STMask_plus_base_config.copy({
     'name': 'STMask_plus_base_YTVIS2021',
@@ -1010,8 +1034,8 @@ STMask_plus_base_coco_config = STMask_plus_base_config.copy({
     'num_classes': len(coco2017_dataset.class_names) + 1,
 
     # Image Size
-    'min_size': 400,
-    'max_size': 550,
+    'min_size': 650,
+    'max_size': 700,
 
     # Training params
     'lr_steps': (18, 36, 45, 50),
@@ -1033,8 +1057,8 @@ STMask_plus_resnet50_coco_config = STMask_plus_resnet50_config.copy({
     'num_classes': len(coco2017_dataset.class_names) + 1,
 
     # Image Size
-    'min_size': 400,
-    'max_size': 550,
+    'min_size': 650,
+    'max_size': 700,
 
     # Training params
     'lr_steps': (18, 36, 45, 50),
@@ -1043,6 +1067,29 @@ STMask_plus_resnet50_coco_config = STMask_plus_resnet50_config.copy({
     'backbone': STMask_plus_resnet50_ada_config.backbone.copy({
         'path': 'resnet50-19c8e357.pth',
     }),
+
+    'train_track': False,
+})
+
+STMask_plus_resnet152_coco_config = STMask_plus_base_config.copy({
+    'name': 'STMask_plus_resnet152_coco',
+    'backbone': resnet152_backbone.copy({
+        'selected_layers': list(range(1, 4)),
+        'pred_scales': STMask_base_config.backbone.pred_scales,
+        'pred_aspect_ratios': STMask_base_config.backbone.pred_aspect_ratios,
+    }),
+
+    # Dataset stuff
+    'dataset': coco2017_dataset,
+    'num_classes': len(coco2017_dataset.class_names) + 1,
+
+    # Image Size
+    'min_size': 650,
+    'max_size': 700,
+
+    # Training params
+    'lr_steps': (18, 36, 45, 50),
+    'max_epoch': 54,
 
     'train_track': False,
 })
