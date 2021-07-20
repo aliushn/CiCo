@@ -7,7 +7,7 @@ from utils.augmentations import BaseTransform
 from layers.utils.output_utils import postprocess_ytbvis, undo_image_transformation
 from layers.visualization import draw_dotted_rectangle, get_color
 
-from datasets import get_dataset, prepare_data
+from datasets import get_dataset, prepare_data_vis, prepare_data_coco
 import mmcv
 import math
 import torch
@@ -48,8 +48,6 @@ def parse_args(argv=None):
                         help='Further restrict the number of predictions to parse')
     parser.add_argument('--cuda', default=True, type=str2bool,
                         help='Use cuda to evaulate model')
-    parser.add_argument('--fast_nms', default=True, type=str2bool,
-                        help='Whether to use a faster, but not entirely correct version of NMS.')
     parser.add_argument('--cross_class_nms', default=False, type=str2bool,
                         help='Whether compute NMS cross-class or per-class.')
     parser.add_argument('--display_single_mask', default=False, type=str2bool,
@@ -70,8 +68,6 @@ def parse_args(argv=None):
                         help='Display qualitative results instead of quantitative ones.')
     parser.add_argument('--shuffle', dest='shuffle', action='store_true',
                         help='Shuffles the images when displaying them. Doesn\'t have much of an effect when display is off though.')
-    parser.add_argument('--ap_data_file', default='results/ap_data.pkl', type=str,
-                        help='In quantitative mode, the file to save detections before calculating mAP.')
     parser.add_argument('--resume', dest='resume', action='store_true',
                         help='If display not set, this resumes mAP calculations from the ap_data_file.')
     parser.add_argument('--max_images', default=-1, type=int,
@@ -148,22 +144,19 @@ def prep_display(dets_out, img, img_ids=None, img_meta=None, undo_transform=True
     Note: If undo_transform=False then im_h and im_w are allowed to be None.
     -- display_model: 'train', 'test', 'None' means groundtruth results
     """
-
+    ori_h, ori_w, _ = img_meta['ori_shape']
+    img_h, img_w, _ = img_meta['img_shape']
     if undo_transform:
-        img_numpy = undo_image_transformation(img, img_meta)
+        img_numpy = undo_image_transformation(img, ori_h, ori_w, img_h, img_w)
         img_gpu = torch.Tensor(img_numpy).cuda()
     else:
         img_gpu = img / 255.0
-
-    ori_h, ori_w, _ = img_meta['ori_shape']
-    img_h, img_w, _ = img_meta['img_shape']
 
     with timer.env('Postprocess'):
         cfg.mask_proto_debug = args.mask_proto_debug
         # cfg.preserve_aspect_ratio = False
         dets_out = postprocess_ytbvis(dets_out, img_meta, display_mask=True,
                                       visualize_lincomb=args.display_lincomb,
-                                      crop_masks=args.crop,
                                       # score_threshold=cfg.eval_conf_thresh,
                                       img_ids=img_ids,
                                       mask_det_file=args.mask_det_file)
@@ -307,15 +300,14 @@ def prep_display_single(dets_out, img, img_ids=None, img_meta=None, undo_transfo
     Note: If undo_transform=False then im_h and im_w are allowed to be None.
     -- display_model: 'train', 'test', 'None' means groundtruth results
     """
+    ori_h, ori_w, _ = img_meta['ori_shape']
+    img_h, img_w, _ = img_meta['img_shape']
 
     if undo_transform:
-        img_numpy = undo_image_transformation(img, img_meta)
+        img_numpy = undo_image_transformation(img, ori_h, ori_w, img_h, img_w)
         img_gpu = torch.Tensor(img_numpy).cuda()
     else:
         img_gpu = img / 255.0
-
-    ori_h, ori_w, _ = img_meta['ori_shape']
-    img_h, img_w, _ = img_meta['img_shape']
 
     with timer.env('Postprocess'):
         cfg.mask_proto_debug = args.mask_proto_debug
@@ -494,7 +486,7 @@ def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None
         for it, data_batch in enumerate(data_loader):
             timer.reset()
             with timer.env('Load Data'):
-                images, images_meta = prepare_data(data_batch, devices=device, train_mode=False)
+                images, images_meta = prepare_data_vis(data_batch, devices=device, train_mode=False)
 
             with timer.env('Network Extra'):
                 preds, _, _ = net(images, img_meta=images_meta)
@@ -543,10 +535,6 @@ def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None
 
 
 def evaluate(net: STMask, dataset):
-    if cfg.use_temporal_info:
-        net.Detect_TF.use_fast_nms = args.fast_nms
-    else:
-        net.detect.use_fast_nms = args.fast_nms
     cfg.mask_proto_debug = args.mask_proto_debug
 
     frame_times = MovingAverage()
@@ -568,7 +556,7 @@ def evaluate(net: STMask, dataset):
         for it, data_batch in enumerate(data_loader):
 
             with timer.env('Load Data'):
-                images, images_meta = prepare_data(data_batch, train_mode=False, devices=torch.cuda.current_device())
+                images, images_meta = prepare_data_vis(data_batch, train_mode=False, devices=torch.cuda.current_device())
 
             # if images_meta[0]['video_id'] > 135:
             #     print(images_meta[0]['video_id'])

@@ -1,6 +1,6 @@
 import copy
 from collections import Sequence
-import os
+from typing import Any, List, Tuple
 
 import mmcv
 from mmcv.runner import obj_from_dict
@@ -181,45 +181,58 @@ def detection_collate_coco(batch):
     return imgs, targets, masks, num_crowds
 
 
-def prepare_data(data_batch, devices, train_type='vis', train_mode=True):
+def prepare_data_vis(data_batch, devices, train_mode=True):
     if train_mode:
-        if train_type == 'vis':
-            with torch.no_grad():
-                images = torch.cat(data_batch['img']).cuda(devices)
-                bs = images.size(0)
-                bboxes_list = [sum(data_batch['bboxes'], [])[i].cuda(devices) for i in range(bs)]
-                labels_list = [sum(data_batch['labels'], [])[i].cuda(devices) for i in range(bs)]
-                masks_list = [sum(data_batch['masks'], [])[i].cuda(devices) for i in range(bs)]
-                ids_list = [sum(data_batch['ids'], [])[i].cuda(devices) for i in range(bs)]
-                images_meta_list = data_batch['img_meta']
+        with torch.no_grad():
+            images = torch.cat(data_batch['img']).cuda(devices)
+            bs = images.size(0)
+            bboxes_list = [sum(data_batch['bboxes'], [])[i].cuda(devices) for i in range(bs)]
+            labels_list = [sum(data_batch['labels'], [])[i].cuda(devices) for i in range(bs)]
+            masks_list = [sum(data_batch['masks'], [])[i].cuda(devices) for i in range(bs)]
+            ids_list = [sum(data_batch['ids'], [])[i].cuda(devices) for i in range(bs)]
+            images_meta_list = data_batch['img_meta']
 
-                return images, bboxes_list, labels_list, masks_list, ids_list, images_meta_list
-        else:
-            with torch.no_grad():
-                imgs = torch.stack(data_batch[0]).cuda(devices)
-                bboxes_list = [target[:, :4].cuda(devices) for target in data_batch[1]]
-                labels_list = [target[:, -1].data.long().cuda(devices) for target in data_batch[1]]
-                masks_list = [mask.cuda(devices) for mask in data_batch[2]]
-                num_crowds = data_batch[3]
-
-                return imgs, bboxes_list, labels_list, masks_list, num_crowds
+            return images, bboxes_list, labels_list, masks_list, ids_list, images_meta_list
 
     else:
         # [0] is downsample image [1, 3, 384, 640], [1] is original image [1, 3, 736, 1280]
         images = torch.stack([img[0].data for img in data_batch['img']], dim=0)
         images_meta = [img_meta[0].data for img_meta in data_batch['img_meta']]
-        # if 'ref_imgs' in data_batch.keys():
-        #     ref_images = torch.stack([ref_img[0].data for ref_img in data_batch['ref_imgs']], dim=0)
-        #     ref_images_meta = [ref_img_meta[0].data for ref_img_meta in data_batch['ref_img_metas']]
-        # else:
-        #     ref_images = None
-        #     ref_images_meta = None
 
         images = gradinator(images.cuda(devices))
         images_meta = images_meta
-        # if ref_images is not None:
-        #     ref_images = gradinator(ref_images.cuda())
-        #     ref_images_meta = ref_images_meta
+
+        return images, images_meta
+
+
+def prepare_data_coco(data_batch, devices, train_mode=True):
+    if train_mode:
+        with torch.no_grad():
+            imgs = ImageList_from_tensors(data_batch[0], size_divisibility=32).cuda(devices)
+            image_sizes_ori = torch.tensor([[im.shape[-2], im.shape[-1]] for im in data_batch[0]])
+            h, w = imgs.size()[-2:]
+            bboxes_list = []
+            for target in data_batch[1]:
+                target[:, 0:4:2] /= w
+                target[:, 1:4:2] /= h
+                bboxes_list.append(target[:, :4].cuda(devices))
+
+            labels_list = [target[:, -1].data.long().cuda(devices) for target in data_batch[1]]
+            masks_list = []
+            for i, mask in enumerate(data_batch[2]):
+                padding_size = [0, w - image_sizes_ori[i, 1], 0, h - image_sizes_ori[i, 0]]
+                masks_list.append(F.pad(mask, padding_size, value=0).cuda(devices))
+            num_crowds = data_batch[3]
+
+            return imgs, bboxes_list, labels_list, masks_list, num_crowds
+
+    else:
+        # [0] is downsample image [1, 3, 384, 640], [1] is original image [1, 3, 736, 1280]
+        images = torch.stack([img[0].data for img in data_batch['img']], dim=0)
+        images_meta = [img_meta[0].data for img_meta in data_batch['img_meta']]
+
+        images = gradinator(images.cuda(devices))
+        images_meta = images_meta
 
         return images, images_meta
 
@@ -227,6 +240,53 @@ def prepare_data(data_batch, devices, train_type='vis', train_mode=True):
 def gradinator(x):
     x.requires_grad = False
     return x
+
+
+# modify from detectron2.structures.image_list
+def ImageList_from_tensors(
+        tensors: List[torch.Tensor], size_divisibility: int = 0, pad_value: float = 0.0):
+    """
+    Args:
+        tensors: a tuple or list of `torch.Tensor`, each of shape (Hi, Wi) or
+            (C_1, ..., C_K, Hi, Wi) where K >= 1. The Tensors will be padded
+            to the same shape with `pad_value`.
+        size_divisibility (int): If `size_divisibility > 0`, add padding to ensure
+            the common height and width is divisible by `size_divisibility`.
+            This depends on the model and many models need a divisibility of 32.
+        pad_value (float): value to pad
+
+    Returns:
+        an `ImageList`.
+    """
+    assert len(tensors) > 0
+    assert isinstance(tensors, (tuple, list))
+    for t in tensors:
+        assert isinstance(t, torch.Tensor), type(t)
+        assert t.shape[:-2] == tensors[0].shape[:-2], t.shape
+
+    image_sizes = torch.tensor([[im.shape[-2], im.shape[-1]] for im in tensors])
+    max_size, _ = image_sizes.max(0)
+    max_size_h, max_size_w = max_size[0], max_size[1]
+
+    if size_divisibility > 1:
+        # the last two dims are H,W, both subject to divisibility requirement
+        max_size_h = (max_size_h + (size_divisibility - 1)) // size_divisibility * size_divisibility
+        max_size_w = (max_size_w + (size_divisibility - 1)) // size_divisibility * size_divisibility
+
+    if len(tensors) == 1:
+        # This seems slightly (2%) faster.
+        # TODO: check whether it's faster for multiple images as well
+        image_size = image_sizes[0]
+        padding_size = [0, max_size_w - image_size[1], 0, max_size_h - image_size[0]]
+        batched_imgs = F.pad(tensors[0], padding_size, value=pad_value).unsqueeze_(0)
+    else:
+        # max_size can be a tensor in tracing mode, therefore convert to list
+        batch_shape = [len(tensors)] + list(tensors[0].shape[:-2]) + [max_size_h, max_size_w]
+        batched_imgs = tensors[0].new_full(batch_shape, pad_value)
+        for img, pad_img in zip(tensors, batched_imgs):
+            pad_img[..., : img.shape[-2], : img.shape[-1]].copy_(img)
+
+    return batched_imgs.contiguous()
 
 
 def enforce_size(img, targets, masks, num_crowds, new_w, new_h):

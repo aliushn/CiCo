@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import types
 from numpy import random
+import torch.nn.functional as F
 
 from datasets import cfg, MEANS, STD
 
@@ -71,7 +72,6 @@ class ConvertFromInts(object):
         return image.astype(np.float32), masks, boxes, labels
 
 
-
 class ToAbsoluteCoords(object):
     def __call__(self, image, masks=None, boxes=None, labels=None):
         height, width, channels = image.shape
@@ -101,29 +101,34 @@ class Pad(object):
 
     Note: this expects im_w <= width and im_h <= height
     """
-    def __init__(self, width, height, mean=MEANS, pad_gt=True):
+    def __init__(self, mean=MEANS, pad_gt=True):
         self.mean = mean
-        self.width = width
-        self.height = height
+        self.max_size = cfg.max_size
+        self.MS_train = cfg.MS_train
         self.pad_gt = pad_gt
 
     def __call__(self, image, masks, boxes=None, labels=None):
         im_h, im_w, depth = image.shape
 
-        expand_image = np.zeros(
-            (self.height, self.width, depth),
-            dtype=image.dtype)
-        expand_image[:, :, :] = self.mean
-        expand_image[:im_h, :im_w] = image
+        if not self.MS_train:
+            width, height = self.max_size, self.max_size
 
-        if self.pad_gt:
-            expand_masks = np.zeros(
-                (masks.shape[0], self.height, self.width),
-                dtype=masks.dtype)
-            expand_masks[:,:im_h,:im_w] = masks
-            masks = expand_masks
+            expand_image = np.zeros(
+                (height, width, depth),
+                dtype=image.dtype)
+            expand_image[:, :, :] = self.mean
+            expand_image[:im_h, :im_w] = image
+            image = expand_image
 
-        return expand_image, masks, boxes, labels
+            if self.pad_gt:
+                expand_masks = np.zeros(
+                    (masks.shape[0], self.height, self.width),
+                    dtype=masks.dtype)
+                expand_masks[:,:im_h,:im_w] = masks
+                masks = expand_masks
+
+        return image, masks, boxes, labels
+
 
 class Resize(object):
     """
@@ -149,18 +154,31 @@ class Resize(object):
         return int(width), int(height)
 
     def __init__(self, resize_gt=True):
+        self.divisibility = 32
         self.resize_gt = resize_gt
+        self.MS_train = cfg.MS_train
         self.min_size = cfg.min_size
         self.max_size = cfg.max_size
         self.preserve_aspect_ratio = cfg.preserve_aspect_ratio
 
     def __call__(self, image, masks, boxes, labels=None):
         img_h, img_w, _ = image.shape
-        
-        if self.preserve_aspect_ratio:
-            width, height = Resize.faster_rcnn_scale(img_w, img_h, self.min_size, self.max_size)
+
+        if self.MS_train:
+            ms_size = np.random.random_integers(self.min_size, self.max_size)
+            ms_size = int((ms_size + (self.divisibility - 1)) // self.divisibility * self.divisibility)
+            if self.preserve_aspect_ratio:
+                if img_w > img_h:
+                    width, height = ms_size, int(img_h * (ms_size / img_w))
+                else:
+                    width, height = int(img_w * (ms_size / img_h)), ms_size
+            else:
+                width, height = ms_size, ms_size
         else:
-            width, height = self.max_size, self.max_size
+            if self.preserve_aspect_ratio:
+                width, height = Resize.faster_rcnn_scale(img_w, img_h, self.min_size, self.max_size)
+            else:
+                width, height = self.max_size, self.max_size
 
         image = cv2.resize(image, (width, height))
         
@@ -176,7 +194,7 @@ class Resize(object):
                 masks = masks.transpose((2, 0, 1))
 
             # Scale bounding boxes (which are currently absolute coordinates)
-            boxes[:, [0, 2]] *= (width  / img_w)
+            boxes[:, [0, 2]] *= (width / img_w)
             boxes[:, [1, 3]] *= (height / img_h)
 
         return image, masks, boxes, labels
@@ -432,7 +450,7 @@ class Expand(object):
             (masks.shape[0], int(height*ratio), int(width*ratio)),
             dtype=masks.dtype)
         expand_masks[:,int(top):int(top + height),
-                       int(left):int(left + width)] = masks
+                     int(left):int(left + width)] = masks
         masks = expand_masks
 
         boxes = boxes.copy()
@@ -526,6 +544,7 @@ class PhotometricDistort(object):
         im, masks, boxes, labels = distort(im, masks, boxes, labels)
         return self.rand_light_noise(im, masks, boxes, labels)
 
+
 class PrepareMasks(object):
     """
     Prepares the gt masks for use_gt_bboxes by cropping with the gt box
@@ -564,6 +583,7 @@ class PrepareMasks(object):
         new_masks[new_masks <= 0.5] = 0
 
         return image, new_masks, boxes, labels
+
 
 class BackboneTransform(object):
     """
@@ -612,7 +632,6 @@ class BaseTransform(object):
     def __call__(self, img, masks=None, boxes=None, labels=None):
         return self.augment(img, masks, boxes, labels)
 
-import torch.nn.functional as F
 
 class FastBaseTransform(torch.nn.Module):
     """
@@ -654,12 +673,14 @@ class FastBaseTransform(torch.nn.Module):
         # Return value is in channel order [n, c, h, w] and RGB
         return img
 
+
 def do_nothing(img=None, masks=None, boxes=None, labels=None):
     return img, masks, boxes, labels
 
 
 def enable_if(condition, obj):
     return obj if condition else do_nothing
+
 
 class SSDAugmentation(object):
     """ Transform to be used when training. """
@@ -675,9 +696,8 @@ class SSDAugmentation(object):
             enable_if(cfg.augment_random_flip, RandomFlip()),
             enable_if(cfg.augment_random_flip, RandomRot90()),
             Resize(),
-            Pad(cfg.max_size, cfg.max_size, mean),
-            ToPercentCoords(),
-            PrepareMasks(cfg.mask_size, cfg.use_gt_bboxes),
+            Pad(mean),
+            # ToPercentCoords(),
             BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')
         ])
 

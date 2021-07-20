@@ -5,8 +5,9 @@ import numpy as np
 from collections import defaultdict
 
 from datasets.config import cfg
-from layers.modules import PredictionModule_FC, make_net, FPN, FastMaskIoUNet, TemporalNet
+from layers.modules import PredictionModule_FC, PredictionModule, make_net, FPN, BiFPN, TemporalNet, DynamicMaskHead
 from layers.functions import Detect, Detect_TF, Track, generate_candidate, Track_TF, Track_TF_Clip
+from layers.utils import aligned_bilinear
 from backbone import construct_backbone
 from utils import timer
 
@@ -31,39 +32,35 @@ class STMask(nn.Module):
         super().__init__()
 
         self.backbone = construct_backbone(cfg.backbone)
-
-        # Compute mask_dim here and add it back to the config. Make sure Yolact's constructor is called early!
-        if cfg.mask_proto_use_grid:
-            self.grid = torch.Tensor(np.load(cfg.mask_proto_grid_file))
-            self.num_grids = self.grid.size(0)
-        else:
-            self.num_grids = 0
-
         self.proto_src = cfg.mask_proto_src
-        self.interpolation_mode = cfg.fpn.interpolation_mode
 
         if self.proto_src is None:
             in_channels = 3
         elif cfg.fpn is not None:
             in_channels = cfg.fpn.num_features
         else:
-            in_channels = self.backbone.channels[self.proto_src]
-        in_channels += self.num_grids
+            in_channels = self.backbone.channels[self.proto_src[0]]
+
+        if self.proto_src is not None:
+            self.mask_refine = nn.ModuleList([nn.Sequential(*[
+                nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+                nn.BatchNorm2d(in_channels),
+                nn.ReLU(inplace=True)
+            ]) for _ in range(len(self.proto_src))])
 
         # The include_last_relu=false here is because we might want to change it to another function
-        self.proto_net, proto_channles = make_net(in_channels, cfg.mask_proto_net, include_last_relu=True)
+        self.proto_net, proto_channles = make_net(in_channels, cfg.mask_proto_net, include_bn=True, include_last_relu=True)
         proto_arch = [(proto_channles, 3, {'padding': 1})] + [(cfg.mask_dim, 1, {})]
-        self.proto_conv, cfg.mask_dim = make_net(proto_channles, proto_arch, include_last_relu=False)
-
-        if cfg.mask_proto_bias:
-            cfg.mask_dim += 1
+        self.proto_conv, cfg.mask_dim = make_net(proto_channles, proto_arch, include_bn=True, include_last_relu=False)
+        if cfg.use_dynamic_mask:
+            self.DynamicMaskHead = DynamicMaskHead()
 
         if cfg.train_track:
             track_arch = [(proto_channles, 3, {'padding': 1})] + [(cfg.track_dim, 1, {})]
-            self.track_conv, _ = make_net(proto_channles, track_arch, include_last_relu=False)
+            self.track_conv, _ = make_net(proto_channles, track_arch, include_bn=True, include_last_relu=False)
         if cfg.use_semantic_segmentation_loss:
             sem_seg_head = [(proto_channles, 3, {'padding': 1})] + [(cfg.num_classes, 1, {})]
-            self.semantic_seg_conv, _ = make_net(proto_channles, sem_seg_head, include_last_relu=False)
+            self.semantic_seg_conv, _ = make_net(proto_channles, sem_seg_head, include_bn=True, include_last_relu=False)
 
         self.selected_layers = cfg.backbone.selected_layers
         self.pred_scales = cfg.backbone.pred_scales
@@ -74,13 +71,11 @@ class STMask(nn.Module):
         if cfg.fpn is not None:
             # Some hacky rewiring to accomodate the FPN
             self.fpn = FPN([src_channels[i] for i in self.selected_layers])
-
-            if cfg.backbone_C2_as_features:
-                self.selected_layers = list(range(1, len(self.selected_layers) + cfg.fpn.num_downsample))
-                src_channels = [cfg.fpn.num_features] * (len(self.selected_layers) + 1)
-            else:
-                self.selected_layers = list(range(len(self.selected_layers) + cfg.fpn.num_downsample))
-                src_channels = [cfg.fpn.num_features] * len(self.selected_layers)
+            self.selected_layers = list(range(len(self.selected_layers) + cfg.fpn.num_downsample))
+            src_channels = [cfg.fpn.num_features] * len(self.selected_layers)
+            if cfg.use_bifpn:
+                self.bifpn = nn.Sequential(*[BiFPN(cfg.fpn.num_features)
+                                             for _ in range(cfg.num_bifpn)])
 
         # prediction layers for loc, conf, mask
         self.prediction_layers = nn.ModuleList()
@@ -91,11 +86,18 @@ class STMask(nn.Module):
             if cfg.share_prediction_module and idx > 0:
                 parent = self.prediction_layers[0]
 
-            pred = PredictionModule_FC(src_channels[layer_idx], src_channels[layer_idx],
-                                       deform_groups=1,
-                                       pred_aspect_ratios=self.pred_aspect_ratios[idx],
-                                       pred_scales=self.pred_scales[idx],
-                                       parent=parent)
+            if cfg.use_feature_calibration:
+                pred = PredictionModule_FC(src_channels[layer_idx], src_channels[layer_idx],
+                                           deform_groups=1,
+                                           pred_aspect_ratios=self.pred_aspect_ratios[idx],
+                                           pred_scales=self.pred_scales[idx],
+                                           parent=parent)
+            else:
+                pred = PredictionModule(src_channels[layer_idx], src_channels[layer_idx],
+                                        deform_groups=1,
+                                        pred_aspect_ratios=self.pred_aspect_ratios[idx],
+                                        pred_scales=self.pred_scales[idx],
+                                        parent=parent)
 
             self.prediction_layers.append(pred)
 
@@ -114,11 +116,6 @@ class STMask(nn.Module):
             if cfg.temporal_fusion_module:
                 corr_channels = 2*in_channels + cfg.correlation_patch_size**2
                 self.TemporalNet = TemporalNet(corr_channels, cfg.mask_dim)
-            elif cfg.use_FEELVOS:
-                # using FEELVOS, VOS strategy, to track instances from previous to current frame
-                VOS_in_channels = in_channels
-                self.VOS_head, _ = make_net(VOS_in_channels, cfg.VOS_head, include_last_relu=False)
-                self.VOS_attention = nn.Conv2d(in_channels, 1, kernel_size=3, padding=1)
 
         else:
             self.detect = Detect(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k, conf_thresh=cfg.nms_conf_thresh,
@@ -126,12 +123,6 @@ class STMask(nn.Module):
 
             if cfg.train_track:
                 self.Track = Track()
-
-        # Extra parameters for the extra losses
-        if cfg.use_class_existence_loss:
-            # This comes from the smallest layer selected
-            # Also note that cfg.num_classes includes background
-            self.class_existence_fc = nn.Linear(src_channels[-1], cfg.num_classes - 1)
 
         self.candidate_clip = []
         self.img_meta_clip = []
@@ -148,9 +139,6 @@ class STMask(nn.Module):
 
         # For backward compatability, remove these (the new variable is called layers)
         for key in list(state_dict.keys()):
-            if key.startswith('backbone.layer') and not key.startswith('backbone.layers'):
-                del state_dict[key]
-
             # Also for backward compatibility with v1.0 weights, do this check
             if key.startswith('fpn.downsample_layers.'):
                 if cfg.fpn is not None and int(key.split('.')[2]) >= cfg.fpn.num_downsample:
@@ -164,8 +152,7 @@ class STMask(nn.Module):
         print('layers in current model but not in pre-trained model:', diff_layers2)
 
         state_dict = {k: v for k, v in state_dict.items() if k in model_dict}
-        model_dict.update(state_dict)
-        self.load_state_dict(model_dict)
+        self.load_state_dict(state_dict, strict=True)
 
     def init_weights_coco(self, backbone_path, local_rank=1):
         """ Initialize weights for training. """
@@ -193,14 +180,13 @@ class STMask(nn.Module):
                 if 'weight' in k:
                     nn.init.xavier_uniform_(model_dict[k])
                 elif 'bias' in k:
-                    if cfg.use_sigmoid_focal_loss and 'conf_layer' in k:
-                        data0 = -torch.tensor(cfg.focal_loss_init_pi / (1 - cfg.focal_loss_init_pi)).log()
-                        data1 = -torch.tensor((1 - cfg.focal_loss_init_pi) / cfg.focal_loss_init_pi).log()
-                        model_dict[k] = torch.cat([data0.repeat(self.num_priors), data1.repeat((cfg.num_classes-1)*self.num_priors)])
+                    if 'conf_layer' in k:
+                        data = -torch.tensor((1 - cfg.focal_loss_init_pi) / cfg.focal_loss_init_pi).log()
+                        model_dict[k] = data.repeat(cfg.num_classes * self.num_priors)
                     else:
                         model_dict[k].zero_()
 
-        self.load_state_dict(model_dict)
+        self.load_state_dict(model_dict, strict=True)
 
     def init_weights(self, backbone_path, local_rank=1):
         """ Initialize weights for training. """
@@ -234,28 +220,12 @@ class STMask(nn.Module):
                             and all_in(conv_constants, module.__dict__['_constants_set']))
 
             is_conv_layer = isinstance(module, nn.Conv2d) or is_script_conv
-
             if is_conv_layer and module not in self.backbone.backbone_modules:
                 nn.init.xavier_uniform_(module.weight.data)
 
                 if module.bias is not None:
-                    if cfg.use_focal_loss and 'conf_layer' in name:
-                        if not cfg.use_sigmoid_focal_loss:
-                            # Initialize the last layer as in the focal loss paper.
-                            # Because we use softmax and not sigmoid, I had to derive an alternate expression
-                            # on a notecard. Define pi to be the probability of outputting a foreground detection.
-                            # Then let z = sum(exp(x)) - exp(x_0). Finally let c be the number of foreground classes.
-                            # Chugging through the math, this gives us
-                            #   x_0 = log(z * (1 - pi) / pi)    where 0 is the background class
-                            #   x_i = log(z / c)                for all i > 0
-                            # For simplicity (and because we have a degree of freedom here), set z = 1. Then we have
-                            #   x_0 =  log((1 - pi) / pi)       note: don't split up the log for numerical stability
-                            #   x_i = -log(c)                   for all i > 0
-                            module.bias.data[0] = np.log((1 - cfg.focal_loss_init_pi) / cfg.focal_loss_init_pi)
-                            module.bias.data[1:] = -np.log(module.bias.size(0) - 1)
-                        else:
-                            module.bias.data[0] = -np.log(cfg.focal_loss_init_pi / (1 - cfg.focal_loss_init_pi))
-                            module.bias.data[1:] = -np.log((1 - cfg.focal_loss_init_pi) / cfg.focal_loss_init_pi)
+                    if 'conf_layer' in name:
+                        module.bias.data[0:] = - np.log((1 - cfg.focal_loss_init_pi) / cfg.focal_loss_init_pi)
                     else:
                         module.bias.data.zero_()
 
@@ -273,17 +243,25 @@ class STMask(nn.Module):
                 # Use backbone.selected_layers because we overwrote self.selected_layers
                 outs = [bb_outs[i] for i in cfg.backbone.selected_layers]
                 fpn_outs = self.fpn(outs)
+                if cfg.use_bifpn:
+                    fpn_outs = self.bifpn(fpn_outs)
 
         if cfg.eval_mask_branch:
             with timer.env('proto '):
                 if self.proto_src is None:
                     proto_x = x
                 else:
-                    # h, w = bb_outs[self.proto_src].size()[2:]
-                    # p3_upsample = F.interpolate(fpn_outs[self.proto_src], size=(h, w), mode=self.interpolation_mode,
-                    #                             align_corners=False)
-                    # proto_x = p3_upsample # + bb_outs[self.proto_src]
-                    proto_x = fpn_outs[self.proto_src]
+                    for src_i, src in enumerate(self.proto_src):
+                        if src_i == 0:
+                            proto_x = self.mask_refine[src_i](fpn_outs[src])
+                        else:
+                            proto_x_p = self.mask_refine[src_i](fpn_outs[src])
+                            target_h, target_w = proto_x.size()[2:]
+                            h, w = proto_x_p.size()[2:]
+                            assert target_h % h == 0 and target_w % w == 0
+                            factor = target_h // h
+                            proto_x_p = aligned_bilinear(proto_x_p, factor)
+                            proto_x = proto_x + proto_x_p
 
                 proto_out_ori = self.proto_net(proto_x)
                 proto_dict = self.proto_conv(proto_out_ori)
@@ -293,13 +271,8 @@ class STMask(nn.Module):
                 # Move the features last so the multiplication is easy
                 proto_dict = proto_dict.permute(0, 2, 3, 1).contiguous()
 
-                if cfg.mask_proto_bias:
-                    bias_shape = [x for x in proto_dict.size()]
-                    bias_shape[1] = 1
-                    proto_dict = torch.cat([proto_dict, torch.ones(*bias_shape)], 1)
-
         with timer.env('pred_heads'):
-            pred_outs = {'mask_coeff': [], 'priors': []}
+            pred_outs = {'mask_coeff': [], 'priors': [], 'prior_levels': []}
 
             if cfg.train_boxes:
                 pred_outs['loc'] = []
@@ -319,13 +292,10 @@ class STMask(nn.Module):
                 if cfg.share_prediction_module and pred_layer is not self.prediction_layers[0]:
                     pred_layer.parent = [self.prediction_layers[0]]
 
-                p = pred_layer(pred_x)
+                p = pred_layer(pred_x, idx)
 
                 for k, v in p.items():
                     pred_outs[k].append(v)  # [batch_size, h*w*anchors, dim]
-
-                if cfg.backbone_C2_as_features:
-                    idx -= 1
 
             for k, v in pred_outs.items():
                 pred_outs[k] = torch.cat(v, 1)
@@ -381,12 +351,9 @@ class STMask(nn.Module):
                 # calculate correlation map
                 pred_outs['fpn_feat'] = fpn_outs[self.correlation_selected_layer]
 
-            # For the extra loss functions
-            if cfg.use_class_existence_loss:
-                pred_outs['classes'] = self.class_existence_fc(fpn_outs[-1].mean(dim=(2, 3)))
-
             # for nn.DataParallel
             pred_outs['priors'] = pred_outs['priors'].repeat(batch_size, 1, 1)
+            pred_outs['prior_levels'] = pred_outs['prior_levels'].repeat(batch_size, 1)
 
             return pred_outs
         else:
@@ -394,10 +361,10 @@ class STMask(nn.Module):
             fpn_outs, pred_outs = self.forward_single(x)
 
             if cfg.train_class:
-                pred_outs['conf'] = F.softmax(pred_outs['conf'], -1)
+                pred_outs['conf'] = pred_outs['conf'].sigmoid()
             else:
-                pred_outs['stuff'] = torch.sigmoid(pred_outs['stuff'])
-                pred_outs['sem_seg'] = F.softmax(pred_outs['sem_seg'], dim=-1)
+                pred_outs['stuff'] = pred_outs['stuff'].sigmoid()
+                pred_outs['sem_seg'] = pred_outs['sem_seg'].sigmoid()
 
             # track instances frame-by-frame
             if cfg.train_track and cfg.use_temporal_info:
@@ -405,7 +372,7 @@ class STMask(nn.Module):
                 # we only use the bbox features in the P3 layer
                 pred_outs['fpn_feat'] = fpn_outs[1]
                 candidate = generate_candidate(pred_outs)
-                candidate_after_NMS = self.Detect_TF(candidate)
+                candidate_after_NMS = self.Detect_TF(self, candidate)
 
                 if cfg.eval_frames_of_clip == 1:
                     # two-frames
@@ -468,7 +435,7 @@ class STMask(nn.Module):
 
             else:
                 # detect instances by NMS for each single frame on COCO datasets
-                pred_outs_after_NMS = self.detect(pred_outs, self)
+                pred_outs_after_NMS = self.detect(self, pred_outs)
 
                 if cfg.train_track:
                     pred_outs_after_NMS = self.Track(pred_outs_after_NMS, img_meta)

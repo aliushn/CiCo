@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from layers.utils import decode, jaccard, mask_iou, crop, generate_mask, compute_DIoU, center_size
+from layers.utils import decode, jaccard, mask_iou, crop, generate_mask, compute_DIoU, center_size, point_form
 from utils import timer
 
 from datasets import cfg
@@ -9,8 +9,6 @@ import numpy as np
 
 import pyximport
 pyximport.install(setup_args={"include_dirs": np.get_include()}, reload_support=True)
-
-from utils.cython_nms import nms as cnms
 
 
 class Detect(object):
@@ -32,9 +30,8 @@ class Detect(object):
         self.conf_thresh = conf_thresh
         
         self.use_cross_class_nms = True
-        self.use_fast_nms = True
 
-    def __call__(self, predictions, net):
+    def __call__(self, net, predictions):
         """
         Args:
              loc_data: (tensor) Loc preds from loc layers
@@ -55,7 +52,7 @@ class Detect(object):
             Note that the outputs are sorted only if cross_class_nms is False
         """
 
-        loc_data   = predictions['loc']
+        loc_data = predictions['loc']
         # [bs, h*w*a, n_class] or [bs, h*w*a, 1]
         scores = predictions['conf'] if cfg.train_class else predictions['stuff']
         sem_data = predictions['sem_seg'] if cfg.use_semantic_segmentation_loss else None  # [bs, h, w, num_class]
@@ -77,7 +74,7 @@ class Detect(object):
                 centerness_data_cur = centerness_data[batch_idx] if centerness_data is not None else None
                 sem_data_cur = sem_data[batch_idx] if sem_data is not None else None
 
-                result = self.detect(scores[batch_idx], decoded_boxes, centerness_data_cur,
+                result = self.detect(net, scores[batch_idx], decoded_boxes, centerness_data_cur,
                                      mask_data[batch_idx], proto_data[batch_idx], sem_data_cur)
 
                 for k in predictions.keys():
@@ -88,16 +85,15 @@ class Detect(object):
 
         return results
 
-    def detect(self, scores, decoded_boxes, center_data, mask_data, proto_data, sem_data):
+    def detect(self, net, scores, decoded_boxes, center_data, mask_data, proto_data, sem_data):
         """ Perform nms for only the max scoring class that isn't background (class 0) """
         assert cfg.train_class or cfg.use_semantic_segmentation_loss, \
             'The training process should include train_class or train_stuff.'
 
         if cfg.train_class:
-            cur_scores = scores[1:, :]
-            conf_scores, _ = torch.max(cur_scores, dim=0)
+            conf_scores, _ = torch.max(scores, dim=0)
             keep = conf_scores > self.conf_thresh
-            scores = cur_scores[:, keep]
+            scores = scores[:, keep]
         else:
             keep = scores > self.conf_thresh
             scores = scores[keep]
@@ -113,20 +109,25 @@ class Detect(object):
                              'mask': torch.Tensor()}
 
         else:
-
-            if self.use_fast_nms:
-                if self.use_cross_class_nms:
-                    out_after_NMS = self.cc_fast_nms(boxes, masks_coeff, proto_data, scores, sem_data, center_data,
-                                                     self.nms_thresh, self.top_k)
+            if cfg.use_DIoU:
+                if cfg.nms_as_miou:
+                    # (0.5 + 0.5 * 0.8) * nms_thresh
+                    nms_thresh = 0.9 * self.nms_thresh
                 else:
-                    out_after_NMS = self.fast_nms(boxes, masks_coeff, proto_data, scores, sem_data,
-                                                  self.nms_thresh, self.top_k)
+                    nms_thresh = 0.8 * self.nms_thresh
             else:
-                out_after_NMS = self.traditional_nms(boxes, masks_coeff, scores, self.nms_thresh, self.conf_thresh)
+                nms_thresh = self.nms_thresh
+
+            if self.use_cross_class_nms:
+                out_after_NMS = self.cc_fast_nms(net, boxes, masks_coeff, proto_data, scores, sem_data, center_data,
+                                                 nms_thresh, self.top_k)
+            else:
+                out_after_NMS = self.fast_nms(net, boxes, masks_coeff, proto_data, scores, sem_data,
+                                              nms_thresh, self.top_k)
 
         return out_after_NMS
 
-    def cc_fast_nms(self, boxes, masks_coeff, proto_data, scores, sem_data, centerness_scores,
+    def cc_fast_nms(self, net, boxes, masks_coeff, proto_data, scores, sem_data, centerness_scores,
                     iou_threshold: float = 0.5, top_k: int = 100):
         if cfg.train_class:
             # Collapse all the classes into 1
@@ -135,7 +136,13 @@ class Detect(object):
         if centerness_scores is not None:
             scores = scores * centerness_scores
 
-        det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
+        if cfg.use_dynamic_mask:
+            det_masks_soft = net.DynamicMaskHead(proto_data.permute(2, 0, 1).unsqueeze(0), masks_coeff, boxes)
+            if cfg.mask_proto_crop:
+                _, pred_masks = crop(det_masks_soft.permute(1, 2, 0).contiguous(), boxes)
+                det_masks_soft = pred_masks.permute(2, 0, 1).contiguous()
+        else:
+            det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
 
         # if area_box / area_mask < 0.2 and score < 0.2, the box is likely to be wrong.
         h, w = det_masks_soft.size()[1:]
@@ -155,7 +162,10 @@ class Detect(object):
 
         # Compute the pairwise IoU between the boxes
         boxes_idx = boxes[idx]
-        iou = compute_DIoU(boxes_idx, boxes_idx)
+        if cfg.use_DIoU:
+            iou = compute_DIoU(boxes_idx, boxes_idx)
+        else:
+            iou = jaccard(boxes_idx, boxes_idx)
         if cfg.nms_as_miou:
             det_masks_idx = det_masks_soft[idx].gt(0.5).float()  # [n, h, w]
             m_iou = mask_iou(det_masks_idx, det_masks_idx)
@@ -216,10 +226,17 @@ class Detect(object):
         
         return idx_out, idx_out.size(0)
 
-    def fast_nms(self, boxes, masks_coeff, proto_data, scores, sem_data,
+    def fast_nms(self, net, boxes, masks_coeff, proto_data, scores, sem_data,
                  iou_threshold:float=0.5, top_k:int=100, second_threshold:bool=True):
 
-        det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
+        if cfg.use_dynamic_mask:
+            det_masks_soft = net.DynamicMaskHead(proto_data.permute(2, 0, 1).unsqueeze(0), masks_coeff, boxes)
+            if cfg.mask_proto_crop:
+                _, pred_masks = crop(det_masks_soft.permute(1, 2, 0).contiguous(), boxes)
+                det_masks_soft = pred_masks.permute(2, 0, 1).contiguous()
+        else:
+            det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
+
         det_masks = det_masks_soft.gt(0.5).float()
         mask_h, mask_w = det_masks.size()[1:]
 
@@ -237,18 +254,22 @@ class Detect(object):
             # classes = classes.view(-1) + 1
             # scores = max_miou.view(-1)
 
-        num_classes, num_dets = scores.size()
         scores, idx = scores.sort(1, descending=True)  # [num_classes, num_dets]
         idx = idx[:, :top_k].contiguous()
         scores = scores[:, :top_k]
+        num_dets = idx.size(1)
 
-        boxes = boxes[idx.view(-1), :].view(num_classes, num_dets, 4)
-        det_masks_soft = det_masks_soft[idx.view(-1)].view(num_classes, num_dets, mask_h, mask_w)
+        boxes = boxes[idx.view(-1), :].view(self.num_classes, num_dets, 4)
+        masks_coeff = masks_coeff[idx.view(-1), :].view(self.num_classes, num_dets, -1)
+        det_masks_soft = det_masks_soft[idx.view(-1)].view(self.num_classes, num_dets, mask_h, mask_w)
 
-        iou = jaccard(boxes, boxes)                  # [num_classes, num_dets, num_dets]
+        if cfg.use_DIoU:
+            iou = torch.stack([compute_DIoU(boxes[c], boxes[c]) for c in range(self.num_classes)], dim=0)
+        else:
+            iou = jaccard(boxes, boxes)                      # [num_classes, num_dets, num_dets]
         if cfg.nms_as_miou:
             det_masks = det_masks_soft.gt(0.5).float()
-            m_iou = mask_iou(det_masks, det_masks)   # [num_class, num_dets, num_dets]
+            m_iou = mask_iou(det_masks, det_masks)           # [num_class, num_dets, num_dets]
             iou = iou * 0.5 + m_iou * 0.5
 
         iou.triu_(diagonal=1)
@@ -266,13 +287,12 @@ class Detect(object):
             keep *= (scores > self.conf_thresh)
 
         # Assign each kept detection to its corresponding class
-        classes = torch.arange(num_classes, device=boxes.device)[:, None].expand_as(keep)
-        classes = classes[keep]
+        classes = torch.arange(self.num_classes, device=boxes.device)[:, None].expand_as(keep)[keep]
 
         boxes = boxes[keep]
         masks_coeff = masks_coeff[keep]
         scores = scores[keep]
-        masks = det_masks_soft[keep]
+        det_masks_soft = det_masks_soft[keep]
 
         # Only keep the top cfg.max_num_detections highest scores across all classes
         scores, idx = scores.sort(0, descending=True)
@@ -281,52 +301,9 @@ class Detect(object):
         classes = classes[idx] + 1
         boxes = boxes[idx]
         masks_coeff = masks_coeff[idx]
-        masks = masks[idx]
+        det_masks_soft = det_masks_soft[idx]
 
         out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': classes, 'score': scores,
                          'mask': det_masks_soft}
 
         return out_after_NMS
-
-    def traditional_nms(self, boxes, masks, scores, iou_threshold=0.5, conf_thresh=0.05):
-        num_classes = scores.size(0)
-
-        idx_lst = []
-        cls_lst = []
-        scr_lst = []
-
-        # Multiplying by max_size is necessary because of how cnms computes its area and intersections
-        boxes = boxes * cfg.max_size
-
-        for _cls in range(num_classes):
-            cls_scores = scores[_cls, :]
-            conf_mask = cls_scores > conf_thresh
-            idx = torch.arange(cls_scores.size(0), device=boxes.device)
-
-            cls_scores = cls_scores[conf_mask]
-            idx = idx[conf_mask]
-
-            if cls_scores.size(0) == 0:
-                continue
-            
-            preds = torch.cat([boxes[conf_mask], cls_scores[:, None]], dim=1).cpu().numpy()
-            keep = cnms(preds, iou_threshold)
-            keep = torch.Tensor(keep, device=boxes.device).long()
-
-            idx_lst.append(idx[keep])
-            cls_lst.append(keep * 0 + _cls)
-            scr_lst.append(cls_scores[keep])
-        
-        idx     = torch.cat(idx_lst, dim=0)
-        classes = torch.cat(cls_lst, dim=0)
-        scores  = torch.cat(scr_lst, dim=0)
-
-        scores, idx2 = scores.sort(0, descending=True)
-        idx2 = idx2[:cfg.max_num_detections]
-        scores = scores[:cfg.max_num_detections]
-
-        idx = idx[idx2]
-        classes = classes[idx2]
-
-        # Undo the multiplication above
-        return boxes[idx] / cfg.max_size, masks[idx], classes, scores

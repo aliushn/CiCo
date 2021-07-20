@@ -13,6 +13,7 @@ class Detect_TF(object):
     """
 
     # TODO: Refactor this whole class away. It needs to go.
+    # TODO: conf without background, using sigmoid() !!!! Important
 
     def __init__(self, num_classes, bkg_label, top_k, conf_thresh, nms_thresh):
         self.num_classes = num_classes
@@ -27,7 +28,7 @@ class Detect_TF(object):
         self.use_cross_class_nms = True
         self.use_fast_nms = True
 
-    def __call__(self, candidate):
+    def __call__(self, net, candidate):
         """
         Args:
             candidate: (tensor) Shape: Conf preds from conf layers
@@ -42,11 +43,11 @@ class Detect_TF(object):
         with timer.env('Detect'):
             result = []
             for i in range(len(candidate)):
-                result.append(self.detect(candidate[i]))
+                result.append(self.detect(net, candidate[i]))
 
         return result
 
-    def detect(self, candidate):
+    def detect(self, net, candidate):
         """ Perform nms for only the max scoring class that isn't background (class 0) """
 
         scores = candidate['conf'].t() if cfg.train_class else candidate['stuff'].view(-1)
@@ -63,12 +64,21 @@ class Detect_TF(object):
                 out_aft_nms['centerness'] = torch.Tensor()
 
         else:
-            if self.use_cross_class_nms:
-                out_aft_nms = self.cc_fast_nms(boxes, mask_coeff, proto_data, scores,
-                                               sem_data, centerness_scores, self.nms_thresh, self.top_k)
+            if cfg.use_DIoU:
+                if cfg.nms_as_miou:
+                    # (0.5 + 0.5 * 0.8) * nms_thresh
+                    nms_thresh = 0.9 * self.nms_thresh
+                else:
+                    nms_thresh = 0.8 * self.nms_thresh
             else:
-                out_aft_nms = self.fast_nms(boxes, mask_coeff, proto_data, scores, sem_data, centerness_scores,
-                                            self.nms_thresh, self.top_k)
+                nms_thresh = self.nms_thresh
+
+            if self.use_cross_class_nms:
+                out_aft_nms = self.cc_fast_nms(net, boxes, mask_coeff, proto_data, scores,
+                                               sem_data, centerness_scores, nms_thresh, self.top_k)
+            else:
+                out_aft_nms = self.fast_nms(net, boxes, mask_coeff, proto_data, scores, sem_data, centerness_scores,
+                                            nms_thresh, self.top_k)
 
         for k, v in candidate.items():
             if k in {'fpn_feat', 'proto', 'track', 'sem_seg'}:
@@ -76,26 +86,32 @@ class Detect_TF(object):
 
         return out_aft_nms
 
-    def cc_fast_nms(self, boxes, masks_coeff, proto_data, scores, sem_data, centerness_scores,
+    def cc_fast_nms(self, net, boxes, masks_coeff, proto_data, scores, sem_data, centerness_scores,
                     iou_threshold: float = 0.5, top_k: int = 200):
         # Collapse all the classes into 1
         if cfg.train_class:
-            scores, classes = scores[1:].max(dim=0)   # [n_dets]
+            scores, classes = scores.max(dim=0)   # [n_dets]
 
         if centerness_scores is not None:
             scores_used = scores * centerness_scores.view(-1)
         else:
             scores_used = scores
 
-        if cfg.mask_proto_coeff_occlusion:
-            det_masks_all = generate_mask(proto_data, masks_coeff)
-            det_masks_all = F.softmax(det_masks_all, dim=-1)
-            _, det_masks_all = crop(det_masks_all.permute(1, 2, 3, 0).contiguous(), boxes)
-            det_masks_all = det_masks_all.permute(3, 0, 1, 2).contiguous()
-            det_masks_soft = det_masks_all[:, :, :, 1]
-            det_masks_soft_non_target = det_masks_all[:, :, :, -1]
+        if cfg.use_dynamic_mask:
+            det_masks_soft = net.DynamicMaskHead(proto_data.permute(2, 0, 1).unsqueeze(0), masks_coeff, boxes)
+            if cfg.mask_proto_crop:
+                _, pred_masks = crop(det_masks_soft.permute(1, 2, 0).contiguous(), boxes)
+                det_masks_soft = pred_masks.permute(2, 0, 1).contiguous()
         else:
-            det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
+            if cfg.mask_proto_coeff_occlusion:
+                det_masks_all = generate_mask(proto_data, masks_coeff)
+                det_masks_all = F.softmax(det_masks_all, dim=-1)
+                _, det_masks_all = crop(det_masks_all.permute(1, 2, 3, 0).contiguous(), boxes)
+                det_masks_all = det_masks_all.permute(3, 0, 1, 2).contiguous()
+                det_masks_soft = det_masks_all[:, :, :, 1]
+                det_masks_soft_non_target = det_masks_all[:, :, :, -1]
+            else:
+                det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
 
         # if area_mask / area_box < 0.2 and score < 0.2, the box is likely to be wrong.
         h, w = det_masks_soft.size()[1:]
@@ -120,7 +136,10 @@ class Detect_TF(object):
 
             # Compute the pairwise IoU between the boxes
             boxes_idx = boxes[idx]
-            iou = compute_DIoU(boxes_idx, boxes_idx)
+            if cfg.use_DIoU:
+                iou = compute_DIoU(boxes_idx, boxes_idx)
+            else:
+                iou = jaccard(boxes_idx, boxes_idx)
             det_masks_idx = det_masks_soft[idx].gt(0.5).float()
 
             if cfg.nms_as_miou:
@@ -201,7 +220,10 @@ class Detect_TF(object):
 
         else:
             num_classes, num_dets = idx.size()
-            iou = jaccard(boxes, boxes)  # [num_classes, num_dets, num_dets]
+            if cfg.use_DIoU:
+                iou = compute_DIoU(boxes_idx, boxes_idx)
+            else:
+                iou = jaccard(boxes, boxes)  # [num_classes, num_dets, num_dets]
 
             if cfg.nms_as_miou:
                 boxes = boxes[idx.view(-1), :]

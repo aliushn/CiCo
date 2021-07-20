@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=0,1 python \-m torch.distributed.launch  --nproc_per_node=2 train.py --batch_size=2 --eval_batch_size=1 --save_folder=weights/COCO/weights_r101_m8_dice_focal_condinst_012_ms_dist/ --config=STMask_base_coco_ori_config  --lr=1e-3 --save_interval=4000 --port=200907 --is_distributed

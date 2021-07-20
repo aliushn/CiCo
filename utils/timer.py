@@ -1,5 +1,7 @@
 import time
 from collections import defaultdict
+import torch.distributed as dist
+
 
 _total_times = defaultdict(lambda:  0)
 _start_times = defaultdict(lambda: -1)
@@ -128,4 +130,6 @@ class env():
 
 	def __exit__(self, e, ev, t):
 		stop(self.fn_name, use_stack=self.use_stack)
+
+
 

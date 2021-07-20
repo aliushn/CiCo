@@ -8,16 +8,16 @@ from STMask import STMask
 import os
 import time
 import torch
-from datasets import get_dataset, prepare_data
+from datasets import get_dataset, prepare_data_vis, prepare_data_coco
 import torch.optim as optim
 import torch.utils.data as data
 import argparse
 import datetime
+from mmcv import Config, DictAction
 
 # dist
 import torch.multiprocessing as mp
 import torch.distributed as dist
-# import torch.nn.parallel.DistributedDataParallel as DDP
 
 # Oof
 import eval as eval_script
@@ -28,90 +28,68 @@ def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")
 
 
-parser = argparse.ArgumentParser(
-    description='Yolact Training Script')
-
-parser.add_argument('--port', default=None, type=str,
-                    help='port for dist')
-parser.add_argument('--local_rank', default=0, type=int,
-                    help='local_rank for distributed training')
-parser.add_argument('--is_distributed', dest='is_distributed', action='store_true',
-                    help='use distributed for training')
-parser.add_argument('--batch_size', default=8, type=int,
-                    help='Batch size for training')
-parser.add_argument('--eval_batch_size', default=1, type=int,
-                    help='Batch size for training')
-parser.add_argument('--resume', default=None, type=str,
-                    help='Checkpoint state_dict file to resume training from. If this is "interrupt"' \
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Training Script')
+    parser.add_argument('--config', default='STMask_plus_base_config',
+                        help='The config object to use.')
+    parser.add_argument('--port', default=None, type=str,
+                        help='port for dist')
+    parser.add_argument('--local_rank', default=0, type=int,
+                        help='local_rank for distributed training')
+    parser.add_argument('--is_distributed', dest='is_distributed', action='store_true',
+                        help='use distributed for training')
+    parser.add_argument('--batch_size', default=8, type=int,
+                        help='Batch size for training')
+    parser.add_argument('--eval_batch_size', default=1, type=int,
+                        help='Batch size for training')
+    parser.add_argument('--resume', default=None, type=str,
+                        help='Checkpoint state_dict file to resume training from. If this is "interrupt"' \
                          ', the model will resume training from the interrupt file.')
-parser.add_argument('--start_iter', default=0, type=int,
-                    help='Resume training at this iter. If this is -1, the iteration will be' \
+    parser.add_argument('--start_iter', default=0, type=int,
+                        help='Resume training at this iter. If this is -1, the iteration will be' \
                          'determined from the file name.')
-parser.add_argument('--num_workers', default=2, type=int,
-                    help='Number of workers used in data_loading')
-parser.add_argument('--backbone.pred_scales_num', default=3, type=int,
-                    help='Number of pred scales in backbone for getting anchors')
-parser.add_argument('--lr', '--learning_rate', default=0.0001, type=float,
-                    help='Initial learning rate. Leave as None to read this from the config.')
-parser.add_argument('--momentum', default=0.9, type=float,
-                    help='Momentum for SGD. Leave as None to read this from the config.')
-parser.add_argument('--decay', '--weight_decay', default=0.0001, type=float,
-                    help='Weight decay for SGD. Leave as None to read this from the config.')
-parser.add_argument('--gamma', default=None, type=float,
-                    help='For each lr step, what to multiply the lr by. Leave as None to read this from the config.')
-parser.add_argument('--save_folder', default='weights/weights_temp/',
-                    help='Directory for saving checkpoint models')
-parser.add_argument('--config', default='STMask_plus_base_config',
-                    help='The config object to use.')
-parser.add_argument('--save_interval', default=3, type=int,
-                    help='The number of epochs between saving the model.')
-parser.add_argument('--validation_epoch', default=1, type=int,
-                    help='Output validation information every n iterations. If -1, do no validation.')
-parser.add_argument('--output_json', dest='output_json', action='store_true',
-                    help='If display is not set, instead of processing IoU values, this just dumps detections into the coco json file.')
-parser.add_argument('--keep_latest', dest='keep_latest', action='store_true',
-                    help='Only keep the latest checkpoint instead of each one.')
-parser.add_argument('--keep_latest_interval', default=100000, type=int,
-                    help='When --keep_latest is on, don\'t delete the latest file at these intervals. This should be a multiple of save_interval or 0.')
-parser.add_argument('--no_log', dest='log', action='store_false',
-                    help='Don\'t log per iteration information into log_folder.')
-parser.add_argument('--no_interrupt', dest='interrupt', action='store_false',
-                    help='Don\'t save an interrupt when KeyboardInterrupt is caught.')
-parser.add_argument('--no_autoscale', dest='autoscale', action='store_false',
-                    help='YOLACT will automatically scale the lr and the number of iterations depending on the batch size. Set this if you want to disable that.')
+    parser.add_argument('--num_workers', default=2, type=int,
+                        help='Number of workers used in data_loading')
+    parser.add_argument('--backbone.pred_scales_num', default=3, type=int,
+                        help='Number of pred scales in backbone for getting anchors')
+    parser.add_argument('--lr', '--learning_rate', default=0.0001, type=float,
+                        help='Initial learning rate. Leave as None to read this from the config.')
+    parser.add_argument('--momentum', default=0.9, type=float,
+                        help='Momentum for SGD. Leave as None to read this from the config.')
+    parser.add_argument('--decay', '--weight_decay', default=0.0001, type=float,
+                        help='Weight decay for SGD. Leave as None to read this from the config.')
+    parser.add_argument('--gamma', default=None, type=float,
+                        help='For each lr step, what to multiply the lr by. Leave as None to read this from the config.')
+    parser.add_argument('--save_folder', default='weights/weights_temp/',
+                        help='Directory for saving checkpoint models')
+    parser.add_argument('--save_interval', default=3, type=int,
+                        help='The number of epochs between saving the model.')
+    parser.add_argument('--keep_latest', dest='keep_latest', action='store_true',
+                        help='Only keep the latest checkpoint instead of each one.')
+    parser.add_argument('--keep_latest_interval', default=100000, type=int,
+                        help='When --keep_latest is on, don\'t delete the latest file at these intervals. This should be a multiple of save_interval or 0.')
+    parser.add_argument('--no_log', dest='log', action='store_false',
+                        help='Don\'t log per iteration information into log_folder.')
+    parser.add_argument('--no_interrupt', dest='interrupt', action='store_false',
+                        help='Don\'t save an interrupt when KeyboardInterrupt is caught.')
+    parser.add_argument('--no_autoscale', dest='autoscale', action='store_false',
+                        help='YOLACT will automatically scale the lr and the number of iterations depending on the batch size. Set this if you want to disable that.')
+    parser.set_defaults(keep_latest=False, log=True, log_gpu=False, interrupt=True)
 
-parser.set_defaults(keep_latest=False, log=True, log_gpu=False, interrupt=True, autoscale=True)
-args = parser.parse_args()
+    args = parser.parse_args()
+    if 'LOCAL_RANK' not in os.environ:
+        os.environ['LOCAL_RANK'] = str(args.local_rank)
 
-train_type = 'vis'
-if args.config is not None:
-    set_cfg(args.config)
-    if 'coco' in args.config:
-        train_type = 'coco'
+    return args
 
 
 # Update training parameters from the config if necessary
 def replace(name):
     if getattr(args, name) == None: setattr(args, name, getattr(cfg, name))
-replace('lr')
-replace('decay')
-replace('gamma')
-replace('momentum')
-replace('backbone.pred_scales_num')
 
-# This is managed by set_lr
-cur_lr = args.lr
 
-if torch.cuda.device_count() == 0:
-    print('No GPUs detected. Exiting...')
-    exit(-1)
-
-if torch.cuda.is_available():
-    torch.set_default_tensor_type('torch.cuda.FloatTensor')
-else:
-    torch.set_default_tensor_type('torch.FloatTensor')
-
-loss_types = ['B', 'BIoU', 'Rep', 'C', 'stuff', 'M', 'MIoU', 'T', 'center', 'B_shift', 'BIoU_shift', 'M_shift',
+loss_types = ['B', 'BIoU', 'Rep', 'C', 'stuff', 'M_bce', 'M_dice', 'T', 'center', 'B_shift', 'BIoU_shift', 'M_shift',
               'P', 'D', 'S', 'I']
 
 
@@ -164,8 +142,7 @@ def train():
     criterion = MultiBoxLoss(net=net,
                              num_classes=cfg.num_classes,
                              pos_threshold=cfg.positive_iou_threshold,
-                             neg_threshold=cfg.negative_iou_threshold,
-                             negpos_ratio=cfg.ohem_negpos_ratio)
+                             neg_threshold=cfg.negative_iou_threshold)
     if train_type == 'coco':
         train_dataset = COCODetection(image_path=cfg.dataset.train_images,
                                       info_file=cfg.dataset.train_info,
@@ -176,8 +153,8 @@ def train():
         detection_collate = detection_collate_vis
 
     if args.is_distributed:
-        net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(net)
-        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[args.local_rank], broadcast_buffers=False)
+        # net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(net)
+        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[args.local_rank])
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
         net = torch.nn.DataParallel(net, device_ids=range(torch.cuda.device_count()))
@@ -228,27 +205,24 @@ def train():
                     cur_lr = args.lr * (args.gamma ** step_index)
                     set_lr(optimizer, cur_lr)
 
-                # Zero the grad to get ready to compute gradients
-                optimizer.zero_grad()
                 if train_type == 'vis':
                     num_crowds = None
                     if args.is_distributed:
-                        imgs, gt_bboxes, gt_labels, gt_masks, gt_ids, img_meta = prepare_data(data_batch,
-                                                                                              devices=args.local_rank)
+                        imgs, gt_bboxes, gt_labels, gt_masks, gt_ids, img_meta = prepare_data_vis(data_batch,
+                                                                                                  devices=args.local_rank)
                     else:
-                        imgs, gt_bboxes, gt_labels, gt_masks, gt_ids, img_meta = prepare_data(data_batch,
-                                                                                              devices=torch.cuda.current_device())
+                        imgs, gt_bboxes, gt_labels, gt_masks, gt_ids, img_meta = prepare_data_vis(data_batch,
+                                                                                                  devices=torch.cuda.current_device())
                 else:
                     gt_ids = None
                     if args.is_distributed:
-                        imgs, gt_bboxes, gt_labels, gt_masks, num_crowds = prepare_data(data_batch,
-                                                                                        train_type=train_type,
-                                                                                        devices=args.local_rank)
+                        imgs, gt_bboxes, gt_labels, gt_masks, num_crowds = prepare_data_coco(data_batch,
+                                                                                             devices=args.local_rank)
                     else:
-                        imgs, gt_bboxes, gt_labels, gt_masks, num_crowds = prepare_data(data_batch,
-                                                                                        train_type=train_type,
-                                                                                        devices=torch.cuda.current_device())
+                        imgs, gt_bboxes, gt_labels, gt_masks, num_crowds = prepare_data_coco(data_batch,
+                                                                                             devices=torch.cuda.current_device())
 
+                optimizer.zero_grad()
                 preds = net(imgs)
                 losses = criterion(imgs, preds, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds)
                 if not args.is_distributed:
@@ -288,12 +262,12 @@ def train():
 
                 # if i == 0 and epoch > 0:
                 #     if epoch % args.save_interval == 0 and args.local_rank == 0:
-                if iteration == 2000 and args.local_rank == 0:
+                if iteration % args.save_interval == 0 and iteration > 1 and args.local_rank == 0:
                         if args.keep_latest:
                             latest = SavePath.get_latest(args.save_folder, cfg.name)
 
                         print('Saving state, epoch:', epoch)
-                        torch.save(net.state_dict(), save_path(epoch-1, iteration))
+                        torch.save(net.state_dict(), save_path(epoch, iteration))
 
                         if args.keep_latest and latest is not None:
                             if args.keep_latest_interval <= 0 or iteration % args.keep_latest_interval != args.save_interval:
@@ -301,26 +275,25 @@ def train():
                                 os.remove(latest)
 
                         # This is done per epoch
-                        if args.validation_epoch > 0:
-                            save_path_valid_metrics = save_path(epoch-1, iteration).replace('.pth', '.txt')
+                        save_path_valid_metrics = save_path(epoch-1, iteration).replace('.pth', '.txt')
 
-                            if train_type == 'vis':
-                                setup_eval()
-                                # valid_sub
-                                cfg.valid_sub_dataset.test_mode = False
-                                metrics = compute_validation_map(net, valid_data=False, device=torch.cuda.current_device(),
-                                                                 output_metrics_file=save_path_valid_metrics)
+                        if train_type == 'vis':
+                            setup_eval()
+                            # valid_sub
+                            cfg.valid_sub_dataset.test_mode = False
+                            metrics = compute_validation_map(net, valid_data=False, device=torch.cuda.current_device(),
+                                                             output_metrics_file=save_path_valid_metrics)
 
-                                # valid datasets
-                                metrics_valid = compute_validation_map(net, valid_data=True,
-                                                                       device=torch.cuda.current_device(),
-                                                                       output_metrics_file=save_path_valid_metrics)
-                            else:
-                                setup_eval_coco()
-                                val_dataset = COCODetection(image_path=cfg.dataset.valid_images,
-                                                            info_file=cfg.dataset.valid_info,
-                                                            transform=BaseTransform(MEANS))
-                                compute_validation_map_coco(epoch, iteration, net, val_dataset, log if args.log else None)
+                            # valid datasets
+                            metrics_valid = compute_validation_map(net, valid_data=True,
+                                                                   device=torch.cuda.current_device(),
+                                                                   output_metrics_file=save_path_valid_metrics)
+                        else:
+                            setup_eval_coco()
+                            val_dataset = COCODetection(image_path=cfg.dataset.valid_images,
+                                                        info_file=cfg.dataset.valid_info,
+                                                        transform=BaseTransform(MEANS))
+                            compute_validation_map_coco(epoch, iteration, net, val_dataset, log if args.log else None)
 
 
                 iteration += 1
@@ -430,4 +403,29 @@ def setup_eval_coco():
 
 
 if __name__ == '__main__':
+    if torch.cuda.device_count() == 0:
+        print('No GPUs detected. Exiting...')
+        exit(-1)
+
+    if torch.cuda.is_available():
+        torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    else:
+        torch.set_default_tensor_type('torch.FloatTensor')
+
+    args = parse_args()
+    train_type = 'vis'
+    if args.config is not None:
+        set_cfg(args.config)
+        if 'coco' in args.config:
+            train_type = 'coco'
+
+    # This is managed by set_lr
+    cur_lr = args.lr
+    replace('lr')
+    replace('decay')
+    replace('gamma')
+    replace('momentum')
+    replace('backbone.pred_scales_num')
+
+    # cfg = Config.fromfile(args.config)
     train()

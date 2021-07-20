@@ -12,8 +12,11 @@ import torch.nn.functional as F
 
 # Quick and dirty lambda for selecting the color for a particular index
 # Also keeps track of a per-gpu color cache for maximum speed
-def get_color(j, color_type, on_gpu=None, undo_transform=True):
-    color_idx = color_type[j] * 5 % len(cfg.COLORS)
+def get_color(j, color_type=None, on_gpu=None, undo_transform=True):
+    if color_type is None:
+        color_idx = j * 5 % len(cfg.COLORS)
+    else:
+        color_idx = color_type[j] * 5 % len(cfg.COLORS)
 
     color = cfg.COLORS[color_idx]
     if not undo_transform:

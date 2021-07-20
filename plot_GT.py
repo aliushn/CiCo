@@ -358,6 +358,6 @@ if __name__ == '__main__':
                                       pin_memory=True)
 
         # path of the .json file that stores your predicted masks
-        ann_file = 'weights/OVIS/VisTR/results.json'
+        ann_file = '/data/VIS/VisTR_OVIS/weights/r50/results.json'
         anns = json.load(open(ann_file, 'r'))
         plt_masks_from_json(data_loader, type, anns=anns)

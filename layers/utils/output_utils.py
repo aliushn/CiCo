@@ -14,8 +14,8 @@ import os
 from ..utils import sanitize_coordinates, center_size, generate_mask
 
 
-def postprocess(det_output, w, h, batch_idx=0, interpolation_mode='bilinear',
-                visualize_lincomb=False, crop_masks=True, score_threshold=0):
+def postprocess(det_output, ori_w, ori_h, batch_idx=0, interpolation_mode='bilinear',
+                visualize_lincomb=False, score_threshold=0):
     """
     Postprocesses the output of Yolact on testing mode into a format that makes sense,
     accounting for all the possible configuration settings.
@@ -69,15 +69,14 @@ def postprocess(det_output, w, h, batch_idx=0, interpolation_mode='bilinear',
         if visualize_lincomb:
             display_lincomb(proto_data, masks_coeff)
 
-        masks = generate_mask(proto_data, masks_coeff, boxes.view(-1, 4))
         # Scale masks up to the full image
-        masks = F.interpolate(masks.unsqueeze(0), (h, w), mode=interpolation_mode, align_corners=False).squeeze(0)
+        masks = F.interpolate(dets['mask'].unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode, align_corners=False).squeeze(0)
 
         # Binarize the masks
         masks.gt_(0.5)
 
-    boxes[:, 0], boxes[:, 2] = sanitize_coordinates(boxes[:, 0], boxes[:, 2], w, cast=False)
-    boxes[:, 1], boxes[:, 3] = sanitize_coordinates(boxes[:, 1], boxes[:, 3], h, cast=False)
+    boxes[:, 0], boxes[:, 2] = sanitize_coordinates(boxes[:, 0], boxes[:, 2], ori_w, cast=False)
+    boxes[:, 1], boxes[:, 3] = sanitize_coordinates(boxes[:, 1], boxes[:, 3], ori_h, cast=False)
     boxes = boxes.long()
 
     return classes, scores, boxes, masks
@@ -196,18 +195,18 @@ def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
     return dets
 
 
-def undo_image_transformation(img, img_meta, interpolation_mode='bilinear'):
+def undo_image_transformation(img, ori_h, ori_w, img_h=None, img_w=None, interpolation_mode='bilinear'):
     """
     Takes a transformed image tensor and returns a numpy ndarray that is untransformed.
     Arguments w and h are the original height and width of the image.
     """
-    ori_h, ori_w = img_meta['ori_shape'][:2]
-    img_h, img_w = img_meta['img_shape'][:2]
-    pad_h, pad_w = img_meta['pad_shape'][:2]
-    s_w, s_h = (img_w / pad_w, img_h / pad_h)
+
+    pad_h, pad_w = img.size()[-2:]
+    if img_h is None or img_w is None:
+        img_w, img_h = pad_w, pad_h
 
     # Undo padding
-    img = img[:, :int(s_h * img.size(1)), :int(s_w * img.size(2))]
+    img = img[:, :img_w, :img_h]
     if cfg.preserve_aspect_ratio:
         img = F.interpolate(img.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode,
                             align_corners=False).squeeze(0)

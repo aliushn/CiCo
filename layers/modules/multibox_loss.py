@@ -3,13 +3,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-from layers.utils import compute_DIoU, match, log_sum_exp, encode, decode, center_size, crop, jaccard, point_form, \
+from layers.utils import match, compute_DIoU, encode, decode, center_size, crop, jaccard, point_form, \
     generate_mask, compute_kl_div, generate_track_gaussian, sanitize_coordinates_hw
 from .track_to_segment_head import bbox_feat_extractor
 from layers.utils.track_utils import correlate_operator
 from layers.visualization import display_correlation_map
 
 from datasets import cfg, activation_func
+from fvcore.nn import sigmoid_focal_loss_jit, giou_loss
 
 
 class MultiBoxLoss(nn.Module):
@@ -35,23 +36,13 @@ class MultiBoxLoss(nn.Module):
         See: https://arxiv.org/pdf/1512.02325.pdf for more details.
     """
 
-    def __init__(self, net, num_classes, pos_threshold, neg_threshold, negpos_ratio):
+    def __init__(self, net, num_classes, pos_threshold, neg_threshold):
         super(MultiBoxLoss, self).__init__()
         self.net = net
         self.num_classes = num_classes
 
         self.pos_threshold = pos_threshold
         self.neg_threshold = neg_threshold
-        self.negpos_ratio = negpos_ratio
-
-        # If you output a proto mask with this area, your l1 loss will be l1_alpha
-        # Note that the area is relative (so 1 would be the entire image)
-        self.l1_expected_area = 20 * 20 / 70 / 70
-        self.l1_alpha = 0.1
-
-        if cfg.use_class_balanced_conf:
-            self.class_instances = None
-            self.total_instances = 0
 
     def forward(self, imgs, predictions, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds):
         """Multibox Loss
@@ -91,11 +82,12 @@ class MultiBoxLoss(nn.Module):
         # This is necessary for training on multiple GPUs because
         # DataParallel will cat the priors from each GPU together
         priors = predictions['priors']
+        prior_levels = predictions['prior_levels']
         proto_data = predictions['proto']
         sem_data = predictions['sem_seg'] if cfg.use_semantic_segmentation_loss else None
 
         losses, conf_t, ids_t, idx_t = self.multibox_loss(imgs, loc_data, conf_data, stuff_data, mask_coeff,
-                                                          centerness_data, proto_data, priors, sem_data,
+                                                          centerness_data, proto_data, priors, prior_levels, sem_data,
                                                           gt_bboxes, gt_labels,  gt_masks, gt_ids, num_crowds)
 
         if cfg.train_track and cfg.use_temporal_info:
@@ -156,21 +148,6 @@ class MultiBoxLoss(nn.Module):
 
                 losses.update(losses_shift)
 
-            elif cfg.use_FEELVOS:
-
-                bb_feat_ref = F.normalize(predictions['fpn_feat'][::2].contiguous(), dim=1)
-                bb_feat_next = F.normalize(predictions['fpn_feat'][1::2].contiguous(), dim=1)
-                gt_masks_next = gt_masks[1::2]
-                gt_ids_next = gt_ids[1::2]
-                conf_t_ref = conf_t[::2].detach()
-                idx_t_ref = idx_t[::2]
-                ids_t_ref = ids_t[::2]
-                gt_bboxes_ref = gt_bboxes[::2]
-                gt_masks_ref = gt_masks[::2]
-                losses_shift = self.VOS_loss(bb_feat_next, gt_masks_next, gt_ids_next, bb_feat_ref, conf_t_ref, idx_t_ref,
-                                             ids_t_ref, gt_bboxes_ref, gt_masks_ref)
-                losses.update(losses_shift)
-
         if cfg.train_track:
             losses_clip = self.track_loss(track_data, gt_masks, gt_ids, proto_data, mask_coeff,
                                           gt_bboxes, loc_data, priors, conf_t, ids_t, idx_t)
@@ -186,14 +163,13 @@ class MultiBoxLoss(nn.Module):
         x1, x2 = torch.split(x, [1, 1], dim=-1)
         return x1.squeeze(-1), x2.squeeze(-1)
 
-    def multibox_loss(self, imgs, loc_data, conf_data, stuff_data, mask_data, centerness_data, proto_data, priors, segm_data,
-                      gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds):
+    def multibox_loss(self, imgs, loc_data, conf_data, stuff_data, mask_data, centerness_data, proto_data, priors,
+                      prior_levels, segm_data, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds):
         batch_size, num_priors = loc_data.size()[0:2]
 
         # Match priors (default boxes) and ground truth boxes
         # These tensors will be created with the same device as loc_data
         loc_t = loc_data.new(batch_size, num_priors, 4)
-        gt_boxes_t = loc_data.new(batch_size, num_priors, 4)
         conf_t = loc_data.new(batch_size, num_priors).long()
         idx_t = loc_data.new(batch_size, num_priors).long()
 
@@ -217,10 +193,8 @@ class MultiBoxLoss(nn.Module):
                     _, gt_masks[idx] = split(gt_masks[idx])
 
             gt_ids_cur = gt_ids[idx] if gt_ids is not None else None
-            match(self.pos_threshold, self.neg_threshold, gt_bboxes[idx], gt_labels[idx], gt_ids_cur, crowd_boxes,
-                  priors[idx], loc_data[idx], loc_t, conf_t, idx_t, ids_t, idx)
-
-            gt_boxes_t[idx] = gt_bboxes[idx][idx_t[idx]]
+            match(gt_bboxes[idx], gt_labels[idx], gt_ids_cur, crowd_boxes, priors[idx], loc_data[idx], loc_t, conf_t,
+                  idx_t, ids_t, idx, self.pos_threshold, self.neg_threshold)
 
         # wrap targets
         loc_t = Variable(loc_t, requires_grad=False)
@@ -230,78 +204,130 @@ class MultiBoxLoss(nn.Module):
             ids_t = Variable(ids_t, requires_grad=False)
 
         pos = conf_t > 0
-        total_num_pos = pos.data.sum()
-        num_pos_per_img = []
-        for idx in range(batch_size):
-            num_pos_per_img.append(pos[idx].sum().long())
-
         losses = {}
+        if len(torch.nonzero(pos)) > 0:
+            # Localization Loss (Smooth L1)
+            if cfg.train_boxes:
+                loc_p = loc_data[pos].view(-1, 4)
+                loc_t = loc_t[pos].view(-1, 4)
+                pos_priors = priors[pos].view(-1, 4)
 
-        # design weights for all pos samples in per img
-        IoU_split = torch.ones(int(total_num_pos.tolist()), device=loc_data.device).split(num_pos_per_img)
-        pos_weights_per_img = [IoU_cur / torch.clamp(IoU_cur.sum(), min=1) for IoU_cur in IoU_split]
-        pos_weights = torch.cat(pos_weights_per_img, dim=0)
+                box_loss = F.smooth_l1_loss(loc_p, loc_t, reduction='none').sum(dim=-1)
+                losses['B'] = box_loss.mean() * cfg.bbox_alpha
 
-        # Localization Loss (Smooth L1)
-        if cfg.train_boxes:
-            loc_p = loc_data[pos].view(-1, 4)
-            loc_t = loc_t[pos].view(-1, 4)
-            pos_priors = priors[pos].view(-1, 4)
+                decoded_loc_p = torch.clamp(decode(loc_p, pos_priors, cfg.use_yolo_regressors), min=0, max=1)
+                decoded_loc_t = torch.clamp(decode(loc_t, pos_priors, cfg.use_yolo_regressors), min=0, max=1)
+                if cfg.use_DIoU:
+                    IoU_loss = 1. - compute_DIoU(decoded_loc_p, decoded_loc_t).diag()
+                else:
+                    IoU_loss = giou_loss(decoded_loc_p, decoded_loc_t, reduction='none')
 
-            losses['B'] = (pos_weights.view(-1, 1) * F.smooth_l1_loss(loc_p, loc_t,
-                                                                      reduction='none')).sum() * cfg.bbox_alpha
+                if cfg.use_boxiou_loss:
+                    losses['BIoU'] = IoU_loss.mean() * cfg.BIoU_alpha
 
-            if cfg.use_boxiou_loss:
-                decoded_loc_p = decode(loc_p, pos_priors, cfg.use_yolo_regressors)
-                DIoU = compute_DIoU(decoded_loc_p, gt_boxes_t[pos]).diag().view(-1)
-                # DIoU in [-1, 1], 0.5(DIoU+1) in [0, 1], - In( 0.5*(1+DIoU) ) in [0, +infinte]
-                DIoU_loss = - torch.log(torch.clamp(0.5 * (1 + DIoU), min=1e-5))
-                losses['BIoU'] = (pos_weights * DIoU_loss).sum() * cfg.bboxiou_alpha
-                # add repulsion loss for crowd occlusion
                 if cfg.use_repulsion_loss:
+                    # add repulsion loss for crowd occlusion
                     losses['Rep'] = self.repulsion_loss(pos, idx_t, decoded_loc_p, gt_bboxes)
 
-        # Mask Loss
-        if cfg.train_masks:
-            loss = self.lincomb_mask_loss(pos_weights_per_img, pos, idx_t, loc_data, mask_data,
-                                          priors, proto_data, gt_masks, gt_boxes_t)
-            losses.update(loss)
+                if centerness_data is not None:
+                    loss_cn = F.binary_cross_entropy(centerness_data[pos].view(-1), (1 - IoU_loss).detach(), reduction='mean')
+                    # loss_cn = F.smooth_l1_loss(centerness_data[pos].view(-1), DIoU, reduction='mean')
+                    losses['center'] = cfg.center_alpha * loss_cn
 
-            if cfg.mask_proto_loss is not None:
-                if cfg.mask_proto_loss == 'l1':
-                    losses['P'] = torch.mean(torch.abs(proto_data)) / self.l1_expected_area * self.l1_alpha
-                elif cfg.mask_proto_loss == 'disj':
-                    losses['P'] = -torch.mean(torch.max(F.log_softmax(proto_data, dim=-1), dim=-1)[0])
+            # Mask Loss
+            if cfg.train_masks:
+                loss_m = self.lincomb_mask_loss(pos, idx_t, loc_data, mask_data, priors, prior_levels, proto_data,
+                                                gt_masks, gt_bboxes)
+                losses.update(loss_m)
 
-        # Confidence loss
-        if cfg.train_class:
-            if cfg.use_sigmoid_focal_loss:
-                loss_c = self.focal_conf_sigmoid_loss(conf_data, conf_t)
+            # Confidence loss
+            if cfg.train_class:
+                conf_data_f = conf_data.reshape(-1, self.num_classes)
+                conf_t_f = conf_t.reshape(-1)
+                pos_inds = torch.nonzero((pos.reshape(-1)).float())
+                # prepare one_hot
+                class_target = torch.zeros_like(conf_data_f)
+                class_target[pos_inds, conf_t_f[pos_inds] - 1] = 1
+
+                if cfg.use_focal_loss:
+                    # filter out those samples with IoU threshold between 0.4 and 0.5
+                    keep = conf_t_f != -1
+                    class_loss = sigmoid_focal_loss_jit(
+                        conf_data_f[keep],
+                        class_target[keep],
+                        alpha=cfg.focal_loss_alpha,
+                        gamma=cfg.focal_loss_gamma,
+                        reduction='sum'
+                    )
+
+                    losses['C'] = cfg.conf_alpha * class_loss / len(pos_inds)
+                else:
+                    neg = self.select_neg_bboxes(conf_data_f, conf_t_f, type='class')
+                    keep = (pos.reshape(-1) + neg).gt(0)
+                    class_loss = F.binary_cross_entropy_with_logits(conf_data_f[keep], class_target[keep], reduction='mean')
+
+                    losses['C'] = cfg.conf_alpha * class_loss
+
             else:
-                loss_c = self.ohem_conf_loss(pos_weights, conf_data, conf_t, centerness_data, loc_data, priors, gt_boxes_t)
-            losses.update(loss_c)
-        else:
-            loss_c = self.ohem_stuff_loss(stuff_data, conf_t)
-            losses.update(loss_c)
+                # TODO: needs to design the loss
+                losses['C'] = self.ohem_stuff_loss(stuff_data, conf_t)
 
-        # These losses also don't depend on anchors
-        if cfg.use_semantic_segmentation_loss:
-            losses['S'] = self.semantic_segmentation_loss(segm_data, gt_masks, gt_labels, gt_bboxes)
+            # These losses also don't depend on anchors
+            if cfg.use_semantic_segmentation_loss:
+                losses['S'] = self.semantic_segmentation_loss(segm_data, gt_masks, gt_labels)
 
-        # Divide all losses by the number of positives.
-        # Don't do it for loss[P] because that doesn't depend on the anchors.
-        # loss[P] and loss [IC] have been divided the number of positives
-        for k in losses:
-            losses[k] /= batch_size
-        # Loss Key:
-        #  - B: Box Localization Loss
-        #  - C: Class Confidence Loss
-        #  - M: Mask Loss
-        #  - T: Tracking Loss
-        #  - P: Prototype Loss
-        #  - D: Coefficient Diversity Loss
-        #  - S: Semantic Segmentation Loss
         return losses, conf_t, ids_t, idx_t
+
+    def select_neg_bboxes(self, conf_data, conf_t, type):
+        '''
+        :param conf_data: [n, num_classes]
+        :param conf_t: [n, 1]
+        :param type: 'class' or 'stuff'
+        :return:
+        '''
+
+        # Compute max conf across batch for hard negative mining
+        if type == 'stuff':
+            loss_c = torch.sigmoid(conf_data).view(-1)
+        else:
+            loss_c, _ = conf_data.sigmoid().max(dim=1)
+
+        # Hard Negative Mining
+        num_pos = (conf_t > 0).sum()
+        num_neg = min(3 * num_pos, conf_t.size(0) - 1)
+        loss_c[conf_t > 0] = 0  # filter out pos samples and neutrals
+        loss_c[conf_t < 0] = 0  # filter out pos samples and neutrals
+        _, loss_idx = loss_c.sort(descending=True)
+        neg = torch.zeros(conf_t.size(), device=conf_t.get_device())
+        neg[loss_idx[:num_neg]] = 1
+        # Just in case there aren't enough negatives, don't start using positives as negatives
+        neg[conf_t > 0] = 0  # filter out pos samplers and neutrals
+        neg[conf_t < 0] = 0  # filter out pos samplers and neutrals
+
+        return neg
+
+    def ohem_conf_loss(self, conf_data, conf_t):
+        """
+        Focal loss but using sigmoid like the original paper.
+        Note: To make things mesh easier, the network still predicts 41 class confidences in this mode.
+              Because retinanet originally only predicts 80, we simply just don't use conf_data[..., 0]
+        """
+        conf_t_f = conf_t.view(-1)
+        conf_data_f = conf_data.view(-1, self.num_classes)
+
+        pos = (conf_t > 0).float()
+        neg = self.select_neg_bboxes(conf_data, conf_t, type='vis')
+        keep = (pos + neg).gt(0)
+        use_conf_t = conf_t[keep]
+        use_conf_data = conf_data[keep]
+
+        class_target = torch.zeros_like(conf_data_f)
+        pos_inds = torch.nonzero(pos.float())
+        class_target[pos_inds, conf_t_f[pos_inds] - 1] = 1
+
+        loss = F.binary_cross_entropy(use_conf_data, use_conf_t, reduction='none')
+
+        return cfg.conf_alpha * loss.sum() / (self.negpos_ratio + 1)
 
     def repulsion_loss(self, pos, idx_t, decoded_loc_p, gt_bboxes):
         batch_size = pos.size(0)
@@ -312,7 +338,7 @@ class MultiBoxLoss(nn.Module):
             n_gt_cur = gt_bboxes[idx].size(0)
             n_pos_cur = decoded_loc_p.size(0)
             # the overlaps between predicted boxes and ground-truth boxes
-            overlaps_cur = jaccard(decoded_loc_p, gt_bboxes[idx])  # [n_pos, n_gt]
+            overlaps_cur = jaccard(decoded_loc_p, gt_bboxes[idx]).detach()  # [n_pos, n_gt]
 
             # matched ground-truth bounding box idx with each predicted boxes
             idx_t_cur = idx_t[idx][pos[idx]]
@@ -322,82 +348,14 @@ class MultiBoxLoss(nn.Module):
 
             # Crowd occlusion: BIoU greater than 0.1
             keep = (overlaps_cur > 0.1).view(-1)
-            if keep.sum() > 0:
+            if len(torch.nonzero(keep)) > 0:
                 n += 1
                 rep_decoded_loc_p = decoded_loc_p.unsqueeze(1).repeat(1, n_gt_cur, 1).view(-1, 4)[keep]
                 rep_gt_boxes = gt_bboxes[idx].unsqueeze(0).repeat(n_pos_cur, 1, 1).view(-1, 4)[keep]
+                rep_IoU = 1. - giou_loss(rep_decoded_loc_p, rep_gt_boxes, reduction='none')
+                rep_loss += rep_IoU.mean() * cfg.BIoU_alpha
 
-                rep_DIoU = compute_DIoU(rep_decoded_loc_p, rep_gt_boxes).diag().view(-1)
-                # rep_DIoU in [-1, 1], 0.5 * (1-rep_DIoU) in [0, 1]
-                # rep_loss = -In (0.5*(1-DIoU))
-                rep_DIoU_loss = - torch.log(torch.clamp(0.5 * (1 - rep_DIoU), min=1e-5))
-                rep_loss += rep_DIoU_loss.mean() * 0.2 * cfg.bboxiou_alpha
-
-        return rep_loss / max(n, 1.) * batch_size
-
-    def VOS_loss(self, bb_feat_next, gt_masks_next, gt_ids_next, bb_feat_ref, conf_t_ref, idx_t_ref, ids_t_ref,
-                 gt_bboxes_ref, gt_masks_ref):
-        loss = torch.tensor(0.0, device=conf_t_ref.device)
-        bs = bb_feat_next.size(0)
-        mask_gt_h, mask_gt_w = gt_masks_next[0][0].size()
-        upsampled_bb_feat_next = F.interpolate(bb_feat_next.float(), (int(mask_gt_h/4), int(mask_gt_w/4)),
-                                               mode='bilinear', align_corners=False)
-        attention_next = self.net.VOS_attention(upsampled_bb_feat_next)
-
-        for i in range(bs):
-            pos = conf_t_ref[i] > 0
-            pos_idx_ref = idx_t_ref[i, pos]
-            pos_ids_ref = ids_t_ref[i, pos]
-            bbox_t_ref = gt_bboxes_ref[i][pos_idx_ref]
-
-            # if an instance disappears in the next frame, we hope the vos head can output a mask with all 0
-            masks_t_next = torch.zeros((pos.sum(), mask_gt_h, mask_gt_w), device=idx_t_ref.device)
-            for id in pos_ids_ref.unique():
-                if id in gt_ids_next[i]:
-                    idx_next = torch.where(gt_ids_next[i] == id)[0]
-                    masks_t_next[pos_ids_ref == id] = gt_masks_next[i][idx_next].float()
-
-            feat_h, feat_w = bb_feat_ref.size()[2:]
-            masks_t_ref = gt_masks_ref[i][pos_idx_ref].float()
-            downsampled_masks_t_ref = F.interpolate(masks_t_ref.unsqueeze(0).float(), (feat_h, feat_w),
-                                                    mode='bilinear', align_corners=False).squeeze(0)
-
-            pred_masks_next = []
-            for j in range(pos.sum()):
-                corr_cur = correlate_operator(bb_feat_next[i].unsqueeze(0),
-                                              (bb_feat_ref[i] * downsampled_masks_t_ref[j].unsqueeze(0)).unsqueeze(0),
-                                              patch_size=cfg.correlation_patch_size, kernel_size=3)
-                corr_cur = torch.max(corr_cur, dim=1)[0]  # [1, h/16, w/16]
-                vos_feat = bb_feat_next[i] * corr_cur
-                upsampled_vos_feat = F.interpolate(vos_feat.unsqueeze(0), (int(mask_gt_h/4), int(mask_gt_w/4)),
-                                                   mode='bilinear', align_corners=False)   # [1, h/4, w/4]
-                pred_vos = self.net.VOS_head(upsampled_vos_feat)
-                pred_masks_next.append(pred_vos * attention_next[i].unsqueeze(0))
-            pred_masks_next = torch.cat(pred_masks_next, dim=1)
-            upsampled_pred_masks_next = F.interpolate(pred_masks_next.float(), (mask_gt_h, mask_gt_w),
-                                                      mode='bilinear', align_corners=False).squeeze(0)
-            upsampled_pred_masks_next = cfg.mask_proto_mask_activation(upsampled_pred_masks_next)  # [n_ref, h, w]
-
-            if cfg.mask_proto_mask_activation == activation_func.sigmoid:
-                pre_loss = F.binary_cross_entropy(torch.clamp(upsampled_pred_masks_next, 0, 1), masks_t_next, reduction='none')
-            else:
-                pre_loss = F.smooth_l1_loss(upsampled_pred_masks_next, masks_t_next, reduction='none')
-
-            # only consider the region of the predicted reference bbox
-            box_t_ref_c = center_size(bbox_t_ref)
-            # we use 1.2 box to crop features
-            box_next_crop_c = torch.cat([box_t_ref_c[:, :2],
-                                         torch.clamp(box_t_ref_c[:, 2:] * 1.5, min=0, max=1)], dim=1)
-            box_next_crop = point_form(box_next_crop_c)
-            _, pre_loss_crop = crop(pre_loss.permute(1, 2, 0).contiguous(), box_next_crop)  # [h, w, n_ref]
-            gt_box_width = box_next_crop_c[:, 2] * mask_gt_w
-            gt_box_width = torch.clamp(gt_box_width, min=1)
-            gt_box_height = box_next_crop_c[:, 3] * mask_gt_h
-            gt_box_height = torch.clamp(gt_box_height, min=1)
-            pre_loss_crop = pre_loss_crop.sum(dim=(0, 1)) / gt_box_width / gt_box_height
-            loss += pre_loss_crop.mean()
-
-        return {'M_shift': cfg.maskshift_alpha * loss / bs}
+        return rep_loss / max(n, 1.)
 
     def t2s_single_loss(self, bb_feat_ref, bb_feat_next, gt_bboxes_ref, gt_bboxes_next,
                         gt_ids_ref, gt_ids_next):
@@ -423,8 +381,10 @@ class MultiBoxLoss(nn.Module):
             idx_ref = [gt_ids_ref[i].tolist().index(id) for id in same_ids_cur]
             idx_next = [gt_ids_next[i].tolist().index(id) for id in same_ids_cur]
 
-            bboxes_ref_cur = gt_bboxes_ref[i][idx_ref]
-            bboxes_next_cur = gt_bboxes_next[i][idx_next]
+            with torch.no_grad():
+                bboxes_ref_cur = gt_bboxes_ref[i][idx_ref]
+                bboxes_next_cur = gt_bboxes_next[i][idx_next]
+                bboxes_ref_reg_gt = encode(bboxes_next_cur, center_size(bboxes_ref_cur))
 
             # extract features from bounding boxes
             bboxes_feats_ref_crop = bbox_feat_extractor(t2s_in_feats_for[i].unsqueeze(0),
@@ -435,15 +395,14 @@ class MultiBoxLoss(nn.Module):
                 bboxes_ref_reg, mask_coeff_ref_reg = self.net.TemporalNet(bboxes_feats_ref_crop)
             else:
                 bboxes_ref_reg = self.net.TemporalNet(bboxes_feats_ref_crop)
-            bboxes_ref_reg_gt = encode(bboxes_next_cur, center_size(bboxes_ref_cur))
+
+            # B_shift loss
             pre_loss = F.smooth_l1_loss(bboxes_ref_reg, bboxes_ref_reg_gt, reduction='none').sum(dim=1)
             loss_B_shift += pre_loss.mean()
 
-            # BIoU loss
-            bboxes_next_tracked = decode(bboxes_ref_reg, center_size(bboxes_ref_cur))
-            DIoU_tracked_ref = compute_DIoU(bboxes_next_tracked, bboxes_next_cur).diag().view(-1)
-            DIoU_tracked_ref_loss = - torch.log(torch.clamp(0.5 * (1 + DIoU_tracked_ref), min=1e-5))
-            loss_BIoU_shift += DIoU_tracked_ref_loss.mean()
+            # BIoU_shift loss
+            bboxes_next_tracked = decode(bboxes_ref_reg, center_size(bboxes_ref_cur), cfg.use_yolo_regressors)
+            loss_BIoU_shift += giou_loss(bboxes_next_tracked, bboxes_next_cur, reduction='mean')
 
         losses = {'BIoU_shift': loss_BIoU_shift / bs * cfg.bboxiou_alpha,
                   'B_shift': loss_B_shift / bs * cfg.bbox_alpha}
@@ -475,16 +434,17 @@ class MultiBoxLoss(nn.Module):
                 if id in gt_ids_next_cur:
                     keep_inst = ids_t_ref_cur == id
                     # calculate tracking regression values between two frames of bounding boxes
-                    gt_bbox_ref_cur = gt_bboxes_ref[i][j].view(1, 4)
-                    gt_bbox_next_cur = gt_bboxes_next[i][gt_ids_next_cur == id].view(1, 4)
-                    gt_bboxes_reg_cur = encode(gt_bbox_next_cur, center_size(gt_bbox_ref_cur))
-                    gt_bboxes_reg[keep_inst] = gt_bboxes_reg_cur.repeat(keep_inst.sum(), 1)
+                    with torch.no_grad():
+                        gt_bbox_ref_cur = gt_bboxes_ref[i][j].view(1, 4)
+                        gt_bbox_next_cur = gt_bboxes_next[i][gt_ids_next_cur == id].view(1, 4)
+                        gt_bboxes_reg_cur = encode(gt_bbox_next_cur, center_size(gt_bbox_ref_cur))
+                        gt_bboxes_reg[keep_inst] = gt_bboxes_reg_cur.repeat(keep_inst.sum(), 1)
 
                 else:
                     ids_t_ref_cur[ids_t_ref[i] == id] = 0
 
             pos = ids_t_ref_cur > 0
-            n_pos = pos.sum()
+            n_pos = len(torch.nonzero(pos))
 
             if n_pos == 0:
                 continue
@@ -504,9 +464,10 @@ class MultiBoxLoss(nn.Module):
             if cfg.maskshift_loss:
                 # create mask_gt and bbox_gt in the reference frame
                 cur_pos_ids_t = ids_t_ref_cur[pos]
-                pos_idx_t = [gt_ids_next[i].tolist().index(id) for id in cur_pos_ids_t]
-                bbox_t_next = gt_bboxes_next[i][pos_idx_t]
-                mask_t_next = gt_masks_next[i][pos_idx_t].permute(1, 2, 0).contiguous().float()
+                with torch.no_grad():
+                    pos_idx_t = [gt_ids_next[i].tolist().index(id) for id in cur_pos_ids_t]
+                    bbox_t_next = gt_bboxes_next[i][pos_idx_t]
+                    mask_t_next = gt_masks_next[i][pos_idx_t].float()
 
                 # generate mask coeff shift mask: \sum coeff_tar * proto_ref
                 tar_mask_coeff = mask_coeff_ref[i, pos] + shift_mask_coeff
@@ -516,19 +477,15 @@ class MultiBoxLoss(nn.Module):
                 upsampled_pred_masks = F.interpolate(pred_masks.unsqueeze(0).float(),
                                                      (mask_gt_h, mask_gt_w),
                                                      mode=interpolation_mode, align_corners=False).squeeze(0)
-                upsampled_pred_masks = upsampled_pred_masks.permute(1, 2, 0).contiguous()  # [mask_h, mask_w, n_pos]
 
-                if cfg.mask_proto_mask_activation == activation_func.sigmoid:
-                    pre_loss = F.binary_cross_entropy(torch.clamp(upsampled_pred_masks, 0, 1), mask_t_next,
-                                                      reduction='none')
-                else:
-                    pre_loss = F.smooth_l1_loss(upsampled_pred_masks, mask_t_next, reduction='none')
+                pre_loss = F.binary_cross_entropy(torch.clamp(upsampled_pred_masks, 0, 1), mask_t_next,
+                                                  reduction='none')
 
                 if cfg.mask_proto_crop:
                     pos_get_csize = center_size(bbox_t_next)
                     gt_box_width = torch.clamp(pos_get_csize[:, 2], min=1e-4, max=1) * mask_gt_w
                     gt_box_height = torch.clamp(pos_get_csize[:, 3], min=1e-4, max=1) * mask_gt_h
-                    pre_loss = pre_loss.sum(dim=(0, 1)) / gt_box_width / gt_box_height
+                    pre_loss = pre_loss.sum(dim=(1, 2)) / gt_box_width / gt_box_height
                     loss_mask_shift += torch.mean(pre_loss)
                 else:
                     loss_mask_shift += torch.mean(pre_loss) / mask_gt_h / mask_gt_w
@@ -539,7 +496,7 @@ class MultiBoxLoss(nn.Module):
 
         return losses
 
-    def prepare_masks_for_track(self, h, w, conf_t, ids_t, loc_data, priors, idx_t, gt_bboxes,
+    def prepare_masks_for_track(self, conf_t, ids_t, loc_data, priors, idx_t, gt_bboxes,
                                 proto_data, mask_coeff, gt_masks, gt_ids):
 
         if cfg.track_crop_with_pred_mask:
@@ -572,7 +529,7 @@ class MultiBoxLoss(nn.Module):
 
             for j in range(n_clip):
 
-                masks_cur, bbox_cur, ids_t_cur = self.prepare_masks_for_track(track_h, track_w, conf_t[2*i+j],
+                masks_cur, bbox_cur, ids_t_cur = self.prepare_masks_for_track(conf_t[2*i+j],
                                                                               ids_t[2*i+j], loc_data[2*i+j],
                                                                               priors[2*i+j], idx_t[2*i+j],
                                                                               gt_bboxes[2*i+j], proto_data[2*i+j],
@@ -608,191 +565,6 @@ class MultiBoxLoss(nn.Module):
 
         return losses
 
-    def instance_conf_loss(self, conf_data, ref_conf_data, conf_t, ref_conf_t, ids_t, ref_ids_t):
-        batch_size, num_priors, n_classes = conf_data.size()
-        loss = 0
-
-        for idx in range(batch_size):
-            # calculate the instance confident in a single frame: the mean of the bboxes with same instance id
-            inst_pt, inst_conf_t, inst_id = self.get_inst_conf(conf_data[idx],  conf_t[idx], ids_t[idx])
-            ref_inst_pt, ref_inst_conf_t, ref_inst_id = self.get_inst_conf(ref_conf_data[idx],
-                                                                           ref_conf_t[idx], ref_ids_t[idx])
-
-            # get the instance confident cross multi frames by mean them in different frames
-            all_inst_id = torch.unique(torch.cat([inst_id, ref_inst_id]))
-            all_inst_pt, all_inst_conf_t = [], []
-            for i, id in enumerate(all_inst_id):
-                used_idx = inst_id == id
-                used_ref_idx = ref_inst_id == id
-                if id in inst_id and id in ref_inst_id:
-                    inst_pt_id = (inst_pt[used_idx] + ref_inst_pt[used_ref_idx]) / 2.0
-                    inst_conf_t_id = inst_conf_t[used_idx]
-                elif id in inst_id:
-                    inst_pt_id = inst_pt[used_idx]
-                    inst_conf_t_id = inst_conf_t[used_idx]
-                else:
-                    inst_pt_id = ref_inst_pt[used_ref_idx]
-                    inst_conf_t_id = ref_inst_conf_t[used_ref_idx]
-                all_inst_pt.append(inst_pt_id)
-                all_inst_conf_t.append(inst_conf_t_id)
-
-            # get the confident loss of instances in the a short subset (includes 2 frames here)
-            loss += F.cross_entropy(torch.cat(all_inst_pt, dim=0), torch.cat(all_inst_conf_t), reduction='sum') / all_inst_id.size(0)
-
-        return loss / batch_size
-
-    def get_inst_conf(self, conf_data,  conf_t, ids_t):
-        # put bboxes with same instances ids into a set, called instance confidence
-        pos = (conf_t > 0)
-        pos_pt = F.softmax(conf_data[pos], -1)  # [n_pos, 41]
-        pos_ids_t = ids_t[pos]
-        pos_conf_t = conf_t[pos]
-
-        # merge those bboxes with same instances into a subset
-        # use the conf data's mean of all bboxes in the subset as the conf data of the instance in the subset
-        inst_id, inv_id = torch.unique(pos_ids_t, sorted=True, return_inverse=True)
-        inst_pt = [pos_pt[inv_id == i].sum(dim=0) / (inv_id == i).sum() for i in range(len(inst_id))]
-        inst_conf_t = [pos_conf_t[inv_id == i][0].view(1) for i in range(len(inst_id))]
-
-        return torch.stack(inst_pt, dim=0), torch.cat(inst_conf_t), inst_id
-
-    def select_neg_bboxes(self, conf_data, conf_t, type):
-        if len(conf_t.size()) == 2 or len(conf_data.size()) == 3:
-            conf_t = conf_t.view(-1)                          # [batch_size*num_priors]
-            conf_data = conf_data.view(conf_t.size(0), -1)  # [batch_size*num_priors, num_classes]
-
-        # Compute max conf across batch for hard negative mining
-        if type == 'stuff':
-            loss_c = torch.sigmoid(conf_data).view(-1)
-        else:
-            if cfg.ohem_use_most_confident:
-                conf_data = F.softmax(conf_data, dim=1)
-                loss_c, _ = conf_data[:, 1:].max(dim=1)
-            else:
-                loss_c = log_sum_exp(conf_data) - conf_data[:, 0]
-
-        # Hard Negative Mining
-        num_pos = (conf_t > 0).sum()
-        num_neg = torch.clamp(self.negpos_ratio * num_pos, max=conf_t.size()[0] - 1)
-        loss_c[conf_t > 0] = 0  # filter out pos samples and neutrals
-        loss_c[conf_t < 0] = 0  # filter out pos samples and neutrals
-        _, loss_idx = loss_c.sort(descending=True)
-        neg = torch.zeros(conf_t.size(), device=conf_t.get_device())
-        neg[loss_idx[:num_neg]] = 1
-        # Just in case there aren't enough negatives, don't start using positives as negatives
-        neg[conf_t > 0] = 0  # filter out pos samplers and neutrals
-        neg[conf_t < 0] = 0  # filter out pos samplers and neutrals
-
-        return neg
-
-    def ohem_conf_loss(self, pos_weights, conf_data, conf_t, centerness_data, loc, priors, gt_boxes_t):
-        """
-        Focal loss but using sigmoid like the original paper.
-        Note: To make things mesh easier, the network still predicts 41 class confidences in this mode.
-              Because retinanet originally only predicts 80, we simply just don't use conf_data[..., 0]
-        """
-        batch_size = conf_t.size(0)
-        conf_t = conf_t.view(-1)
-        conf_data = conf_data.view(-1,  self.num_classes)
-
-        pos = (conf_t > 0).float()
-        neg = self.select_neg_bboxes(conf_data, conf_t, type='vis')
-        keep = (pos + neg).gt(0)
-        use_conf_t = conf_t[keep]
-        use_conf_data = conf_data[keep]
-        num_neg = (neg > 0).sum()
-        neg_weights = torch.ones(num_neg, device=pos_weights.device) / num_neg * self.negpos_ratio * batch_size
-        loss_weights = torch.cat([pos_weights, neg_weights])
-
-        loss = F.cross_entropy(use_conf_data, use_conf_t, reduction='none')
-        losses = {'C': cfg.conf_alpha * (loss_weights * loss).sum() / (self.negpos_ratio + 1)}
-
-        if centerness_data is not None:
-            pos = pos.gt(0)
-            decoded_loc = decode(loc.view(-1, 4)[pos], priors.view(-1, 4)[pos], cfg.use_yolo_regressors)
-            DIoU = compute_DIoU(decoded_loc, gt_boxes_t.view(-1, 4)[pos]).diag().view(-1)
-            loss_cn = F.smooth_l1_loss(centerness_data.view(-1)[pos], DIoU, reduction='none')
-            losses['center'] = cfg.center_alpha * (pos_weights * loss_cn).sum()
-
-        return losses
-
-    def ohem_stuff_loss(self, stuff_data, conf_t):
-        """
-        Focal loss but using sigmoid like the original paper.
-        Note: To make things mesh easier, the network still predicts 81 class confidences in this mode.
-              Because retinanet originally only predicts 80, we simply just don't use conf_data[..., 0]
-        """
-        batch_size = stuff_data.size(0)
-        conf_t = conf_t.view(-1)
-        # set pos samplers as 1, neg samplers as 0, neutrals as -1
-        conf_t[conf_t > 0] = 1
-        stuff_data = stuff_data.view(-1)
-
-        pos = (conf_t > 0).float()
-        neg = self.select_neg_bboxes(stuff_data, conf_t, type='stuff')
-        keep = (pos + neg).gt(0)
-        use_stuff_t = conf_t[keep].float()
-        use_stuff_data = stuff_data[keep]
-
-        loss = F.binary_cross_entropy_with_logits(use_stuff_data, use_stuff_t, reduction='none')
-        losses = {'stuff': cfg.stuff_alpha * batch_size * loss.mean()}
-
-        return losses
-
-    def focal_conf_loss(self, conf_data, conf_t):
-        conf_t = conf_t.view(-1)
-        conf_data = conf_data.view(-1, self.num_classes)
-        pos = (conf_t > 0).float()
-        neg = self.select_neg_bboxes(conf_data, conf_t)
-        keep = (pos + neg).gt(0)
-
-        # Confidence Loss Including Positive and Negative Examples
-        # adapted from focal loss to reduce the effect of class unbalance
-        conf_p = conf_data[keep].view(-1, self.num_classes)
-        logpt = F.log_softmax(conf_p, dim=-1)
-        use_conf_t = conf_t[keep].view(-1)
-        logpt = logpt.gather(1, use_conf_t.unsqueeze(-1)).view(-1)
-        pt = logpt.exp()
-        at = (1 - cfg.focal_loss_alpha) * pos.float() + cfg.focal_loss_alpha * neg.float()
-        at = at[keep].view(-1)
-        loss_c = -1 * at * (1 - pt) ** cfg.focal_loss_gamma * logpt
-
-        return cfg.conf_alpha * loss_c.sum()
-
-    def focal_conf_sigmoid_loss(self, conf_data, conf_t):
-        """
-        Focal loss but using sigmoid like the original paper.
-        Note: To make things mesh easier, the network still predicts 81 class confidences in this mode.
-              Because retinanet originally only predicts 80, we simply just don't use conf_data[..., 0]
-        """
-
-        bs, _, num_classes = conf_data.size()
-
-        conf_t = conf_t.view(-1)  # [batch_size*num_priors]
-        conf_data = conf_data.view(-1, num_classes)  # [batch_size*num_priors, num_classes]
-
-        # Ignore neutral samples (class < 0)
-        keep = (conf_t >= 0).float()
-        conf_t[conf_t < 0] = 0  # can't mask with -1, so filter that out
-
-        # Compute a one-hot embedding of conf_t
-        # From https://github.com/kuangliu/pytorch-retinanet/blob/master/utils.py
-        conf_one_t = torch.eye(num_classes, device=conf_t.get_device())[conf_t]
-        conf_pm_t = conf_one_t * 2 - 1  # -1 if background, +1 if forground for specific class
-
-        logpt = F.logsigmoid(conf_data * conf_pm_t)  # note: 1 - sigmoid(x) = sigmoid(-x)
-        pt = logpt.exp()
-
-        at = cfg.focal_loss_alpha * conf_one_t + (1 - cfg.focal_loss_alpha) * (1 - conf_one_t)
-        at[..., 0] = 0  # Set alpha for the background class to 0 because sigmoid focal loss doesn't use it
-
-        loss = -at * (1 - pt) ** cfg.focal_loss_gamma * logpt
-        loss = keep * loss.sum(dim=-1)
-
-        losses = {'C': cfg.conf_alpha * loss.sum() / keep.sum() * bs}
-
-        return losses
-
     def coeff_sparse_loss(self, coeffs):
         """
         coeffs:  should be size [num_pos, num_coeffs]
@@ -804,7 +576,7 @@ class MultiBoxLoss(nn.Module):
         coeffs     should be size [num_pos, num_coeffs]
         instance_t should be size [num_pos] and be values from 0 to num_instances-1
         """
-        num_pos = coeffs.size(0)
+
         instance_t = instance_t.view(-1)  # juuuust to make sure
 
         coeffs_norm = F.normalize(coeffs, dim=1)
@@ -824,100 +596,124 @@ class MultiBoxLoss(nn.Module):
         # and all the losses will be divided by num_pos at the end, so just one extra time.
         return cfg.mask_proto_coeff_diversity_alpha * (weights * loss).sum()
 
-    def lincomb_mask_loss(self, pos_weights_per_img, pos, idx_t, loc_data, mask_coeff,
-                          priors, proto_data, masks_gt, gt_box_t, interpolation_mode='bilinear'):
+    def lincomb_mask_loss(self, pos, idx_t, loc_data, mask_coeff, priors, prior_levels, proto_data,
+                          masks_gt, bboxes_gt, interpolation_mode='bilinear'):
 
-        loss_m, loss_m_occluded, loss_miou = 0, 0, 0
-        _, mask_h, mask_w = masks_gt[0].size()
+        bs = mask_coeff.size(0)
+        loss_bce, loss_m_occluded = torch.tensor(0., device=pos.device), torch.tensor(0., device=pos.device)
+        if cfg.mask_dice_coefficient:
+            loss_dice = torch.tensor(0., device=pos.device)
+        if cfg.use_dynamic_mask:
+            cfg.mask_proto_coeff_occlusion = False
 
-        for idx in range(mask_coeff.size(0)):
+        for idx in range(bs):
             cur_pos = pos[idx]
-            n_cur_pos = cur_pos.sum()
-            if n_cur_pos == 0:
-                continue
+            if len(torch.nonzero(cur_pos)) > 0:
 
-            if cfg.mask_proto_crop:
-                # Note: this is in point-form
-                if cfg.mask_proto_crop_with_pred_box:
-                    pos_pred_box = decode(loc_data[idx, cur_pos], priors[idx, cur_pos],
-                                          cfg.use_yolo_regressors).detach()
-                    pos_gt_box_t = pos_pred_box
-                else:
-                    pos_gt_box_t = gt_box_t[idx, cur_pos]
-
-                pos_gt_box_t = center_size(pos_gt_box_t)
-                pos_gt_box_t[:, 2:] *= 1.2
-                pos_gt_box_t = point_form(pos_gt_box_t)
-                pos_gt_box_t = torch.clamp(pos_gt_box_t, min=1e-5, max=1)
-
-            pos_idx_t = idx_t[idx, cur_pos]
-            masks_gt_cur = masks_gt[idx]
-            if masks_gt_cur.size(0) > 1 and cfg.mask_proto_coeff_occlusion:
-                # assign non-target objects as 2, then target objects as 1, background as 0
-                masks_gt_cur_all = masks_gt_cur.sum(dim=0)
-                for mask_idx in range(masks_gt_cur.size(0)):
-                    target_object = masks_gt_cur[mask_idx] > 0
-                    non_target_objects = (masks_gt_cur_all > 0) * ~target_object
-                    masks_gt_cur[mask_idx][non_target_objects] = 2
-
-            mask_t = masks_gt_cur[pos_idx_t]                # [n, mask_h, mask_w]
-            proto_masks = proto_data[idx]                   # [mask_h, mask_w, 32]
-            proto_coeff = mask_coeff[idx, cur_pos, :]       # [num_pos, 32, Class+1]
-
-            # get mask loss for ono-occluded part
-            # pred_masks = generate_mask(proto_masks, proto_coef, pos_gt_box_t)
-            mask_gt_h, mask_gt_w = mask_t.size()[1:]
-            if cfg.mask_proto_crop:
-                pred_masks = generate_mask(proto_masks, proto_coeff, pos_gt_box_t)
-            else:
-                pred_masks = generate_mask(proto_masks, proto_coeff)
-
-            if not cfg.mask_proto_coeff_occlusion:
-                # [n, h, w] => [n, 1, h, w]
-                upsampled_pred_masks = F.interpolate(pred_masks.unsqueeze(1).float(),
-                                                     (mask_gt_h, mask_gt_w),
-                                                     mode=interpolation_mode,
-                                                     align_corners=False).squeeze(1)
-                if cfg.mask_proto_mask_activation == activation_func.sigmoid:
-                    pre_loss = F.binary_cross_entropy(torch.clamp(upsampled_pred_masks, 0, 1),
-                                                      mask_t.float(),
-                                                      reduction='none')
+                pos_idx_t = idx_t[idx, cur_pos]
+                masks_gt_cur = masks_gt[idx]
+                N_gt, H_gt, W_gt = masks_gt_cur.size()
+                proto_masks = proto_data[idx]                   # [mask_h, mask_w, 32]
+                proto_coeff = mask_coeff[idx, cur_pos, :]       # [n_pos, 32 or 196]
+                # get mask loss for ono-occluded part, [n_pos, 3, h, w]
+                if N_gt > 1 and cfg.mask_proto_coeff_occlusion:
+                    masks_gt_cur3 = torch.zeros(N_gt, 3, H_gt, W_gt)
+                    masks_gt_cur3[:, 1] = masks_gt_cur
+                    # assign non-target objects as 2, then target objects as 1, background as 0
+                    masks_gt_cur_all = masks_gt_cur.sum(dim=0)
+                    masks_gt_cur3[:, 0] = (masks_gt_cur_all == 0).repeat(N_gt, 1, 1).float()
+                    for m_idx in range(masks_gt_cur.size(0)):
+                        target_object = masks_gt_cur[m_idx] > 0
+                        non_target_objects = (masks_gt_cur_all > 0) * ~target_object
+                        masks_gt_cur3[m_idx, 2][non_target_objects] = 1
+                    mask_t = masks_gt_cur3[pos_idx_t]
 
                 else:
-                    pre_loss = F.smooth_l1_loss(upsampled_pred_masks, mask_t.float(), reduction='none')
+                    mask_t = masks_gt_cur[pos_idx_t]            # [n_pos, mask_h, mask_w]
 
-            else:
-                # [n, h, w, 3] => [n, 3, h, w]
-                pred_masks = pred_masks.permute(0, 3, 1, 2).contiguous()
-                upsampled_pred_masks = F.interpolate(pred_masks.float(),
-                                                     (mask_gt_h, mask_gt_w),
-                                                     mode=interpolation_mode,
-                                                     align_corners=False)
-                # [n, 3, h, w] => [n, h, w, 3]
-                upsampled_pred_masks = upsampled_pred_masks.permute(0, 2, 3, 1).contiguous()
-                pre_loss = F.cross_entropy(upsampled_pred_masks.view(-1, 3),
-                                           mask_t.view(-1).long(),
-                                           reduction='none')
-                pre_loss = pre_loss.view(n_cur_pos, mask_h, mask_w).permute(1, 2, 0).contiguous()
-                if cfg.mask_proto_crop:
-                    _, pre_loss = crop(pre_loss, pos_gt_box_t)     # [h, w, n]
-                    pre_loss = pre_loss.permute(2, 0, 1).contiguous()
+                if cfg.mask_proto_crop or cfg.use_dynamic_mask:
+                    # Note: this is in point-form
+                    if cfg.mask_proto_crop_with_pred_box:
+                        pos_gt_box_t = decode(loc_data[idx, cur_pos], priors[idx, cur_pos],
+                                              cfg.use_yolo_regressors).detach()
+                    else:
+                        pos_gt_box_t = bboxes_gt[idx][pos_idx_t]
 
-            if cfg.mask_proto_crop:
-                pos_gt_box_wh = center_size(pos_gt_box_t)[:, :2]
-                pos_gt_box_w = torch.clamp(pos_gt_box_wh[:, 0] * mask_gt_w, min=1)
-                pos_gt_box_h = torch.clamp(pos_gt_box_wh[:, 1] * mask_gt_h, min=1)
-                pre_loss = pre_loss.sum(dim=(1, 2)) / pos_gt_box_w / pos_gt_box_h
-                loss_m += torch.sum(pos_weights_per_img[idx] * pre_loss)
-            else:
-                loss_m += torch.sum(pos_weights_per_img[idx] * pre_loss) / mask_gt_h / mask_gt_w
+                    pos_gt_box_t_c = center_size(pos_gt_box_t)
+                    pos_gt_box_t_c[:, 2:] *= 1.2
+                    pos_gt_box_t = point_form(torch.clamp(pos_gt_box_t_c, min=1e-5, max=1))
+                else:
+                    pos_gt_box_t = None
 
-        losses = {'M': loss_m * cfg.mask_alpha}
+                if not cfg.use_dynamic_mask:
+                    pred_masks = generate_mask(proto_masks, proto_coeff, pos_gt_box_t)
+                else:
+                    fpn_levels = prior_levels[idx, cur_pos]
+                    pred_masks = self.net.DynamicMaskHead(proto_masks.permute(2, 0, 1).contiguous().unsqueeze(0),
+                                                          proto_coeff, pos_gt_box_t, fpn_levels)
+                    if cfg.mask_proto_crop:
+                        _, pred_masks = crop(pred_masks.permute(1, 2, 0).contiguous(), pos_gt_box_t)
+                        pred_masks = pred_masks.permute(2, 0, 1).contiguous()
 
-        if cfg.use_maskiou_loss:
-            losses['MIoU'] = loss_miou * cfg.maskiou_alpha
+                if cfg.use_dynamic_mask or not cfg.mask_proto_coeff_occlusion:
+                    # [n, h, w] => [n, 1, h, w]
+                    upsampled_pred_masks = F.interpolate(pred_masks.unsqueeze(1).float(), (H_gt, W_gt),
+                                                         mode=interpolation_mode, align_corners=False).squeeze(1)
+                    upsampled_pred_masks = torch.clamp(upsampled_pred_masks, min=0, max=1)
+
+                    if cfg.mask_dice_coefficient:
+                        pre_loss_dice = self.dice_coefficient(upsampled_pred_masks, mask_t.float())
+                    else:
+                        # activation_funcunction is sigmoid
+                        pre_loss_bce = F.binary_cross_entropy(upsampled_pred_masks,
+                                                              mask_t.float(), reduction='none')
+
+                else:
+                    # [n, h, w, 3] => [n, 3, h, w]
+                    pred_masks = pred_masks.permute(0, 3, 1, 2).contiguous()
+                    upsampled_pred_masks = F.interpolate(pred_masks.float(), (H_gt, W_gt),
+                                                         mode=interpolation_mode, align_corners=False)
+                    upsampled_pred_masks = torch.clamp(upsampled_pred_masks, min=0, max=1)
+
+                    if cfg.mask_dice_coefficient:
+                        cur_loss = []
+                        for i in range(3):
+                            cur_loss.append(self.dice_coefficient(upsampled_pred_masks[:, i], mask_t.float()[:, i]))
+                        pre_loss_dice = torch.stack(cur_loss, dim=0).mean(dim=0)
+                    else:
+                        pre_loss_bce = F.binary_cross_entropy(upsampled_pred_masks,
+                                                              mask_t.float(), reduction='none').sum(dim=1)
+                if cfg.mask_dice_coefficient:
+                    loss_dice += pre_loss_dice.mean()
+                else:
+                    if cfg.mask_proto_crop:
+                        pos_gt_box_w = torch.clamp(pos_gt_box_t_c[:, 2], min=1e-4, max=1) * W_gt
+                        pos_gt_box_h = torch.clamp(pos_gt_box_t_c[:, 3], min=1e-4, max=1) * H_gt
+                        pre_loss_bce = pre_loss_bce.sum(dim=(1, 2)) / pos_gt_box_w / pos_gt_box_h
+                    else:
+                        pre_loss_bce = pre_loss_bce.sum(dim=(1, 2)) / H_gt / W_gt
+
+                    keep = (torch.isinf(pre_loss_bce) + torch.isnan(pre_loss_bce)) > 0
+                    if keep.sum() > 0:
+                        print(pre_loss_bce)
+                    loss_bce += pre_loss_bce[~keep].mean()
+
+        if cfg.mask_dice_coefficient:
+            losses = {'M_dice': loss_dice * cfg.mask_alpha / max(bs, 1)}
+        else:
+            losses = {'M_bce': loss_bce * cfg.mask_alpha / max(bs, 1)}
 
         return losses
+
+    def dice_coefficient(self, x, target):
+        eps = 1e-5
+        n_inst = x.size(0)
+        x = x.reshape(n_inst, -1)
+        target = target.reshape(n_inst, -1)
+        intersection = (x * target).sum(dim=1)
+        union = (x ** 2.0).sum(dim=1) + (target ** 2.0).sum(dim=1) + eps
+        loss = 1. - (2 * intersection / union)
+        return loss
 
     def _mask_iou(self, mask1, mask2):
         intersection = torch.sum(mask1*mask2, dim=(1, 2))
@@ -927,53 +723,36 @@ class MultiBoxLoss(nn.Module):
         ret = intersection / union
         return ret
 
-    def mask_iou_loss(self, net, maskiou_targets):
-        maskiou_net_input, maskiou_t, label_t = maskiou_targets
-
-        maskiou_p = net.maskiou_net(maskiou_net_input)
-
-        label_t = label_t[:, None]
-        maskiou_p = torch.gather(maskiou_p, dim=1, index=label_t).view(-1)
-
-        loss_i = F.smooth_l1_loss(maskiou_p, maskiou_t, reduction='sum')
-
-        return loss_i * cfg.maskiou_alpha
-
-    def semantic_segmentation_loss(self, segment_data, mask_t, class_t, box_t, interpolation_mode='bilinear'):
+    def semantic_segmentation_loss(self, segment_data, mask_t, class_t, interpolation_mode='bilinear'):
+        '''
+        :param segment_data: [bs, h, w, num_class]
+        :param mask_t: a list of groundtruth masks
+        :param class_t: a list of groundtruth clsses: begin with 1
+        :param interpolation_mode:
+        :return:
+        '''
         # Note num_classes here is without the background class so cfg.num_classes-1
         segment_data = segment_data.permute(0, 3, 1, 2).contiguous()
-        batch_size, num_classes, mask_h, mask_w = segment_data.size()
         mask_t_h, mask_t_w = mask_t[0].size()[-2:]
-
         upsampled_segment_data = F.interpolate(segment_data, (mask_t_h, mask_t_w),
                                                mode=interpolation_mode, align_corners=False)
-        upsampled_segment_data_act = torch.clamp(F.softmax(upsampled_segment_data, dim=1), min=1e-3)
 
-        # Construct Semantic Segmentation
-        segment_t = torch.zeros((batch_size, mask_t_h, mask_t_w), requires_grad=False).type(torch.int64)
-        weight = torch.zeros((batch_size, mask_t_h, mask_t_w), requires_grad=False)
-        for idx in range(batch_size):
-            cur_class_t = class_t[idx]
-            cur_box_t = box_t[idx]
-
+        # prepare one_hot
+        segment_t = torch.zeros_like(upsampled_segment_data)
+        for idx in range(segment_data.size(0)):
             with torch.no_grad():
-                cur_mask_t = mask_t[idx].float()
-                cur_mask_t_bg = cur_mask_t.sum(dim=0) == 0
-                for obj_idx, obj_mask_t in enumerate(cur_mask_t):
-                    segment_t[idx, obj_mask_t > 0] = cur_class_t[obj_idx]
-                    cur_segment_data = upsampled_segment_data_act[idx, cur_class_t[obj_idx]]
-                    # Construct weight for pixels with objects
-                    weight[idx, obj_mask_t > 0] = 0.1 * torch.div(1., cur_segment_data[obj_mask_t > 0])
+                for obj_idx, obj_mask_t in enumerate(mask_t[idx]):
+                    segment_t[idx, class_t[idx][obj_idx]-1][obj_mask_t > 0] = 1
 
-                    # Construct weight (sucha as 0.1) for pixels with background
-                    cur_box_t_c = center_size(cur_box_t[obj_idx].view(1, -1))
-                    cur_box_t_c[:, 2:] *= 1.2
-                    cur_box_t_p = torch.clamp(point_form(cur_box_t_c), min=1e-5, max=1)
-                    cur_weight_mask, _ = crop(weight[idx].unsqueeze(-1), cur_box_t_p)
-                    keep_bg = cur_weight_mask.squeeze(-1).bool() & cur_mask_t_bg
-                    weight[idx, keep_bg] = 0.1
+        sem_loss = 0
+        for i in range(self.num_classes):
+            # void out of memory
+            sem_loss += sigmoid_focal_loss_jit(
+                            upsampled_segment_data[:, i],
+                            segment_t[:, i],
+                            alpha=cfg.focal_loss_alpha,
+                            gamma=cfg.focal_loss_gamma,
+                            reduction="sum"
+                        )
 
-        pre_loss = F.cross_entropy(upsampled_segment_data, segment_t, reduction='none')
-        loss_s = (pre_loss * weight.unsqueeze(1)).sum() / weight.sum()
-
-        return loss_s * cfg.semantic_segmentation_alpha
+        return sem_loss / segment_t.sum() * cfg.semantic_segmentation_alpha

@@ -58,11 +58,8 @@ class FPN(ScriptModuleWrapper):
                 for _ in range(cfg.fpn.num_downsample)
             ])
 
-        self.interpolation_mode = cfg.fpn.interpolation_mode
         self.num_downsample = cfg.fpn.num_downsample
         self.use_conv_downsample = cfg.fpn.use_conv_downsample
-        self.relu_downsample_layers = cfg.fpn.relu_downsample_layers  # yolact++
-        self.relu_pred_layers = cfg.fpn.relu_pred_layers  # yolact++
 
     @script_method_wrapper
     def forward(self, convouts: List[torch.Tensor]):
@@ -86,7 +83,7 @@ class FPN(ScriptModuleWrapper):
 
             if j < len(convouts) - 1:
                 _, _, h, w = convouts[j].size()
-                x = F.interpolate(x, size=(h, w), mode=self.interpolation_mode, align_corners=False)
+                x = F.interpolate(x, size=(h, w), mode='bilinear', align_corners=False)
 
             x = x + lat_layer(convouts[j])
             out[j] = x

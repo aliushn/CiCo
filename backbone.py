@@ -3,6 +3,8 @@ import torch.nn as nn
 import pickle
 from collections import OrderedDict
 from dcn_v2 import DCN
+import pickle
+
 
 
 class Bottleneck(nn.Module):
@@ -61,13 +63,13 @@ class Bottleneck(nn.Module):
 class ResNetBackbone(nn.Module):
     """ Adapted from torchvision.models.resnet """
 
-    def __init__(self, layers, dcn_layers=[0, 0, 0, 0], dcn_interval=1, atrous_layers=[], stride_layers=[1, 2, 2, 2],
+    def __init__(self, layer, dcn_layers=[0, 0, 0, 0], dcn_interval=1, atrous_layers=[], stride_layers=[1, 2, 2, 2],
                  block=Bottleneck, frozen_stages=-1, norm_layer=nn.BatchNorm2d):
         super().__init__()
 
         # These will be populated by _make_layer
-        self.num_base_layers = len(layers)
-        self.layers = nn.ModuleList()
+        self.num_base_layers = len(layer)
+        self.layer = nn.ModuleList()
         self.channels = []
         self.norm_layer = norm_layer
         self.dilation = 1
@@ -89,10 +91,10 @@ class ResNetBackbone(nn.Module):
         # self._make_layer(block, 512, layers[3], stride=2)
 
         # add deformable convolutional network on mask_layer
-        self._make_layer(block, 64, layers[0], stride=stride_layers[0], dcn_layers=dcn_layers[0], dcn_interval=dcn_interval)
-        self._make_layer(block, 128, layers[1], stride=stride_layers[1], dcn_layers=dcn_layers[1], dcn_interval=dcn_interval)
-        self._make_layer(block, 256, layers[2], stride=stride_layers[2], dcn_layers=dcn_layers[2], dcn_interval=dcn_interval)
-        self._make_layer(block, 512, layers[3], stride=stride_layers[3], dcn_layers=dcn_layers[3], dcn_interval=dcn_interval)
+        self._make_layer(block, 64, layer[0], stride=stride_layers[0], dcn_layers=dcn_layers[0], dcn_interval=dcn_interval)
+        self._make_layer(block, 128, layer[1], stride=stride_layers[1], dcn_layers=dcn_layers[1], dcn_interval=dcn_interval)
+        self._make_layer(block, 256, layer[2], stride=stride_layers[2], dcn_layers=dcn_layers[2], dcn_interval=dcn_interval)
+        self._make_layer(block, 512, layer[3], stride=stride_layers[3], dcn_layers=dcn_layers[3], dcn_interval=dcn_interval)
 
         # This contains every module that should be initialized by loading in pretrained weights.
         # Any extra layers added onto this that won't be initialized by init_backbone will not be
@@ -109,7 +111,7 @@ class ResNetBackbone(nn.Module):
         # This is actually just to create the connection between layers, and not necessarily to
         # downsample. Even if the second condition is met, it only downsamples when stride != 1
         if stride != 1 or self.inplanes != planes * block.expansion:
-            if len(self.layers) in self.atrous_layers:
+            if len(self.layer) in self.atrous_layers:
                 self.dilation *= 2
                 stride = 1
             
@@ -120,20 +122,20 @@ class ResNetBackbone(nn.Module):
                 self.norm_layer(planes * block.expansion),
             )
 
-        layers = []
+        layer = []
         use_dcn = (dcn_layers >= blocks)
-        layers.append(block(self.inplanes, planes, stride=stride, downsample=downsample, norm_layer=self.norm_layer,
-                            dilation=self.dilation, use_dcn=use_dcn))
+        layer.append(block(self.inplanes, planes, stride=stride, downsample=downsample, norm_layer=self.norm_layer,
+                           dilation=self.dilation, use_dcn=use_dcn))
 
         self.inplanes = planes * block.expansion
         for i in range(1, blocks):
             use_dcn = ((i + dcn_layers) >= blocks) and (i % dcn_interval == 0)
-            layers.append(block(self.inplanes, planes, dilation=self.dilation, norm_layer=self.norm_layer, use_dcn=use_dcn))
+            layer.append(block(self.inplanes, planes, dilation=self.dilation, norm_layer=self.norm_layer, use_dcn=use_dcn))
 
-        layer = nn.Sequential(*layers)
+        layer = nn.Sequential(*layer)
 
         self.channels.append(planes * block.expansion)
-        self.layers.append(layer)
+        self.layer.append(layer)
 
         return layer
 
@@ -146,7 +148,7 @@ class ResNetBackbone(nn.Module):
         x = self.maxpool(x)
 
         outs = []
-        for layer in self.layers:
+        for layer in self.layer:
             x = layer(x)
             outs.append(x)
 
@@ -155,14 +157,18 @@ class ResNetBackbone(nn.Module):
     def init_backbone(self, path):
         """ Initializes the backbone weights for training. """
         state_dict = torch.load(path)
+        # with open(path, 'rb') as f:
+        #     state_dict = pickle.load(f)
 
         # Replace layer1 -> layers.0 etc.
         keys = list(state_dict)
         for key in keys:
             if key.startswith('layer'):
                 idx = int(key[5])
-                new_key = 'layers.' + str(idx-1) + key[6:]
+                new_key = 'layer.' + str(idx-1) + key[6:]
                 state_dict[new_key] = state_dict.pop(key)
+            elif key.startswith('fc'):
+                state_dict.pop(key)
 
         # Note: Using strict=False is berry scary. Triple check this.
         self.load_state_dict(state_dict, strict=False)
@@ -466,7 +472,7 @@ def construct_backbone(cfg):
     # Add downsampling layers until we reach the number we need
     num_layers = max(cfg.selected_layers) + 1
 
-    while len(backbone.layers) < num_layers:
+    while len(backbone.layer) < num_layers:
         backbone.add_layer()
 
     return backbone

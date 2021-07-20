@@ -46,8 +46,6 @@ def parse_args(argv=None):
                         help='Further restrict the number of predictions to parse')
     parser.add_argument('--cuda', default=True, type=str2bool,
                         help='Use cuda to evaulate model')
-    parser.add_argument('--fast_nms', default=False, type=str2bool,
-                        help='Whether to use a faster, but not entirely correct version of NMS.')
     parser.add_argument('--cross_class_nms', default=True, type=str2bool,
                         help='Whether compute NMS cross-class or per-class.')
     parser.add_argument('--display_masks', default=True, type=str2bool,
@@ -142,19 +140,18 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
     Note: If undo_transform=False then im_h and im_w are allowed to be None.
     """
     if undo_transform:
-        img_numpy = undo_image_transformation(img, w, h)
+        img_numpy = undo_image_transformation(img, h, w)
         img_gpu = torch.Tensor(img_numpy).cuda()
     else:
         img_gpu = img / 255.0
         h, w, _ = img.shape
 
     with timer.env('Postprocess'):
-        save = cfg.rescore_bbox
-        cfg.rescore_bbox = True
+        # save = cfg.rescore_bbox
+        # cfg.rescore_bbox = True
         t = postprocess(dets_out, w, h, visualize_lincomb=args.display_lincomb,
-                        crop_masks=args.crop,
                         score_threshold=args.score_threshold)
-        cfg.rescore_bbox = save
+        # cfg.rescore_bbox = save
 
     with timer.env('Copy'):
         idx = t[1].argsort(0, descending=True)[:args.top_k]
@@ -230,7 +227,7 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
                 cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 1)
 
             if args.display_text:
-                _class = cfg.dataset.class_names[classes[j]]
+                _class = cfg.dataset.class_names[classes[j]-1]
                 text_str = '%s: %.2f' % (_class, score) if args.display_scores else _class
 
                 font_face = cv2.FONT_HERSHEY_DUPLEX
@@ -251,7 +248,7 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
 
 def prep_benchmark(dets_out, h, w):
     with timer.env('Postprocess'):
-        t = postprocess(dets_out, w, h, crop_masks=args.crop, score_threshold=args.score_threshold)
+        t = postprocess(dets_out, w, h, score_threshold=args.score_threshold)
 
     with timer.env('Copy'):
         classes, scores, boxes, masks = [x[:args.top_k] for x in t]
@@ -378,7 +375,7 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, de
                 crowd_classes, gt_classes = split(gt_classes)
 
     with timer.env('Postprocess'):
-        classes, scores, boxes, masks = postprocess(dets, w, h, crop_masks=args.crop,
+        classes, scores, boxes, masks = postprocess(dets, w, h,
                                                     score_threshold=args.score_threshold)
 
         if classes.size(0) == 0:
@@ -856,8 +853,6 @@ def evalvideo(net: STMask, path: str, out_path: str = None):
 
 
 def evaluate(net: STMask, dataset, train_mode=False, iteration=None):
-    # net.detect.use_fast_nms = args.fast_nms
-    # net.detect.use_cross_class_nms = args.cross_class_nms
     cfg.mask_proto_debug = args.mask_proto_debug
 
     # TODO Currently we do not support Fast Mask Re-scroing in evalimage, evalimages, and evalvideo
@@ -935,8 +930,10 @@ def evaluate(net: STMask, dataset, train_mode=False, iteration=None):
 
             with timer.env('Network Extra'):
                 preds, _, _ = net(batch)
+
             # Perform the meat of the operation here depending on our mode.
             if args.display:
+                cfg.preserve_aspect_ratio = True
                 img_numpy = prep_display(preds, img, h, w)
             elif args.benchmark:
                 prep_benchmark(preds, h, w)
@@ -951,9 +948,16 @@ def evaluate(net: STMask, dataset, train_mode=False, iteration=None):
             if args.display:
                 if it > 1:
                     print('Avg FPS: %.4f' % (1 / frame_times.get_avg()))
+                root_dir = os.path.join(args.mask_det_file[:-12], 'out')
+                if not os.path.exists(root_dir):
+                    os.makedirs(root_dir)
+
                 plt.imshow(img_numpy)
                 plt.title(str(dataset.ids[image_idx]))
-                plt.show()
+                plt.axis('off')
+                plt.savefig(''.join([root_dir, '/', str(dataset.ids[image_idx]), '.png']))
+                plt.clf()
+
             elif not args.no_bar:
                 # if it > 1:
                 #     fps = 1 / frame_times.get_avg()

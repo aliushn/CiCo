@@ -1,13 +1,6 @@
 # -*- coding: utf-8 -*-
 import torch
-import torch.nn.functional as F
-import numpy as np
-import mmcv
-import cv2
 from datasets import STD, MEANS, cfg
-from utils import timer
-import math
-
 from ..visualization import display_pos_smaples
 
 @torch.jit.script
@@ -113,11 +106,11 @@ def change(gt, priors):
     diff[:, :, 1] /= gt_h
     diff[:, :, 3] /= gt_h
 
-    return -torch.sqrt( (diff ** 2).sum(dim=2) )
+    return -torch.sqrt((diff ** 2).sum(dim=2) )
 
 
-def match(pos_thresh, neg_thresh, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t, ids_t, idx,
-          img_gpu=None):
+def match(bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t, ids_t, idx,
+          pos_thresh=0.5, neg_thresh=0.3, img_gpu=None):
     """Match each prior box with the ground truth box of the highest jaccard
     overlap, encode the bounding boxes, then return the matched indices
     corresponding to both confidence and location preds.
@@ -128,7 +121,7 @@ def match(pos_thresh, neg_thresh, bbox, labels, ids, crowd_boxes, priors, loc_da
         labels: (tensor) All the class labels for the image, Shape: [num_obj].
         ids: (tensor) the instance ids of each gt bbox
         priors: (tensor) Prior boxes from priorbox layers, Shape: [n_priors,4]. [cx,cy,w,h]
-        loc_data: (tensor) The predicted bbox regression coordinates for this batch. [cx,cy,w,h]
+        loc_data: (tensor) The predicted bbox regression coordinates for this batch. [\delta x, \delta y,  \delta w,  \delta h]
         loc_t: (tensor) Tensor to be filled w/ endcoded location targets.
         conf_t: (tensor) Tensor to be filled w/ matched indices for conf preds. Note: -1 means neutral.
         idx_t: (tensor) Tensor to be filled w/ the index of the matched gt box for each prior.
@@ -141,14 +134,22 @@ def match(pos_thresh, neg_thresh, bbox, labels, ids, crowd_boxes, priors, loc_da
     decoded_priors = decode(loc_data, priors, cfg.use_yolo_regressors) if cfg.use_prediction_matching else point_form(priors)
     
     # Size [num_objects, num_priors]
-    overlaps = compute_DIoU(bbox, decoded_priors) if not cfg.use_change_matching else change(bbox, decoded_priors)
+    if cfg.use_DIoU:
+        overlaps = compute_DIoU(bbox, decoded_priors) if not cfg.use_change_matching else change(bbox, decoded_priors)
+        pos_thresh, neg_thresh = 0.8 * pos_thresh, 0.8 * neg_thresh
+    else:
+        overlaps = jaccard(bbox, decoded_priors) if not cfg.use_change_matching else change(bbox, decoded_priors)
 
     # Size [num_priors] best ground truth for each prior
     best_truth_overlap, best_truth_idx = overlaps.max(0)
 
     # if a bbox is matched with two or more groundtruth boxes, this bbox will be assigned as -1
-    multiple_bbox = (overlaps > neg_thresh).sum(dim=0) > 1
-    best_truth_overlap[multiple_bbox] = 0.5 * (pos_thresh + neg_thresh)
+    thresh = 0.5 * (pos_thresh + neg_thresh)
+    multiple_bbox = (overlaps > pos_thresh).sum(dim=0) > 1
+    best_truth_overlap[multiple_bbox] = thresh
+    # temp = (best_truth_overlap > pos_thresh).reshape(-1)
+    # print(temp.sum(), bbox.size(0))
+    # print(best_truth_overlap[temp])
 
     # We want to ensure that each gt gets used at least once so that we don't
     # waste any training data. In order to do that, find the max overlap anchor
@@ -192,13 +193,23 @@ def match(pos_thresh, neg_thresh, bbox, labels, ids, crowd_boxes, priors, loc_da
         conf[(conf <= 0) & (best_crowd_overlap > cfg.crowd_iou_threshold)] = -1
 
     loc = encode(matches, priors, cfg.use_yolo_regressors)  # [cx, cy, w, h]
+    keep = (torch.isinf(loc).sum(-1) + torch.isnan(loc).sum(-1)) > 0
+    if keep.sum() > 0:
+        print('Inf or Nan occur in loc_t:', loc[keep])
+        conf[keep] = -1
+    # filter out those predicted boxes with inf or nan
+    keep = (torch.isinf(loc_data).sum(-1) + torch.isnan(loc_data).sum(-1)) > 0
+    if len(torch.nonzero(keep)) > 0:
+        print('Num of Inf or Nan', len(torch.nonzero(keep)))
+        conf[keep] = -1
+
     loc_t[idx]  = loc    # [num_priors,4] encoded offsets to learn
     conf_t[idx] = conf   # [num_priors] top class label for each prior
     idx_t[idx]  = best_truth_idx  # [num_priors] indices for lookup
     if ids is not None:
         id_cur = ids[best_truth_idx]
         id_cur[best_truth_overlap < pos_thresh] = 0  # Only remain positive boxes for tracking
-        ids_t[idx]  = id_cur
+        ids_t[idx] = id_cur
 
 @torch.jit.script
 def encode(matched, priors, use_yolo_regressors:bool=False):
@@ -227,7 +238,7 @@ def encode(matched, priors, use_yolo_regressors:bool=False):
         variances = [0.1, 0.2]
 
         # dist b/t match center and prior's center
-        g_cxcy = (matched[:, :2] + matched[:, 2:])/2 - priors[:, :2]
+        g_cxcy = (matched[:, :2] + matched[:, 2:])/2. - priors[:, :2]
         # encode variance
         g_cxcy /= (variances[0] * priors[:, 2:])
         # match wh / prior wh
@@ -459,7 +470,7 @@ def gaussian_kl_divergence(bbox_gt, bbox_pred):
     return loss
 
 
-def compute_DIoU(boxes_a, boxes_b):
+def compute_DIoU(boxes_a, boxes_b, eps: float = 1e-7):
     '''
     :param boxes_a: [n_a, 4]
     :param boxes_b: [n_b, 4]
@@ -475,14 +486,12 @@ def compute_DIoU(boxes_a, boxes_b):
                          boxes_b[:, ::2].unsqueeze(0).repeat(n_a, 1, 1)], dim=-1)
     y_label = torch.cat([boxes_a[:, 1::2].unsqueeze(1).repeat(1, n_b, 1),
                          boxes_b[:, 1::2].unsqueeze(0).repeat(n_a, 1, 1)], dim=-1)
-    c2 = (x_label.max(dim=-1)[0] - x_label.min(dim=-1)[0])**2 + (y_label.max(dim=-1)[0] - y_label.min(dim=-1)[0])**2
-    c2 = torch.clamp(c2, min=1e-10)
+    c2 = (x_label.max(dim=-1)[0] - x_label.min(dim=-1)[0])**2 + (y_label.max(dim=-1)[0] - y_label.min(dim=-1)[0])**2 + eps
 
     # get the distance of centres between pred_bbox and gt_bbox
     boxes_a_cxy = 0.5 * (boxes_a[:, :2] + boxes_a[:, 2:])
     boxes_b_cxy = 0.5 * (boxes_b[:, :2] + boxes_b[:, 2:])
     d2 = ((boxes_a_cxy.unsqueeze(1).repeat(1, n_b, 1) - boxes_b_cxy.unsqueeze(0).repeat(n_a, 1, 1))**2).sum(dim=-1)
-    d2 = torch.clamp(d2, min=1e-5)
 
     # DIoU: value in [-1, 1], size is [n_a, n_b]
     # 1-DIoU: value in [0, 2]

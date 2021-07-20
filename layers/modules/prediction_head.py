@@ -45,29 +45,32 @@ class PredictionModule(nn.Module):
         self.num_classes = cfg.num_classes
         self.mask_dim = cfg.mask_dim
         self.num_priors = len(pred_aspect_ratios[0]) * len(pred_scales)
-        self.embed_dim = cfg.embed_dim
+        self.track_dim = cfg.track_dim
         self.pred_aspect_ratios = pred_aspect_ratios
         self.pred_scales = pred_scales
         self.deform_groups = deform_groups
         self.parent = [parent]  # Don't include this in the state dict
         self.num_heads = cfg.num_heads
+
         if cfg.use_sipmask:
             self.mask_dim = self.mask_dim * cfg.sipmask_head
+        elif cfg.mask_proto_coeff_occlusion:
+            self.mask_dim = self.mask_dim * 3
+        elif cfg.use_dynamic_mask:
+            self.mask_dim = cfg.mask_dim ** 2 * (cfg.dynamic_mask_head_layers - 1) \
+                            + cfg.mask_dim * cfg.dynamic_mask_head_layers + 1
+            if not cfg.disable_rel_coords:
+                self.mask_dim += cfg.mask_dim * 2
 
-        if cfg.mask_proto_prototypes_as_features:
-            in_channels += self.mask_dim
+        kernel_size = cfg.pred_conv_kernels[0]
+        padding = [(kernel_size[0] - 1) // 2, (kernel_size[1] - 1) // 2]
 
         if parent is None:
-            if cfg.extra_head_net is None:
-                self.out_channels = in_channels
-            else:
-                self.upfeature, self.out_channels = make_net(in_channels, cfg.extra_head_net)
 
-            self.bbox_layer = nn.Conv2d(out_channels, self.num_priors * 4, **cfg.head_layer_params)
+            self.bbox_layer = nn.Conv2d(out_channels, self.num_priors * 4, kernel_size=kernel_size, padding=padding)
 
-            kernel_size = cfg.head_layer_params['kernel_size']
             if cfg.train_class:
-                if cfg.use_cascade_pred and cfg.use_dcn_class:
+                if cfg.use_dcn_class:
                     self.conf_layer = FeatureAlign(self.out_channels,
                                                    self.num_priors * self.num_classes,
                                                    kernel_size=kernel_size,
@@ -75,33 +78,32 @@ class PredictionModule(nn.Module):
                                                    use_pred_offset=cfg.use_pred_offset)
                 else:
                     self.conf_layer = nn.Conv2d(self.out_channels, self.num_priors * self.num_classes,
-                                                **cfg.head_layer_params)
+                                                kernel_size=kernel_size, padding=padding)
 
             if cfg.train_track:
-                if cfg.use_cascade_pred and cfg.use_dcn_track:
+                if cfg.use_dcn_track:
                     self.track_layer = FeatureAlign(self.out_channels,
                                                     self.num_priors * self.embed_dim,
                                                     kernel_size=kernel_size,
                                                     deformable_groups=self.deform_groups,
                                                     use_pred_offset=cfg.use_pred_offset)
                 else:
-                    self.track_layer = nn.Conv2d(out_channels, self.num_priors * self.embed_dim, **cfg.head_layer_params)
+                    self.track_layer = nn.Conv2d(out_channels, self.num_priors * self.embed_dim,
+                                                 kernel_size=kernel_size, padding=padding)
 
-            if cfg.use_cascade_pred and cfg.use_dcn_mask:
+            if cfg.use_dcn_mask:
                 self.mask_layer = FeatureAlign(self.out_channels,
                                                self.num_priors * self.mask_dim,
                                                kernel_size=kernel_size,
                                                deformable_groups=self.deform_groups,
                                                use_pred_offset=cfg.use_pred_offset)
             else:
-                self.mask_layer = nn.Conv2d(out_channels, self.num_priors * self.mask_dim, **cfg.head_layer_params)
+                self.mask_layer = nn.Conv2d(out_channels, self.num_priors * self.mask_dim,
+                                            kernel_size=kernel_size, padding=padding)
 
             if cfg.train_centerness:
-                self.centerness_layer = nn.Conv2d(out_channels, self.num_priors, **cfg.head_layer_params)
-
-            if cfg.use_instance_coeff:
-                self.inst_layer = nn.Conv2d(out_channels, self.num_priors * cfg.num_instance_coeffs,
-                                            **cfg.head_layer_params)
+                self.centerness_layer = nn.Conv2d(out_channels, self.num_priors,
+                                                  kernel_size=kernel_size, padding=padding)
 
             # What is this ugly lambda doing in the middle of all this clean prediction module code?
             def make_extra(num_layers):
@@ -111,15 +113,15 @@ class PredictionModule(nn.Module):
                     # Looks more complicated than it is. This just creates an array of num_layers alternating conv-relu
                     return nn.Sequential(*sum([[
                         nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+                        nn.GroupNorm(32, out_channels),
                         nn.ReLU(inplace=True)
                     ] for _ in range(num_layers)], []))
 
-            self.bbox_extra, self.conf_extra, self.mask_extra, self.track_extra = [make_extra(x) for x in cfg.extra_layers]
+            self.bbox_extra, self.conf_extra = [make_extra(x) for x in cfg.extra_layers[:2]]
+            if cfg.train_track and not cfg.track_by_Gaussian:
+                self.track_extra = make_extra(cfg.extra_layers[-1])
 
-            if cfg.mask_type == mask_type.lincomb and cfg.mask_proto_coeff_gate:
-                self.gate_layer = nn.Conv2d(out_channels, self.num_priors * self.mask_dim, kernel_size=3, padding=1)
-
-    def forward(self, x):
+    def forward(self, x, idx):
         """
         Args:
             - x: The convOut from a layer in the backbone network
@@ -135,83 +137,61 @@ class PredictionModule(nn.Module):
 
         bs, _, conv_h, conv_w = x.size()
 
-        if cfg.extra_head_net is not None:
-            x = src.upfeature(x)
-
         bbox_x = src.bbox_extra(x)
         conf_x = src.conf_extra(x)
-        mask_x = src.mask_extra(x)
-        track_x = src.track_extra(x)
+        if cfg.train_track and not cfg.track_by_Gaussian:
+            track_x = src.track_extra(x)
 
         bbox = src.bbox_layer(bbox_x)
-        if cfg.use_cascade_pred:
-            offset = src.conv_offset(bbox.detach())
-            # o1, o2, offset_mask = torch.chunk(offset_all, 3, dim=1)
-            # offset = torch.cat((o1, o2), dim=1)
-            # offset_mask = offset.new_ones(bs, int(offset.size(1)/2), conv_h, conv_w)
-        bbox = bbox.permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, 4)
+        bbox_output = bbox.permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, 4)
 
         if cfg.train_class:
-            if cfg.use_cascade_pred and cfg.use_dcn_class:
-                conf = src.conf_layer(conf_x, offset)
+            if cfg.use_dcn_class:
+                conf = src.conf_layer(conf_x, bbox.detach())
             else:
                 conf = src.conf_layer(conf_x)
             conf = conf.permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.num_classes)
 
         if cfg.train_track:
-            if cfg.use_cascade_pred and cfg.use_dcn_track:
-                track = src.track_layer(track_x, offset)
+            if cfg.use_dcn_track:
+                track = src.track_layer(track_x, bbox.detach())
             else:
                 track = src.track_layer(track_x)
-            track = track.permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.embed_dim)
+            track = track.permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.track_dim)
 
-        if cfg.use_cascade_pred and cfg.use_dcn_mask:
-            mask = src.mask_layer(mask_x, offset)
+        if cfg.use_dcn_mask:
+            mask = src.mask_layer(bbox_x, bbox.detach())
         else:
-            mask = src.mask_layer(mask_x)
+            mask = src.mask_layer(bbox_x)
         mask = mask.permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.mask_dim)
 
         if cfg.train_centerness:
             centerness = src.centerness_layer(bbox_x).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, 1)
-            centerness = torch.tanh(centerness)
-
-        if cfg.use_mask_scoring:
-            score = src.score_layer(x).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, 1)
-
-        if cfg.use_instance_coeff:
-            inst = src.inst_layer(x).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, cfg.num_instance_coeffs)
+            centerness = torch.sigmoid(centerness)
 
         # See box_utils.decode for an explanation of this
         if cfg.use_yolo_regressors:
-            bbox[:, :, :2] = torch.sigmoid(bbox[:, :, :2]) - 0.5
-            bbox[:, :, 0] /= conv_w
-            bbox[:, :, 1] /= conv_h
+            bbox_output[:, :, :2] = torch.sigmoid(bbox_output[:, :, :2]) - 0.5
+            bbox_output[:, :, 0] /= conv_w
+            bbox_output[:, :, 1] /= conv_h
 
-        if cfg.mask_proto_split_prototypes_by_head and cfg.mask_type == mask_type.lincomb:
-            mask = F.pad(mask, (self.index * self.mask_dim, (self.num_heads - self.index - 1) * self.mask_dim),
-                         mode='constant', value=0)
+        priors, prior_levels = self.make_priors(idx, conv_h, conv_w, x.device)
+        preds = {'loc': bbox_output, 'conf': conf, 'mask_coeff': mask,
+                 'priors': priors, 'prior_levels': prior_levels}
 
-        priors = self.make_priors(conv_h, conv_w, x.device)
-        preds = {'loc': bbox, 'conf': conf, 'mask_coeff': mask, 'track': track, 'priors': priors}
+        if cfg.train_track:
+            preds['track'] = track
 
         if cfg.train_centerness:
             preds['centerness'] = centerness
 
-        if cfg.use_mask_scoring:
-            preds['score'] = score
-
-        if cfg.use_instance_coeff:
-            preds['inst'] = inst
-
-        if cfg.temporal_fusion_module:
-            preds['T2S_feat'] = x
-
         return preds
 
-    def make_priors(self, conv_h, conv_w, device):
+    def make_priors(self, idx, conv_h, conv_w, device):
         """ Note that priors are [x,y,width,height] where (x,y) is the center of the box. """
         with timer.env('makepriors'):
             prior_data = []
+            prior_levels = []
             # Iteration order is important (it has to sync up with the convout)
             for j, i in product(range(conv_h), range(conv_w)):
                 # +0.5 because priors are in center-size notation
@@ -228,9 +208,13 @@ class PredictionModule(nn.Module):
                             h = r / ar / conv_h
 
                             prior_data += [x, y, w, h]
+                            prior_levels += [idx]
 
             priors = torch.Tensor(prior_data, device=device).view(1, -1, 4).detach()
             priors.requires_grad = False
 
-        return priors
+            prior_levels = torch.Tensor(prior_levels, device=device).view(1, -1).detach()
+            prior_levels.requires_grad = False
+
+        return priors, prior_levels
 

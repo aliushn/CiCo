@@ -2,13 +2,13 @@
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-from .box_utils import crop, crop_sipmask
-from datasets import cfg, activation_func
+from .box_utils import crop, crop_sipmask, center_size
+from datasets import cfg
 
 
-def generate_rel_coord(det_bbox, mask_h, mask_w, sigma_scale=2):
+def generate_rel_coord_gauss(det_bbox, mask_h, mask_w, sigma_scale=2.):
     '''
-    :param det_box: the centers of pos bboxes ==> [cx, cy]
+    :param det_box: pos bboxes ==> [x1, y1, x2, y2]
     :param mask_h: height of pred_mask
     :param mask_w: weight of pred_mask
     :return: rel_coord ==> [num_pos, mask_h, mask_w, 2]
@@ -16,75 +16,48 @@ def generate_rel_coord(det_bbox, mask_h, mask_w, sigma_scale=2):
 
     # generate relative coordinates
     num_pos = det_bbox.size(0)
-    det_bbox_ori = det_bbox.new(num_pos, 4)
-    det_bbox_ori[:, 0::2] = det_bbox[:, 0::2] * mask_w
-    det_bbox_ori[:, 1::2] = det_bbox[:, 1::2] * mask_h
-    x_range = torch.arange(mask_w)
-    y_range = torch.arange(mask_h)
-    y_grid, x_grid = torch.meshgrid(y_range, x_range)
-    det_bbox_c = (det_bbox_ori[:, :2] + det_bbox_ori[:, 2:]) / 2
-    cx, cy = torch.round(det_bbox_c[:, 0]), torch.round(det_bbox_c[:, 1])
+    det_bbox_ori = torch.cat([det_bbox[:, 0::2] * mask_w, det_bbox[:, 1::2] * mask_h], dim=-1)[:, [0,2,1,3]]
+    det_bbox_ori_c = center_size(det_bbox_ori)
+
+    y_grid, x_grid = torch.meshgrid(torch.arange(mask_h), torch.arange(mask_w))
+    cx, cy = torch.round(det_bbox_ori_c[:, 0]), torch.round(det_bbox_ori_c[:, 1])
     y_rel_coord = (y_grid.float().unsqueeze(0).repeat(num_pos, 1, 1) - cy.view(-1, 1, 1)) ** 2
     x_rel_coord = (x_grid.float().unsqueeze(0).repeat(num_pos, 1, 1) - cx.view(-1, 1, 1)) ** 2
 
     # build 2D Normal distribution
-    det_bbox_wh = det_bbox_ori[:, 2:] - det_bbox_ori[:, :2]
-    rel_coord = []
-    for i in range(num_pos):
-        if det_bbox_wh[i][0] * det_bbox_wh[i][1] / mask_h / mask_w < 0.1:
-            sigma_scale = 0.5 * sigma_scale
-        sigma_x, sigma_y = det_bbox_wh[i] / sigma_scale
-        val = torch.exp(-0.5 * (x_rel_coord[i] / (sigma_x ** 2) + y_rel_coord[i] / (sigma_y ** 2)))
-        rel_coord.append(val.unsqueeze(0))
+    sigma_scales = torch.ones(num_pos, device=det_bbox.device)
+    small_obj = det_bbox_ori_c[:, 2] * det_bbox_ori_c[:, 3] / mask_h / mask_w < 0.1
+    sigma_scales[small_obj] = 0.5 * sigma_scale
+    sigma_xy = det_bbox_ori_c[:, 2:] / sigma_scales.reshape(-1, 1)
+    sigma_xy = torch.clamp(sigma_xy, min=1)
+    rel_coord_gauss = torch.exp(-0.5 * ((x_rel_coord / sigma_xy[:, 0].reshape(-1, 1, 1)) ** 2
+                                        + (y_rel_coord / sigma_xy[:, 1].reshape(-1, 1, 1)) ** 2))
 
-    return torch.cat(rel_coord, dim=0)
+    return rel_coord_gauss
 
 
-def mask_head(protos, proto_coeff, num_mask_head, mask_dim=8, use_rela_coord=False, img_meta=None):
-    """
-    :param protos: [1, n, h, w]
-    :param proto_coeff: reshape as weigths and bias
-    :return: [1, 1, h, w]
-    """
+def generate_rel_coord(det_bbox, fpn_levels, sizes_of_interest, h, w):
+    '''
+    :param det_bbox: pos bboxes with normalization ==> [x1, y1, x2, y2], whose values in [0, 1]
+    :param h: height of pred_mask
+    :param w: weight of pred_mask
+    :return: rel_coord ==> [num_pos, mask_h, mask_w, 2]
+    '''
 
-    # reshape proto_coef as weights and bias of filters
-    if use_rela_coord:
-        ch = mask_dim + 1
-    else:
-        ch = mask_dim
-    ch2 = mask_dim * ch
+    shifts_x = torch.arange(0, w,  dtype=torch.float32, device=det_bbox.device)
+    shifts_y = torch.arange(0, h,  dtype=torch.float32, device=det_bbox.device)
+    shift_y, shift_x = torch.meshgrid(shifts_y, shifts_x)
+    shift_x = shift_x.reshape(-1)
+    shift_y = shift_y.reshape(-1)
+    locations = torch.stack((shift_x, shift_y), dim=1) + 0.5
 
-    if num_mask_head == 1:
-        weights1 = proto_coeff[:8].reshape(1, 8, 1, 1)
-        bias1 = proto_coeff[-1].reshape(1)
-        # FCN network for mask prediction
-        pred_masks = F.conv2d(protos, weights1, bias1, stride=1, padding=0, dilation=1, groups=1)
+    instance_locations = center_size(det_bbox)[:, :2] * torch.tensor([w, h]).view(1, -1)
+    relative_coords = instance_locations.reshape(-1, 1, 2) - locations.reshape(1, -1, 2)
+    relative_coords = relative_coords.permute(0, 2, 1).float()
+    soi = sizes_of_interest[fpn_levels]
+    relative_coords = relative_coords / soi.reshape(-1, 1, 1).float()
 
-    elif num_mask_head == 2:
-        weights1 = proto_coeff[:ch2].reshape(mask_dim, ch, 1, 1)
-        bias1 = proto_coeff[ch2:ch2 + mask_dim]
-        weights2 = proto_coeff[ch2 + mask_dim:ch2 + 2 * mask_dim].reshape(1, mask_dim, 1, 1)
-        bias2 = proto_coeff[-1].reshape(1)
-        # FCN network for mask prediction
-        protos1 = F.relu(F.conv2d(protos, weights1, bias1, stride=1, padding=0, dilation=1, groups=1))
-        pred_masks = F.conv2d(protos1, weights2, bias2, stride=1, padding=0, dilation=1, groups=1)
-
-        # plot_protos(protos, pred_masks, img_meta, num=1)
-        # plot_protos(protos1, pred_masks, img_meta, num=2)
-
-    elif num_mask_head == 3:
-        weights1 = proto_coeff[:ch2].reshape(mask_dim, ch, 1, 1)
-        bias1 = proto_coeff[ch2:ch2 + mask_dim]
-        weights2 = proto_coeff[ch2 + mask_dim:ch2 + mask_dim + mask_dim**2].reshape(mask_dim, mask_dim, 1, 1)
-        bias2 = proto_coeff[ch2 + mask_dim + mask_dim**2:ch2 + mask_dim*2 + mask_dim**2]
-        weights3 = proto_coeff[ch2 + mask_dim*2 + mask_dim**2:ch2 + mask_dim*3 + mask_dim**2].reshape(1, mask_dim, 1, 1)
-        bias3 = proto_coeff[-1].reshape(1)
-        # FCN network for mask prediction
-        protos1 = F.relu(F.conv2d(protos, weights1, bias1, stride=1, padding=0, dilation=1, groups=1))
-        protos2 = F.relu(F.conv2d(protos1, weights2, bias2, stride=1, padding=0, dilation=1, groups=1))
-        pred_masks = F.conv2d(protos2, weights3, bias3, stride=1, padding=0, dilation=1, groups=1)
-
-    return pred_masks
+    return relative_coords.reshape(-1, 2, h, w)
 
 
 def plot_protos(protos, pred_masks, img_meta, num):
@@ -117,10 +90,6 @@ def generate_mask(proto_data, mask_coeff, bbox=None):
     '''
 
     mask_coeff = cfg.mask_proto_coeff_activation(mask_coeff)
-    if cfg.mask_proto_coeff_activation == activation_func.sigmoid:
-        # hope to get mask coefficients with L0 sparsity
-        mask_coeff = mask_coeff * 2 - 1
-        mask_coeff = torch.clamp(mask_coeff, min=0)
 
     # get masks
     if cfg.use_sipmask:
@@ -134,7 +103,6 @@ def generate_mask(proto_data, mask_coeff, bbox=None):
 
         if not cfg.mask_proto_coeff_occlusion:
             pred_masks = generate_single_mask(proto_data, mask_coeff)
-            pred_masks = cfg.mask_proto_mask_activation(pred_masks)
         else:
             # background
             pred_masks_b = generate_single_mask(proto_data, mask_coeff[:, :cfg.mask_dim])
@@ -143,6 +111,7 @@ def generate_mask(proto_data, mask_coeff, bbox=None):
             # parts from overlapped objects
             pred_masks_o = generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim*2:])
             pred_masks = torch.stack([pred_masks_b, pred_masks_t, pred_masks_o], dim=-2)    # [h, w, 3, n]
+        pred_masks = cfg.mask_proto_mask_activation(pred_masks)
 
         if bbox is not None:
             _, pred_masks = crop(pred_masks, bbox)                                          # [h, w, n] or [h, w, 3, n]
@@ -192,3 +161,29 @@ def mask_iou(mask_a, mask_b):
     union = (area_a + area_b) - intersection
     mask_ious = intersection.float() / torch.clamp(union.float(), min=1)
     return mask_ious if use_batch else mask_ious.squeeze(0)
+
+
+def aligned_bilinear(tensor, factor):
+    assert tensor.dim() == 4
+    assert factor >= 1
+    assert int(factor) == factor
+
+    if factor == 1:
+        return tensor
+
+    h, w = tensor.size()[2:]
+    tensor = F.pad(tensor, pad=(0, 1, 0, 1), mode="replicate")
+    oh = factor * h + 1
+    ow = factor * w + 1
+    tensor = F.interpolate(
+        tensor, size=(oh, ow),
+        mode='bilinear',
+        align_corners=True
+    )
+    tensor = F.pad(
+        tensor, pad=(factor // 2, 0, factor // 2, 0),
+        mode="replicate"
+    )
+
+    return tensor[:, :, :oh - 1, :ow - 1]
+
