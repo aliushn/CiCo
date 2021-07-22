@@ -536,15 +536,15 @@ base_config = Config({
 
     # SSD data augmentation parameters
     # Randomize hue, vibrance, etc.
-    'augment_photometric_distort': True,
+    'augment_photometric_distort': False,
     # Have a chance to scale down the image and pad (to emulate smaller detections)
-    'augment_expand': True,
+    'augment_expand': False,
     # Potentialy sample a random crop from the image and put it in a random place
-    'augment_random_sample_crop': True,
+    'augment_random_sample_crop': False,
     # Mirror the image with a probability of 1/2
-    'augment_random_mirror': True,
+    'augment_random_mirror': False,
     # Flip the image vertically with a probability of 1/2
-    'augment_random_flip': False,
+    'augment_random_flip': True,
     # With uniform probability, rotate the image [0,90,180,270] degrees
     'augment_random_rot90': False,
 
@@ -606,7 +606,7 @@ base_config = Config({
     # Whether or not to preserve aspect ratio when resizing the image.
     # If True, uses the faster r-cnn resizing scheme.
     # If False, all images arte resized to max_size x max_size
-    'preserve_aspect_ratio': False,
+    'preserve_aspect_ratio': True,
 
     # Whether or not to use the predicted coordinate scheme from Yolo v2
     'use_yolo_regressors': False,
@@ -649,7 +649,7 @@ STMask_base_config = base_config.copy({
     'max_epoch': 24,
 
     # loss
-    'conf_alpha': 1,
+    'conf_alpha': 3,
     'stuff_alpha': 1,
     'bbox_alpha': 1,
     'BIoU_alpha': 2,
@@ -683,15 +683,16 @@ STMask_base_config = base_config.copy({
     'mask_alpha': 6.125,
     'mask_proto_src': [0, 1, 2],
     'mask_proto_crop': True,
-    'mask_dim': 8,
+    'mask_dim': 32,
     'mask_proto_net': [(256, 3, {'padding': 1})] * 3 + [(None, -2, {})],
     'mask_proto_coeff_diversity_loss': False,
     'mask_proto_crop_with_pred_box': False,
     'mask_proto_coeff_occlusion': False,
     'mask_dice_coefficient': True,
+    'mask_loss_with_ori_size': False,
 
     # Dynamic Mask Settings
-    'use_dynamic_mask': True,
+    'use_dynamic_mask': False,
     'dynamic_mask_head_layers': 3,
     'disable_rel_coords': False,
 
@@ -753,10 +754,10 @@ STMask_base_config = base_config.copy({
 
     # eval
     'eval_frames_of_clip': 21,
-    'nms_conf_thresh': 0.1,
+    'nms_conf_thresh': 0.2,
     'nms_thresh': 0.5,
-    'eval_conf_thresh': 0.1,
-    'candidate_conf_thresh': 0.1,
+    'eval_conf_thresh': 0.2,
+    'candidate_conf_thresh': 0.2,
     'nms_as_miou': True,
     'remove_false_inst': True,
     'add_missed_masks': False,
@@ -1035,8 +1036,8 @@ STMask_base_coco_ori_config = STMask_base_config.copy({
     # Image Size
     'MS_train': True,
     'preserve_aspect_ratio': True,
-    'min_size': 550,
-    'max_size': 700,
+    'min_size': 640,
+    'max_size': 768,
 
     # Training params
     'lr_steps': (18, 24, 30),
@@ -1073,27 +1074,17 @@ STMask_plus_base_coco_config = STMask_base_coco_config.copy({
 
 })
 
-STMask_plus_resnet50_coco_config = STMask_plus_resnet50_config.copy({
-    'name': 'STMask_plus_resnet50_coco',
+STMask_resnet50_coco_ori_config = STMask_base_coco_ori_config.copy({
+    'name': 'STMask_resnet50_coco_ori',
 
-    # Dataset stuff
-    'dataset': coco2017_dataset,
-    'num_classes': len(coco2017_dataset.class_names),
-
-    # Image Size
-    'MS_train': True,
-    'min_size': 400,
-    'max_size': 550,
-
-    # Training params
-    'lr_steps': (18, 24, 30),
-    'max_epoch': 36,
-
-    'backbone': STMask_plus_resnet50_config.backbone.copy({
+    'backbone': STMask_resnet50_config.backbone.copy({
         'path': 'resnet50-19c8e357.pth',
-    }),
+        'selected_layers': list(range(1, 4)),
 
-    'train_track': False,
+        'pred_aspect_ratios': STMask_base_config.backbone.pred_aspect_ratios,
+        'pred_scales': STMask_base_config.backbone.pred_scales,
+
+    }),
 })
 
 STMask_resnet152_coco_config = STMask_base_config.copy({

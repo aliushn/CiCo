@@ -101,6 +101,6 @@ class DynamicMaskHead(nn.Module):
 
         weights, biases = parse_dynamic_params(mask_head_params, self.channels,
                                                self.weight_nums, self.bias_nums)
-        mask_logits = self.mask_heads_forward(mask_head_inputs.reshape(1, -1, H, W), weights, biases, n_inst)
+        mask_logits = self.mask_heads_forward(mask_head_inputs.reshape(1, -1, H, W).contiguous(), weights, biases, n_inst)
 
         return cfg.mask_proto_mask_activation(mask_logits.squeeze(0))

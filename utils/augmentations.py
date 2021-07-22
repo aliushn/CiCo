@@ -101,10 +101,10 @@ class Pad(object):
 
     Note: this expects im_w <= width and im_h <= height
     """
-    def __init__(self, mean=MEANS, pad_gt=True):
+    def __init__(self, mean=MEANS, MS_train=True, pad_gt=True):
         self.mean = mean
         self.max_size = cfg.max_size
-        self.MS_train = cfg.MS_train
+        self.MS_train = MS_train
         self.pad_gt = pad_gt
 
     def __call__(self, image, masks, boxes=None, labels=None):
@@ -122,10 +122,14 @@ class Pad(object):
 
             if self.pad_gt:
                 expand_masks = np.zeros(
-                    (masks.shape[0], self.height, self.width),
+                    (masks.shape[0], height, width),
                     dtype=masks.dtype)
                 expand_masks[:,:im_h,:im_w] = masks
                 masks = expand_masks
+
+                # Scale bounding boxes (which are currently percent coordinates)
+                boxes[:, [0, 2]] *= (im_w / width)
+                boxes[:, [1, 3]] *= (im_h / height)
 
         return image, masks, boxes, labels
 
@@ -153,10 +157,10 @@ class Resize(object):
         
         return int(width), int(height)
 
-    def __init__(self, resize_gt=True):
+    def __init__(self, MS_train=False, resize_gt=True):
         self.divisibility = 32
         self.resize_gt = resize_gt
-        self.MS_train = cfg.MS_train
+        self.MS_train = MS_train
         self.min_size = cfg.min_size
         self.max_size = cfg.max_size
         self.preserve_aspect_ratio = cfg.preserve_aspect_ratio
@@ -168,6 +172,7 @@ class Resize(object):
             ms_size = np.random.random_integers(self.min_size, self.max_size)
             ms_size = int((ms_size + (self.divisibility - 1)) // self.divisibility * self.divisibility)
             if self.preserve_aspect_ratio:
+                # resize long edges
                 if img_w > img_h:
                     width, height = ms_size, int(img_h * (ms_size / img_w))
                 else:
@@ -193,9 +198,7 @@ class Resize(object):
             else:
                 masks = masks.transpose((2, 0, 1))
 
-            # Scale bounding boxes (which are currently absolute coordinates)
-            boxes[:, [0, 2]] *= (width / img_w)
-            boxes[:, [1, 3]] *= (height / img_h)
+            # for precent coords, bboxes do not need resize
 
         return image, masks, boxes, labels
 
@@ -473,12 +476,11 @@ class RandomMirror(object):
 
 class RandomFlip(object):
     def __call__(self, image, masks, boxes, labels):
-        height , _ , _ = image.shape
         if random.randint(2):
             image = image[::-1, :]
             masks = masks[:, ::-1, :]
             boxes = boxes.copy()
-            boxes[:, 1::2] = height - boxes[:, 3::-2]
+            boxes[:, 1::2] = 1 - boxes[:, 3::-2]
         return image, masks, boxes, labels
 
 
@@ -624,8 +626,8 @@ class BaseTransform(object):
     def __init__(self, mean=MEANS, std=STD):
         self.augment = Compose([
             ConvertFromInts(),
-            Resize(resize_gt=False),
-            Pad(cfg.max_size, cfg.max_size, mean, pad_gt=False),
+            Resize(MS_train=False, resize_gt=False),
+            Pad(mean, MS_train=False, pad_gt=False),
             BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')
         ])
 
@@ -688,15 +690,18 @@ class SSDAugmentation(object):
     def __init__(self, mean=MEANS, std=STD):
         self.augment = Compose([
             ConvertFromInts(),
-            ToAbsoluteCoords(),
-            enable_if(cfg.augment_photometric_distort, PhotometricDistort()),
+            # if cfg.augment_expand = True, it is easier to compile
+            # if we transfer bboxes from present coords to absolute_coords
+            enable_if(cfg.augment_expand, ToAbsoluteCoords()),
+            # enable_if(cfg.augment_photometric_distort, PhotometricDistort()),
             enable_if(cfg.augment_expand, Expand(mean)),
-            enable_if(cfg.augment_random_sample_crop, RandomSampleCrop()),
-            enable_if(cfg.augment_random_mirror, RandomMirror()),
+            enable_if(cfg.augment_expand, ToPercentCoords()),
+            # enable_if(cfg.augment_random_sample_crop, RandomSampleCrop()),
+            # enable_if(cfg.augment_random_mirror, RandomMirror()),
             enable_if(cfg.augment_random_flip, RandomFlip()),
-            enable_if(cfg.augment_random_flip, RandomRot90()),
-            Resize(),
-            Pad(mean),
+            # enable_if(cfg.augment_random_rot90, RandomRot90()),
+            Resize(MS_train=cfg.MS_train),
+            Pad(mean, MS_train=cfg.MS_train),
             # ToPercentCoords(),
             BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')
         ])

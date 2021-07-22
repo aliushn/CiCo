@@ -277,7 +277,7 @@ class PredictionModule_FC(nn.Module):
             priors = torch.Tensor(prior_data, device=device).view(1, -1, 4).detach()
             priors.requires_grad = False
 
-            prior_levels = torch.Tensor(prior_levels, device=device).view(1, -1, 4).detach()
+            prior_levels = torch.Tensor(prior_levels, device=device).view(1, -1).detach()
             prior_levels.requires_grad = False
 
         return priors, prior_levels

@@ -205,36 +205,25 @@ def prepare_data_vis(data_batch, devices, train_mode=True):
         return images, images_meta
 
 
-def prepare_data_coco(data_batch, devices, train_mode=True):
-    if train_mode:
-        with torch.no_grad():
-            imgs = ImageList_from_tensors(data_batch[0], size_divisibility=32).cuda(devices)
-            image_sizes_ori = torch.tensor([[im.shape[-2], im.shape[-1]] for im in data_batch[0]])
-            h, w = imgs.size()[-2:]
-            bboxes_list = []
-            for target in data_batch[1]:
-                target[:, 0:4:2] /= w
-                target[:, 1:4:2] /= h
-                bboxes_list.append(target[:, :4].cuda(devices))
+def prepare_data_coco(data_batch, devices):
+    with torch.no_grad():
+        imgs = ImageList_from_tensors(data_batch[0], size_divisibility=32).cuda(devices)
+        image_sizes_ori = torch.tensor([[im.shape[-2], im.shape[-1]] for im in data_batch[0]])
+        h, w = imgs.size()[-2:]
+        bboxes_list = []
+        for i, target in enumerate(data_batch[1]):
+            target[:, 0:4:2] *= (image_sizes_ori[i, 1] / torch.tensor(w).float())
+            target[:, 1:4:2] *= (image_sizes_ori[i, 0] / torch.tensor(h).float())
+            bboxes_list.append(target[:, :4].cuda(devices))
 
-            labels_list = [target[:, -1].data.long().cuda(devices) for target in data_batch[1]]
-            masks_list = []
-            for i, mask in enumerate(data_batch[2]):
-                padding_size = [0, w - image_sizes_ori[i, 1], 0, h - image_sizes_ori[i, 0]]
-                masks_list.append(F.pad(mask, padding_size, value=0).cuda(devices))
-            num_crowds = data_batch[3]
+        labels_list = [target[:, -1].data.long().cuda(devices) for target in data_batch[1]]
+        masks_list = []
+        for i, mask in enumerate(data_batch[2]):
+            padding_size = [0, w - image_sizes_ori[i, 1], 0, h - image_sizes_ori[i, 0]]
+            masks_list.append(F.pad(mask, padding_size, value=0).cuda(devices))
+        num_crowds = data_batch[3]
 
-            return imgs, bboxes_list, labels_list, masks_list, num_crowds
-
-    else:
-        # [0] is downsample image [1, 3, 384, 640], [1] is original image [1, 3, 736, 1280]
-        images = torch.stack([img[0].data for img in data_batch['img']], dim=0)
-        images_meta = [img_meta[0].data for img_meta in data_batch['img_meta']]
-
-        images = gradinator(images.cuda(devices))
-        images_meta = images_meta
-
-        return images, images_meta
+        return imgs, bboxes_list, labels_list, masks_list, num_crowds
 
 
 def gradinator(x):

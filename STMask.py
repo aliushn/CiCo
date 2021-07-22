@@ -41,7 +41,7 @@ class STMask(nn.Module):
         else:
             in_channels = self.backbone.channels[self.proto_src[0]]
 
-        if self.proto_src is not None:
+        if self.proto_src is not None and len(self.proto_src) > 1:
             self.mask_refine = nn.ModuleList([nn.Sequential(*[
                 nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
                 nn.BatchNorm2d(in_channels),
@@ -251,17 +251,20 @@ class STMask(nn.Module):
                 if self.proto_src is None:
                     proto_x = x
                 else:
-                    for src_i, src in enumerate(self.proto_src):
-                        if src_i == 0:
-                            proto_x = self.mask_refine[src_i](fpn_outs[src])
-                        else:
-                            proto_x_p = self.mask_refine[src_i](fpn_outs[src])
-                            target_h, target_w = proto_x.size()[2:]
-                            h, w = proto_x_p.size()[2:]
-                            assert target_h % h == 0 and target_w % w == 0
-                            factor = target_h // h
-                            proto_x_p = aligned_bilinear(proto_x_p, factor)
-                            proto_x = proto_x + proto_x_p
+                    if len(self.proto_src) == 1:
+                        proto_x = fpn_outs[self.proto_src[0]]
+                    else:
+                        for src_i, src in enumerate(self.proto_src):
+                            if src_i == 0:
+                                proto_x = self.mask_refine[src_i](fpn_outs[src])
+                            else:
+                                proto_x_p = self.mask_refine[src_i](fpn_outs[src])
+                                target_h, target_w = proto_x.size()[2:]
+                                h, w = proto_x_p.size()[2:]
+                                assert target_h % h == 0 and target_w % w == 0
+                                factor = target_h // h
+                                proto_x_p = aligned_bilinear(proto_x_p, factor)
+                                proto_x = proto_x + proto_x_p
 
                 proto_out_ori = self.proto_net(proto_x)
                 proto_dict = self.proto_conv(proto_out_ori)

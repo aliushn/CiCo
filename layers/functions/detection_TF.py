@@ -221,7 +221,7 @@ class Detect_TF(object):
         else:
             num_classes, num_dets = idx.size()
             if cfg.use_DIoU:
-                iou = compute_DIoU(boxes_idx, boxes_idx)
+                iou = compute_DIoU(boxes, boxes)
             else:
                 iou = jaccard(boxes, boxes)  # [num_classes, num_dets, num_dets]
 

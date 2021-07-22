@@ -217,10 +217,10 @@ class MultiBoxLoss(nn.Module):
 
                 decoded_loc_p = torch.clamp(decode(loc_p, pos_priors, cfg.use_yolo_regressors), min=0, max=1)
                 decoded_loc_t = torch.clamp(decode(loc_t, pos_priors, cfg.use_yolo_regressors), min=0, max=1)
-                if cfg.use_DIoU:
-                    IoU_loss = 1. - compute_DIoU(decoded_loc_p, decoded_loc_t).diag()
-                else:
-                    IoU_loss = giou_loss(decoded_loc_p, decoded_loc_t, reduction='none')
+                # if cfg.use_DIoU:
+                #     IoU_loss = 1. - compute_DIoU(decoded_loc_p, decoded_loc_t).diag()
+                # else:
+                IoU_loss = giou_loss(decoded_loc_p, decoded_loc_t, reduction='none')
 
                 if cfg.use_boxiou_loss:
                     losses['BIoU'] = IoU_loss.mean() * cfg.BIoU_alpha
@@ -656,32 +656,39 @@ class MultiBoxLoss(nn.Module):
                         pred_masks = pred_masks.permute(2, 0, 1).contiguous()
 
                 if cfg.use_dynamic_mask or not cfg.mask_proto_coeff_occlusion:
-                    # [n, h, w] => [n, 1, h, w]
-                    upsampled_pred_masks = F.interpolate(pred_masks.unsqueeze(1).float(), (H_gt, W_gt),
-                                                         mode=interpolation_mode, align_corners=False).squeeze(1)
-                    upsampled_pred_masks = torch.clamp(upsampled_pred_masks, min=0, max=1)
+                    if cfg.mask_loss_with_ori_size:
+                        # [n, h, w] => [n, 1, h, w]
+                        pred_masks = F.interpolate(pred_masks.unsqueeze(1).float(), (H_gt, W_gt),
+                                                   mode=interpolation_mode, align_corners=False).squeeze(1)
+                        pred_masks = torch.clamp(pred_masks, min=0, max=1)
+                    else:
+                        mask_t = F.interpolate(mask_t.unsqueeze(1).float(), (pred_masks.size(-2), pred_masks.size(-1)),
+                                               mode=interpolation_mode, align_corners=False).squeeze(1)
 
                     if cfg.mask_dice_coefficient:
-                        pre_loss_dice = self.dice_coefficient(upsampled_pred_masks, mask_t.float())
+                        pre_loss_dice = self.dice_coefficient(pred_masks, mask_t.float())
                     else:
                         # activation_funcunction is sigmoid
-                        pre_loss_bce = F.binary_cross_entropy(upsampled_pred_masks,
-                                                              mask_t.float(), reduction='none')
+                        pre_loss_bce = F.binary_cross_entropy(pred_masks, mask_t.float(), reduction='none')
 
                 else:
-                    # [n, h, w, 3] => [n, 3, h, w]
-                    pred_masks = pred_masks.permute(0, 3, 1, 2).contiguous()
-                    upsampled_pred_masks = F.interpolate(pred_masks.float(), (H_gt, W_gt),
-                                                         mode=interpolation_mode, align_corners=False)
-                    upsampled_pred_masks = torch.clamp(upsampled_pred_masks, min=0, max=1)
+                    if cfg.mask_loss_with_ori_size:
+                        # [n, h, w, 3] => [n, 3, h, w]
+                        pred_masks = pred_masks.permute(0, 3, 1, 2).contiguous()
+                        pred_masks = F.interpolate(pred_masks.float(), (H_gt, W_gt),
+                                                   mode=interpolation_mode, align_corners=False)
+                        pred_masks = torch.clamp(pred_masks, min=0, max=1)
+                    else:
+                        mask_t = F.interpolate(mask_t.float(), (pred_masks.size(-2), pred_masks.size(-1)),
+                                               mode=interpolation_mode, align_corners=False)
 
                     if cfg.mask_dice_coefficient:
                         cur_loss = []
                         for i in range(3):
-                            cur_loss.append(self.dice_coefficient(upsampled_pred_masks[:, i], mask_t.float()[:, i]))
+                            cur_loss.append(self.dice_coefficient(pred_masks[:, i], mask_t.float()[:, i]))
                         pre_loss_dice = torch.stack(cur_loss, dim=0).mean(dim=0)
                     else:
-                        pre_loss_bce = F.binary_cross_entropy(upsampled_pred_masks,
+                        pre_loss_bce = F.binary_cross_entropy(pred_masks,
                                                               mask_t.float(), reduction='none').sum(dim=1)
                 if cfg.mask_dice_coefficient:
                     loss_dice += pre_loss_dice.mean()

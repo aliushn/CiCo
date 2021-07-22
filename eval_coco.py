@@ -6,6 +6,7 @@ from layers.utils import jaccard, center_size, mask_iou, postprocess, undo_image
 from utils import timer
 from layers.visualization import get_color
 import pycocotools
+import torch.nn.functional as F
 
 import numpy as np
 import torch
@@ -135,31 +136,31 @@ coco_cats_inv = {}
 color_cache = defaultdict(lambda: {})
 
 
-def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, mask_alpha=0.45, fps_str=''):
+def prep_display(dets_out, img, ori_h, ori_w, img_h, img_w, undo_transform=True,
+                 class_color=False, mask_alpha=0.45, fps_str=''):
     """
     Note: If undo_transform=False then im_h and im_w are allowed to be None.
     """
     if undo_transform:
-        img_numpy = undo_image_transformation(img, h, w)
+        img_numpy = undo_image_transformation(img, ori_h, ori_w, img_h, img_w)
         img_gpu = torch.Tensor(img_numpy).cuda()
     else:
         img_gpu = img / 255.0
         h, w, _ = img.shape
 
     with timer.env('Postprocess'):
-        # save = cfg.rescore_bbox
-        # cfg.rescore_bbox = True
-        t = postprocess(dets_out, w, h, visualize_lincomb=args.display_lincomb,
-                        score_threshold=args.score_threshold)
-        # cfg.rescore_bbox = save
+
+        classes, scores, boxes, masks = postprocess(dets_out, ori_h, ori_w, img_h, img_w,
+                                                    visualize_lincomb=args.display_lincomb,
+                                                    score_threshold=args.score_threshold)
 
     with timer.env('Copy'):
-        idx = t[1].argsort(0, descending=True)[:args.top_k]
+        idx = scores.argsort(0, descending=True)[:args.top_k]
 
-        if cfg.eval_mask_branch:
-            # Masks are drawn on the GPU, so don't copy
-            masks = t[3][idx]
-        classes, scores, boxes = [x[idx].cpu().numpy() for x in t[:3]]
+        classes = classes[idx].cpu().numpy()
+        scores = scores[idx].cpu().numpy()
+        boxes = boxes[idx].cpu().numpy()
+        masks = masks[idx]
 
     num_dets_to_consider = min(args.top_k, classes.shape[0])
     for j in range(num_dets_to_consider):
@@ -246,9 +247,9 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
     return img_numpy
 
 
-def prep_benchmark(dets_out, h, w):
+def prep_benchmark(dets_out, ori_h, ori_w, img_h, img_w):
     with timer.env('Postprocess'):
-        t = postprocess(dets_out, w, h, score_threshold=args.score_threshold)
+        t = postprocess(dets_out, ori_h, ori_w, img_h, img_w, score_threshold=args.score_threshold)
 
     with timer.env('Copy'):
         classes, scores, boxes, masks = [x[:args.top_k] for x in t]
@@ -358,13 +359,14 @@ class Detections:
             json.dump(output, f)
 
 
-def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, detections: Detections = None):
+def prep_metrics(ap_data, dets, img, gt, gt_masks, ori_h, ori_w, img_h, img_w, num_crowd, image_id,
+                 detections: Detections = None):
     """ Returns a list of APs for this image, with each element being for a class  """
     if not args.output_coco_json:
         with timer.env('Prepare gt'):
             gt_boxes = torch.Tensor(gt[:, :4])
-            gt_boxes[:, [0, 2]] *= w
-            gt_boxes[:, [1, 3]] *= h
+            gt_boxes[:, [0, 2]] *= ori_w
+            gt_boxes[:, [1, 3]] *= ori_h
             gt_classes = list(gt[:, 4].astype(int))
             gt_masks = torch.Tensor(gt_masks)
 
@@ -375,7 +377,7 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, de
                 crowd_classes, gt_classes = split(gt_classes)
 
     with timer.env('Postprocess'):
-        classes, scores, boxes, masks = postprocess(dets, w, h,
+        classes, scores, boxes, masks = postprocess(dets, ori_h, ori_w, img_h, img_w,
                                                     score_threshold=args.score_threshold)
 
         if classes.size(0) == 0:
@@ -394,12 +396,12 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, de
     if args.output_coco_json:
         with timer.env('JSON Output'):
             boxes = boxes.cpu().numpy()
-            masks = masks.view(-1, h, w).cpu().numpy()
+            masks = masks.view(-1, ori_h, ori_w).cpu().numpy()
             for i in range(masks.shape[0]):
                 # Make sure that the bounding box actually makes sense and a mask was produced
                 if (boxes[i, 3] - boxes[i, 1]) * (boxes[i, 2] - boxes[i, 0]) > 0:
-                    detections.add_bbox(image_id, classes[i], boxes[i, :], box_scores[i])
-                    detections.add_mask(image_id, classes[i], masks[i, :, :], mask_scores[i])
+                    detections.add_bbox(image_id, classes[i]-1, boxes[i, :], box_scores[i])
+                    detections.add_mask(image_id, classes[i]-1, masks[i, :, :], mask_scores[i])
             return
 
     with timer.env('Eval Setup'):
@@ -575,7 +577,7 @@ def evalimage(net: STMask, path: str, save_path: str = None):
     batch = FastBaseTransform()(frame.unsqueeze(0))
     preds = net(batch)
 
-    img_numpy = prep_display(preds, frame, None, None, undo_transform=False)
+    img_numpy = prep_display(preds, frame, None, None, None, None, undo_transform=False)
 
     if save_path is None:
         img_numpy = img_numpy[:, :, (2, 1, 0)]
@@ -692,7 +694,7 @@ def evalvideo(net: STMask, path: str, out_path: str = None):
     def prep_frame(inp, fps_str):
         with torch.no_grad():
             frame, preds = inp
-            return prep_display(preds, frame, None, None, undo_transform=False, class_color=True, fps_str=fps_str)
+            return prep_display(preds, frame, None, None, None, None, undo_transform=False, class_color=True, fps_str=fps_str)
 
     frame_buffer = Queue()
     video_fps = 0
@@ -916,7 +918,15 @@ def evaluate(net: STMask, dataset, train_mode=False, iteration=None):
             timer.reset()
 
             with timer.env('Load Data'):
-                img, gt, gt_masks, h, w, num_crowd = dataset.pull_item(image_idx)
+                img, gt, gt_masks, ori_h, ori_w, num_crowd = dataset.pull_item(image_idx)
+                pad_h, pad_w = img.size()[-2:]
+                if cfg.preserve_aspect_ratio:
+                    if ori_h > ori_w:
+                        img_h, img_w = pad_h, int(ori_w * (pad_h / ori_h))
+                    else:
+                        img_h, img_w = int(ori_h * (pad_w / ori_w)), pad_w
+                else:
+                    img_h, img_w = pad_h, pad_w
 
                 # Test flag, do not upvote
                 if cfg.mask_proto_debug:
@@ -930,15 +940,20 @@ def evaluate(net: STMask, dataset, train_mode=False, iteration=None):
 
             with timer.env('Network Extra'):
                 preds, _, _ = net(batch)
+                for b in range(len(preds)):
+                    if preds[b]['mask'].nelement() > 0:
+                        preds[b]['mask'] = F.interpolate(preds[b]['mask'].unsqueeze(0), (pad_h, pad_w),
+                                                         mode='bilinear', align_corners=False).squeeze(0)
 
             # Perform the meat of the operation here depending on our mode.
             if args.display:
                 cfg.preserve_aspect_ratio = True
-                img_numpy = prep_display(preds, img, h, w)
+                img_numpy = prep_display(preds, img, ori_h, ori_w, img_h, img_w)
             elif args.benchmark:
-                prep_benchmark(preds, h, w)
+                prep_benchmark(preds, ori_h, ori_w, img_h, img_w)
             else:
-                prep_metrics(ap_data, preds, img, gt, gt_masks, h, w, num_crowd, dataset.ids[image_idx], detections)
+                prep_metrics(ap_data, preds, img, gt, gt_masks, ori_h, ori_w, img_h, img_w,
+                             num_crowd, dataset.ids[image_idx], detections)
 
             # First couple of images take longer because we're constructing the graph.
             # Since that's technically initialization, don't include those in the FPS calculations.

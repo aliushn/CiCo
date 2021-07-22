@@ -14,7 +14,7 @@ import os
 from ..utils import sanitize_coordinates, center_size, generate_mask
 
 
-def postprocess(det_output, ori_w, ori_h, batch_idx=0, interpolation_mode='bilinear',
+def postprocess(det_output, ori_h, ori_w, img_h, img_w, batch_idx=0, interpolation_mode='bilinear',
                 visualize_lincomb=False, score_threshold=0):
     """
     Postprocesses the output of Yolact on testing mode into a format that makes sense,
@@ -22,8 +22,10 @@ def postprocess(det_output, ori_w, ori_h, batch_idx=0, interpolation_mode='bilin
 
     Args:
         - det_output: The lost of dicts that Detect outputs.
-        - w: The real with of the image.
-        - h: The real height of the image.
+        - ori_w: The real width of the image.
+        - ori_h: The real height of the image.
+        - img_w: The input width of the images
+        - img_h: The input height of the images
         - batch_idx: If you have multiple images for this batch, the image's index in the batch.
         - interpolation_mode: Can be 'nearest' | 'area' | 'bilinear' (see torch.nn.functional.interpolate)
 
@@ -53,6 +55,7 @@ def postprocess(det_output, ori_w, ori_h, batch_idx=0, interpolation_mode='bilin
         return [torch.Tensor()] * 4
 
     # Actually extract everything from dets now
+    pad_h, pad_w = dets['mask'].size()[-2:]
     classes = dets['class']
     boxes = dets['box']
     scores = dets['score']
@@ -60,7 +63,7 @@ def postprocess(det_output, ori_w, ori_h, batch_idx=0, interpolation_mode='bilin
 
     if cfg.eval_mask_branch:
         # At this points masks is only the coefficients
-        proto_data = dets['proto']
+        proto_data = dets['proto'][:img_h, :img_w]
 
         # Test flag, do not upvote
         if cfg.mask_proto_debug:
@@ -69,12 +72,17 @@ def postprocess(det_output, ori_w, ori_h, batch_idx=0, interpolation_mode='bilin
         if visualize_lincomb:
             display_lincomb(proto_data, masks_coeff)
 
-        # Scale masks up to the full image
-        masks = F.interpolate(dets['mask'].unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode, align_corners=False).squeeze(0)
+        # First undo padding area and then scale masks up to the full image
+        masks = dets['mask'][:, :img_h, :img_w]
+        masks = F.interpolate(masks.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode, align_corners=False).squeeze(0)
 
         # Binarize the masks
         masks.gt_(0.5)
 
+    # Undo padding for bboxes
+    boxes[:, 0::2] *= pad_w / img_w
+    boxes[:, 1::2] *= pad_h / img_h
+    # scale boxes upto the original width and height
     boxes[:, 0], boxes[:, 2] = sanitize_coordinates(boxes[:, 0], boxes[:, 2], ori_w, cast=False)
     boxes[:, 1], boxes[:, 3] = sanitize_coordinates(boxes[:, 1], boxes[:, 3], ori_h, cast=False)
     boxes = boxes.long()
@@ -206,13 +214,9 @@ def undo_image_transformation(img, ori_h, ori_w, img_h=None, img_w=None, interpo
         img_w, img_h = pad_w, pad_h
 
     # Undo padding
-    img = img[:, :img_w, :img_h]
-    if cfg.preserve_aspect_ratio:
-        img = F.interpolate(img.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode,
-                            align_corners=False).squeeze(0)
-    else:
-        img = F.interpolate(img.unsqueeze(0), (img_h, img_w), mode=interpolation_mode,
-                            align_corners=False).squeeze(0)
+    img = img[:, :img_h, :img_w]
+    img = F.interpolate(img.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode,
+                        align_corners=False).squeeze(0)
 
     img_numpy = img.permute(1, 2, 0).cpu().numpy()
     img_numpy = img_numpy[:, :, (2, 1, 0)]  # To BRG

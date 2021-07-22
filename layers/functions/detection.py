@@ -60,6 +60,7 @@ class Detect(object):
         proto_data = predictions['proto']
         mask_data  = predictions['mask_coeff']
         prior_data = predictions['priors'].squeeze(0)
+        prior_levels = predictions['prior_levels'].squeeze(0)
 
         results = []
 
@@ -75,7 +76,7 @@ class Detect(object):
                 sem_data_cur = sem_data[batch_idx] if sem_data is not None else None
 
                 result = self.detect(net, scores[batch_idx], decoded_boxes, centerness_data_cur,
-                                     mask_data[batch_idx], proto_data[batch_idx], sem_data_cur)
+                                     mask_data[batch_idx], proto_data[batch_idx], prior_levels, sem_data_cur)
 
                 for k in predictions.keys():
                     if k in {'proto', 'track'}:
@@ -85,7 +86,7 @@ class Detect(object):
 
         return results
 
-    def detect(self, net, scores, decoded_boxes, center_data, mask_data, proto_data, sem_data):
+    def detect(self, net, scores, decoded_boxes, center_data, mask_data, proto_data, prior_levels, sem_data):
         """ Perform nms for only the max scoring class that isn't background (class 0) """
         assert cfg.train_class or cfg.use_semantic_segmentation_loss, \
             'The training process should include train_class or train_stuff.'
@@ -103,6 +104,7 @@ class Detect(object):
 
         boxes = decoded_boxes[keep, :]
         masks_coeff = mask_data[keep, :]
+        prior_levels = prior_levels[keep]
 
         if boxes.size(0) == 0:
             out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': torch.Tensor(), 'score': torch.Tensor(),
@@ -120,14 +122,14 @@ class Detect(object):
 
             if self.use_cross_class_nms:
                 out_after_NMS = self.cc_fast_nms(net, boxes, masks_coeff, proto_data, scores, sem_data, center_data,
-                                                 nms_thresh, self.top_k)
+                                                 prior_levels, nms_thresh, self.top_k)
             else:
                 out_after_NMS = self.fast_nms(net, boxes, masks_coeff, proto_data, scores, sem_data,
-                                              nms_thresh, self.top_k)
+                                              prior_levels, nms_thresh, self.top_k)
 
         return out_after_NMS
 
-    def cc_fast_nms(self, net, boxes, masks_coeff, proto_data, scores, sem_data, centerness_scores,
+    def cc_fast_nms(self, net, boxes, masks_coeff, proto_data, scores, sem_data, centerness_scores, prior_levels,
                     iou_threshold: float = 0.5, top_k: int = 100):
         if cfg.train_class:
             # Collapse all the classes into 1
@@ -137,7 +139,7 @@ class Detect(object):
             scores = scores * centerness_scores
 
         if cfg.use_dynamic_mask:
-            det_masks_soft = net.DynamicMaskHead(proto_data.permute(2, 0, 1).unsqueeze(0), masks_coeff, boxes)
+            det_masks_soft = net.DynamicMaskHead(proto_data.permute(2, 0, 1).unsqueeze(0), masks_coeff, boxes, prior_levels)
             if cfg.mask_proto_crop:
                 _, pred_masks = crop(det_masks_soft.permute(1, 2, 0).contiguous(), boxes)
                 det_masks_soft = pred_masks.permute(2, 0, 1).contiguous()
@@ -226,11 +228,11 @@ class Detect(object):
         
         return idx_out, idx_out.size(0)
 
-    def fast_nms(self, net, boxes, masks_coeff, proto_data, scores, sem_data,
+    def fast_nms(self, net, boxes, masks_coeff, proto_data, scores, sem_data, prior_levels,
                  iou_threshold:float=0.5, top_k:int=100, second_threshold:bool=True):
 
         if cfg.use_dynamic_mask:
-            det_masks_soft = net.DynamicMaskHead(proto_data.permute(2, 0, 1).unsqueeze(0), masks_coeff, boxes)
+            det_masks_soft = net.DynamicMaskHead(proto_data.permute(2, 0, 1).unsqueeze(0), masks_coeff, boxes, prior_levels)
             if cfg.mask_proto_crop:
                 _, pred_masks = crop(det_masks_soft.permute(1, 2, 0).contiguous(), boxes)
                 det_masks_soft = pred_masks.permute(2, 0, 1).contiguous()

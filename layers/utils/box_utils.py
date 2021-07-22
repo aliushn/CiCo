@@ -130,6 +130,11 @@ def match(bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t
     Return:
         The matched indices corresponding to 1)location and 2)confidence preds.
     """
+    # some error annotatons with width = 0 or height = 0
+    bbox_c = center_size(bbox)
+    bbox_c[:, 2:] = torch.clamp(bbox_c[:, 2:], min=1e-7)
+    bbox = point_form(bbox_c)
+
     # decoded_priors => [x1, y1, x2, y2]
     decoded_priors = decode(loc_data, priors, cfg.use_yolo_regressors) if cfg.use_prediction_matching else point_form(priors)
     
