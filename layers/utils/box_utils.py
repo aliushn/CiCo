@@ -414,14 +414,14 @@ def crop_sipmask(masks00, masks01, masks10, masks11, boxes, padding:int=1):
     xc = torch.clamp(xc, min=0, max=w - 1)
     yc = torch.clamp(yc, min=0, max=h - 1)
 
-    ##x1,y1,xc,yc
+    ## x1,y1,xc,yc
     crop_mask = (rows >= x1.view(1, 1, -1)) & (rows < xc.view(1, 1, -1)) & (cols >= y1.view(1, 1, -1)) & (
                 cols < yc.view(1, 1, -1))
     crop_mask = crop_mask.float().detach()
 
     masks00 = masks00 * crop_mask
 
-    ##xc,y1,x2,yc
+    ## xc,y1,x2,yc
     crop_mask = (rows >= xc.view(1, 1, -1)) & (rows < x2.view(1, 1, -1)) & (cols >= y1.view(1, 1, -1)) & (
                 cols < yc.view(1, 1, -1))
     crop_mask = crop_mask.float().detach()

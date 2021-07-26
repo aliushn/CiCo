@@ -97,6 +97,7 @@ def generate_mask(proto_data, mask_coeff, bbox=None):
         pred_masks01 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim:cfg.mask_dim*2]))
         pred_masks10 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim*2:cfg.mask_dim*3]))
         pred_masks11 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim*3:]))
+        assert bbox is not None
         pred_masks = crop_sipmask(pred_masks00, pred_masks01, pred_masks10, pred_masks11, bbox)
 
     else:

@@ -171,19 +171,17 @@ class Resize(object):
         if self.MS_train:
             ms_size = np.random.random_integers(self.min_size, self.max_size)
             ms_size = int((ms_size + (self.divisibility - 1)) // self.divisibility * self.divisibility)
-            if self.preserve_aspect_ratio:
-                # resize long edges
-                if img_w > img_h:
-                    width, height = ms_size, int(img_h * (ms_size / img_w))
-                else:
-                    width, height = int(img_w * (ms_size / img_h)), ms_size
-            else:
-                width, height = ms_size, ms_size
         else:
-            if self.preserve_aspect_ratio:
-                width, height = Resize.faster_rcnn_scale(img_w, img_h, self.min_size, self.max_size)
+            ms_size = self.max_size
+
+        if self.preserve_aspect_ratio:
+            # resize long edges
+            if img_w > img_h:
+                width, height = ms_size, int(img_h * (ms_size / img_w))
             else:
-                width, height = self.max_size, self.max_size
+                width, height = int(img_w * (ms_size / img_h)), ms_size
+        else:
+            width, height = ms_size, ms_size
 
         image = cv2.resize(image, (width, height))
         

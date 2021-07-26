@@ -3,11 +3,10 @@ from STMask import STMask
 from utils.functions import MovingAverage, ProgressBar
 from utils import timer
 from utils.functions import SavePath
-from utils.augmentations import BaseTransform
 from layers.utils.output_utils import postprocess_ytbvis, undo_image_transformation
 from layers.visualization import draw_dotted_rectangle, get_color
 
-from datasets import get_dataset, prepare_data_vis, prepare_data_coco
+from datasets import prepare_data_vis, prepare_data_coco
 import mmcv
 import math
 import torch
@@ -88,8 +87,6 @@ def parse_args(argv=None):
                         help='Do not output the status bar. This is useful for when piping to a file.')
     parser.add_argument('--display_lincomb', default=False, type=str2bool,
                         help='If the config uses lincomb masks, output a visualization of how those masks are created.')
-    parser.add_argument('--benchmark', default=False, dest='benchmark', action='store_true',
-                        help='Equivalent to running display mode but without displaying an image.')
     parser.add_argument('--no_sort', default=True, dest='no_sort', action='store_true',
                         help='Do not sort images by hashed image ID.')
     parser.add_argument('--seed', default=None, type=int,
@@ -459,16 +456,7 @@ class CustomDataParallel(torch.nn.DataParallel):
         return sum(outputs, [])
 
 
-def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None):
-    cfg.mask_proto_debug = args.mask_proto_debug
-    detection_collate = detection_collate_vis
-    if not valid_data:
-        cfg.valid_sub_dataset.test_mode = True
-        dataset = get_dataset(cfg.valid_sub_dataset)
-    else:
-        cfg.valid_dataset.test_mode = True
-        dataset = get_dataset(cfg.valid_dataset)
-
+def validation(net: STMask, dataset, device=0, output_metrics_file=None):
     frame_times = MovingAverage()
     dataset_size = math.ceil(len(dataset) / args.batch_size) if args.max_images < 0 else min(args.max_images,
                                                                                              len(dataset))
@@ -486,7 +474,8 @@ def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None
         for it, data_batch in enumerate(data_loader):
             timer.reset()
             with timer.env('Load Data'):
-                images, images_meta = prepare_data_vis(data_batch, devices=device, train_mode=False)
+                images, images_meta = data_batch[0].cuda(device), data_batch[1]
+                images.requires_grad = False
 
             with timer.env('Network Extra'):
                 preds, _, _ = net(images, img_meta=images_meta)
@@ -497,7 +486,6 @@ def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None
                     batch_size = images.size(0)
 
                 for pred, img_meta in zip(preds, images_meta):
-                    cfg.preserve_aspect_ratio = True
                     preds_cur = postprocess_ytbvis(pred, img_meta)
                     segm_results = bbox2result_with_id(preds_cur, img_meta, cfg.classes)
                     results.append(segm_results)
@@ -520,22 +508,13 @@ def validation(net: STMask, valid_data=False, device=0, output_metrics_file=None
 
         print()
         print('Dumping detections...')
-
-        if not valid_data:
-            results2json_videoseg(results, args.mask_det_file)
-            print('calculate evaluation metrics ...')
-            ann_file = cfg.valid_sub_dataset.ann_file
-            dt_file = args.mask_det_file
-            calc_metrics(ann_file, dt_file, output_file=output_metrics_file)
-        else:
-            results2json_videoseg(results, output_metrics_file.replace('.txt', '.json'))
+        results2json_videoseg(results, output_metrics_file)
 
     except KeyboardInterrupt:
         print('Stopping...')
 
 
-def evaluate(net: STMask, dataset):
-    cfg.mask_proto_debug = args.mask_proto_debug
+def evaluate(net: STMask, dataset, output_metrics_file=None):
 
     frame_times = MovingAverage()
     dataset_size = math.ceil(len(dataset) / args.batch_size) if args.max_images < 0 else min(args.max_images,
@@ -556,16 +535,14 @@ def evaluate(net: STMask, dataset):
         for it, data_batch in enumerate(data_loader):
 
             with timer.env('Load Data'):
-                images, images_meta = prepare_data_vis(data_batch, train_mode=False, devices=torch.cuda.current_device())
+                images, images_meta = data_batch[0].cuda(), data_batch[1]
 
-            # if images_meta[0]['video_id'] > 135:
-            #     print(images_meta[0]['video_id'])
             with timer.env('Network Extra'):
                 preds, out_images, out_img_metas = net(images, img_meta=images_meta)
 
             n_preds = len(preds)
 
-            if n_preds > 0:   # and images_meta[0]['video_id'] > 135:
+            if n_preds > 0:
                 for batch_id, pred in enumerate(preds):
 
                     if args.display:
@@ -597,7 +574,6 @@ def evaluate(net: STMask, dataset):
                                 plt.clf()
 
                     else:
-                        cfg.preserve_aspect_ratio = True
                         preds_cur = postprocess_ytbvis(pred, out_img_metas[batch_id])
                         segm_results = bbox2result_with_id(preds_cur, out_img_metas[batch_id], cfg.classes)
                         results.append(segm_results)
@@ -619,31 +595,27 @@ def evaluate(net: STMask, dataset):
                     print('\rProcessing Images  %s %6d / %6d (%5.2f%%)    %5.2f fps        '
                           % (repr(progress_bar), it, dataset_size, progress, fps), end='')
 
-        if not args.display and not args.benchmark:
+        if not args.display:
             print()
             if args.output_json:
-                print('Dumping detections...')
-                results2json_videoseg(results, args.mask_det_file)
+                if output_metrics_file is not None:
+                    print('Dumping detections...')
+                    results2json_videoseg(results, output_metrics_file)
+                else:
+                    print('Dumping detections...')
+                    results2json_videoseg(results, args.mask_det_file)
 
-                if cfg.use_valid_sub or cfg.use_train_sub:
-                    if cfg.use_valid_sub:
-                        print('calculate evaluation metrics ...')
-                        ann_file = cfg.valid_sub_dataset.ann_file
-                    else:
-                        print('calculate train_sub metrics ...')
-                        ann_file = cfg.train_dataset.ann_file
-                    dt_file = args.mask_det_file
-                    metrics = calc_metrics(ann_file, dt_file)
+                    if cfg.use_valid_sub or cfg.use_train_sub:
+                        if cfg.use_valid_sub:
+                            print('calculate evaluation metrics ...')
+                            ann_file = cfg.valid_sub_dataset.ann_file
+                        else:
+                            print('calculate train_sub metrics ...')
+                            ann_file = cfg.train_dataset.ann_file
+                        dt_file = args.mask_det_file
+                        metrics = calc_metrics(ann_file, dt_file)
 
-                    return metrics
-
-        elif args.benchmark:
-            print()
-            print()
-            print('Stats for the last frame:')
-            timer.print_stats()
-            avg_seconds = frame_times.get_avg()
-            print('Average: %5.2f fps, %5.2f ms' % (1 / frame_times.get_avg(), 1000 * avg_seconds))
+                        return metrics
 
     except KeyboardInterrupt:
         print('Stopping...')
@@ -735,15 +707,16 @@ if __name__ == '__main__':
 
         if cfg.use_train_sub:
             print('load train_sub dataset')
-            cfg.train_dataset.test_mode = True
+            cfg.train_dataset.has_gt = False
             val_dataset = get_dataset(cfg.train_dataset)
         elif cfg.use_valid_sub:
             print('load valid_sub dataset')
-            cfg.valid_sub_dataset.test_mode = True
+            cfg.valid_sub_dataset.has_gt = False
             val_dataset = get_dataset(cfg.valid_sub_dataset)
+
         elif cfg.use_test:
             print('load test dataset')
-            cfg.test_dataset.test_mode = True
+            cfg.test_dataset.has_gt = False
             val_dataset = get_dataset(cfg.test_dataset)
         else:
             print('load valid dataset')

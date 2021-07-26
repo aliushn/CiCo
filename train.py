@@ -1,23 +1,20 @@
 from datasets import *
 from utils.functions import MovingAverage, SavePath, ProgressBar
 from utils.logger import Log
-from utils.augmentations import SSDAugmentation, BaseTransform
 from utils import timer
 from layers.modules import MultiBoxLoss
 from STMask import STMask
 import os
 import time
 import torch
-from datasets import get_dataset, prepare_data_vis, prepare_data_coco
+from datasets import prepare_data_vis, prepare_data_coco
 import torch.optim as optim
 import torch.utils.data as data
 import argparse
 import datetime
-from mmcv import Config, DictAction
 
-# dist
-import torch.multiprocessing as mp
 import torch.distributed as dist
+from layers.utils.eval_utils import calc_metrics
 
 # Oof
 import eval as eval_script
@@ -46,7 +43,7 @@ def parse_args():
     parser.add_argument('--resume', default=None, type=str,
                         help='Checkpoint state_dict file to resume training from. If this is "interrupt"' \
                          ', the model will resume training from the interrupt file.')
-    parser.add_argument('--start_iter', default=0, type=int,
+    parser.add_argument('--start_iter', default=-1, type=int,
                         help='Resume training at this iter. If this is -1, the iteration will be' \
                          'determined from the file name.')
     parser.add_argument('--num_workers', default=2, type=int,
@@ -78,8 +75,6 @@ def parse_args():
     parser.set_defaults(keep_latest=False, log=True, log_gpu=False, interrupt=True)
 
     args = parser.parse_args()
-    if 'LOCAL_RANK' not in os.environ:
-        os.environ['LOCAL_RANK'] = str(args.local_rank)
 
     return args
 
@@ -89,16 +84,18 @@ def replace(name):
     if getattr(args, name) == None: setattr(args, name, getattr(cfg, name))
 
 
-loss_types = ['B', 'BIoU', 'Rep', 'C', 'stuff', 'M_bce', 'M_dice', 'T', 'center', 'B_shift', 'BIoU_shift', 'M_shift',
+loss_types = ['B', 'BIoU', 'Rep', 'C', 'stuff', 'M_bce', 'M_dice', 'center', 'T', 'B_shift', 'BIoU_shift', 'M_shift',
               'P', 'D', 'S', 'I']
 
 
 def train():
     if args.is_distributed:
         os.environ['MASTER_PORT'] = args.port
-        torch.cuda.set_device(args.local_rank)
         dist.init_process_group(backend='nccl', init_method='env://')
         torch.cuda.set_device(args.local_rank)
+        device = torch.device("cuda", args.local_rank)
+    else:
+        torch.cuda.set_device(torch.cuda.current_device())
 
     if not os.path.exists(args.save_folder) and args.local_rank == 0:
         os.mkdir(args.save_folder)
@@ -124,6 +121,7 @@ def train():
     if args.resume is not None:
         print('Resuming training, loading {}...'.format(args.resume))
         net.load_weights(path=args.resume)
+        cur_lr = args.lr
 
         if args.start_iter == -1:
             args.start_iter = SavePath.from_str(args.resume).iteration
@@ -137,29 +135,29 @@ def train():
             net.init_weights_coco(backbone_path='weights/pretrained_models_coco/' + cfg.backbone.path,
                                   local_rank=args.local_rank)
 
-    optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
-
     criterion = MultiBoxLoss(net=net,
                              num_classes=cfg.num_classes,
                              pos_threshold=cfg.positive_iou_threshold,
                              neg_threshold=cfg.negative_iou_threshold)
+
     if train_type == 'coco':
         train_dataset = COCODetection(image_path=cfg.dataset.train_images,
                                       info_file=cfg.dataset.train_info,
                                       transform=SSDAugmentation(MEANS))
         detection_collate = detection_collate_coco
     else:
-        train_dataset = get_dataset(cfg.train_dataset)
+        train_dataset = get_dataset(cfg.valid_sub_dataset, cfg.backbone.transform)
         detection_collate = detection_collate_vis
 
     if args.is_distributed:
         # net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(net)
-        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[args.local_rank])
+        net = torch.nn.parallel.DistributedDataParallel(net.to(device), device_ids=[args.local_rank])
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
         net = torch.nn.DataParallel(net, device_ids=range(torch.cuda.device_count()))
         train_sampler = None
 
+    optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
     data_loader = data.DataLoader(train_dataset, args.batch_size,
                                   num_workers=args.num_workers,
                                   collate_fn=detection_collate,
@@ -207,26 +205,17 @@ def train():
 
                 if train_type == 'vis':
                     num_crowds = None
-                    if args.is_distributed:
-                        imgs, gt_bboxes, gt_labels, gt_masks, gt_ids, img_meta = prepare_data_vis(data_batch,
-                                                                                                  devices=args.local_rank)
-                    else:
-                        imgs, gt_bboxes, gt_labels, gt_masks, gt_ids, img_meta = prepare_data_vis(data_batch,
-                                                                                                  devices=torch.cuda.current_device())
+                    imgs, img_meta, gt_masks, gt_bboxes, gt_labels, gt_ids = prepare_data_vis(data_batch,
+                                                                                              devices=device)
+
                 else:
                     gt_ids = None
-                    if args.is_distributed:
-                        imgs, gt_bboxes, gt_labels, gt_masks, num_crowds = prepare_data_coco(data_batch,
-                                                                                             devices=args.local_rank)
-                    else:
-                        imgs, gt_bboxes, gt_labels, gt_masks, num_crowds = prepare_data_coco(data_batch,
-                                                                                             devices=torch.cuda.current_device())
+                    imgs, gt_masks, gt_bboxes, gt_labels, num_crowds = prepare_data_coco(data_batch,
+                                                                                         devices=torch.cuda.current_device())
 
                 optimizer.zero_grad()
                 preds = net(imgs)
                 losses = criterion(imgs, preds, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds)
-                if not args.is_distributed:
-                    losses = {k: v.mean() for k, v in losses.items()}  # Mean here because Dataparallel
                 loss = sum([losses[k] for k in losses])  # same weights in three sub-losses
                 loss.backward()  # Do this to free up vram even if loss is not finite
                 optimizer.step()
@@ -275,26 +264,31 @@ def train():
                                 os.remove(latest)
 
                         # This is done per epoch
-                        save_path_valid_metrics = save_path(epoch-1, iteration).replace('.pth', '.txt')
+                        save_path_valid_metrics = save_path(epoch-1, iteration).replace('.pth', '.json')
 
                         if train_type == 'vis':
                             setup_eval()
-                            # valid_sub
-                            cfg.valid_sub_dataset.test_mode = False
-                            metrics = compute_validation_map(net, valid_data=False, device=torch.cuda.current_device(),
-                                                             output_metrics_file=save_path_valid_metrics)
+                            # valid_sub, the last one ten of training data
+                            cfg.valid_sub_dataset.has_gt = False
+                            valid_sub_dataset = get_dataset(cfg.valid_sub_dataset, cfg.backbone.transform)
+
+                            compute_validation_map(net, valid_sub_dataset,
+                                                   output_metrics_file=save_path_valid_metrics)
+                            print('calculate evaluation metrics for valid_sub data (divided from traning data) ...')
+                            ann_file = cfg.valid_sub_dataset.ann_file
+                            dt_file = save_path_valid_metrics
+                            calc_metrics(ann_file, dt_file, output_file=save_path_valid_metrics.replace('.json', 'txt'))
 
                             # valid datasets
-                            metrics_valid = compute_validation_map(net, valid_data=True,
-                                                                   device=torch.cuda.current_device(),
-                                                                   output_metrics_file=save_path_valid_metrics)
+                            valid_dataset = get_dataset(cfg.valid_dataset, cfg.backbone.transform)
+                            compute_validation_map(net, valid_dataset,
+                                                   output_metrics_file=save_path_valid_metrics)
                         else:
                             setup_eval_coco()
                             val_dataset = COCODetection(image_path=cfg.dataset.valid_images,
                                                         info_file=cfg.dataset.valid_info,
                                                         transform=BaseTransform(MEANS))
                             compute_validation_map_coco(epoch, iteration, net, val_dataset, log if args.log else None)
-
 
                 iteration += 1
 
@@ -359,17 +353,14 @@ def compute_validation_loss(net, data_loader, dataset_size):
     return loss_labels
 
 
-def compute_validation_map(net, valid_data=False, device=0, output_metrics_file=None):
+def compute_validation_map(net, dataset, output_metrics_file=None):
     with torch.no_grad():
         net.eval()
         print()
         print("Computing validation mAP (this may take a while)...", flush=True)
-        metrics = eval_script.validation(net, device=device,
-                                         valid_data=valid_data, output_metrics_file=output_metrics_file)
+        eval_script.validation(net, dataset, output_metrics_file=output_metrics_file)
 
         net.train()
-
-    return metrics
 
 
 def compute_validation_map_coco(epoch, iteration, net, dataset, log: Log = None):
@@ -379,7 +370,7 @@ def compute_validation_map_coco(epoch, iteration, net, dataset, log: Log = None)
         start = time.time()
         print()
         print("Computing validation mAP (this may take a while)...", flush=True)
-        val_info = eval_coco_script.evaluate(net, dataset, train_mode=True, iteration=iteration)
+        val_info = eval_coco_script.evaluate(net, dataset, train_mode=True, epoch=epoch, iteration=iteration)
         end = time.time()
 
         if log is not None:
@@ -397,9 +388,7 @@ def setup_eval():
 
 
 def setup_eval_coco():
-    eval_coco_script.parse_args([
-                                 # '--max_images='+str(args.eval_batch_size),
-                                 '--save_path='+str(args.save_folder)+'/valid_metrics.txt'])
+    eval_coco_script.parse_args(['--save_path='+str(args.save_folder)+'/valid_metrics.txt'])
 
 
 if __name__ == '__main__':

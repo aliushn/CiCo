@@ -8,8 +8,6 @@ import pycocotools.mask as mask_util
 from matplotlib.patches import Polygon
 
 from datasets import cfg, MEANS, STD, activation_func
-from utils.augmentations import Resize
-from utils import timer
 import os
 from ..utils import sanitize_coordinates, center_size, generate_mask
 

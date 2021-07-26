@@ -193,43 +193,39 @@ dataset_base_vis = Config({
     # images and annotations path
     'ann_file': 'path_to_annotation_file',
     'img_prefix': 'path_to_images_file',
-    # 'img_scale': [(640, 360), (1280, 720)],
-    'img_scale': [(640, 360)],
-    'img_norm_cfg': dict(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True),
+    'min_size': 550,
+    'max_size': 768,
+    'MS_train': True,
+    'preserve_aspect_ratio': True,
+    'tranform': None,
     'size_divisor': 32,
-    'flip_ratio': 0.5,
-    'resize_keep_ratio': False,
     'with_mask': True,
     'with_crowd': True,
     'with_label': True,
     'with_track': True,
-    'proposal_file': None,
-    'extra_aug': None,
     'clip_frames': 1,
+    'has_gt': True,
 
-    # A list of names for each of you classes.
-    # 'class_names': YouTube_VOS_CLASSES,
 
 })
 
 train_YouTube_VOS_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/YouTube_VOS2019/train/JPEGImages',
-    'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/valid_sub.json',
-    # 'extra_aug': dict(random_crop=dict(min_ious=(0.1, 0.3, 0.5, 0.7, 0.9), min_crop_size=0.3)),
-    # 'extra_aug': dict(expand=dict(mean=(123.675, 116.28, 103.53), to_rgb=True, ratio_range=(1, 3))),
+    'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/train_sub.json',
+    'has_gt': True,
 })
 
 valid_sub_YouTube_VOS_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/YouTube_VOS2019/train/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/valid_sub.json',
-    'test_mode': False,
+    'has_gt': True,
 })
 
 valid_YouTube_VOS_dataset = dataset_base_vis.copy({
 
     'img_prefix': '../datasets/YouTube_VOS2019/valid/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2019/annotations_instances/valid.json',
-    'test_mode': True,
+    'has_gt': False,
 })
 
 test_YouTube_VOS_dataset = dataset_base_vis.copy({
@@ -242,55 +238,51 @@ test_YouTube_VOS_dataset = dataset_base_vis.copy({
 train_YouTube_VOS2021_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/YouTube_VOS2021/train/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2021/train/instances.json',
-    # 'extra_aug': dict(random_crop=dict(min_ious=(0.1, 0.3, 0.5, 0.7, 0.9), min_crop_size=0.3)),
-    # 'extra_aug': dict(expand=dict(mean=(123.675, 116.28, 103.53), to_rgb=True, ratio_range=(1, 3))),
 })
 
 valid_sub_YouTube_VOS2021_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/YouTube_VOS2021/train/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2021/annotations_instances/valid_sub.json',
-    'test_mode': False,
+    'has_gt': False,
 })
 
 valid_YouTube_VOS2021_dataset = dataset_base_vis.copy({
 
     'img_prefix': '../datasets/YouTube_VOS2021/valid/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2021/valid/instances.json',
-    'test_mode': True,
+    'has_gt': False,
 })
 
 test_YouTube_VOS2021_dataset = dataset_base_vis.copy({
-
     'img_prefix': '../datasets/YouTube_VOS2021/test/JPEGImages',
     'ann_file': '../datasets/YouTube_VOS2021/test/instances.json',
+    'has_gt': False,
 })
 
 
 train_OVIS_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/OVIS/train',
     'ann_file': '../datasets/OVIS/annotations_valid_sub.json',
-    # 'extra_aug': dict(random_crop=dict(min_ious=(0.1, 0.3, 0.5, 0.7, 0.9), min_crop_size=0.3)),
-    # 'extra_aug': dict(expand=dict(mean=(123.675, 116.28, 103.53), to_rgb=True, ratio_range=(1, 3))),
 })
 
 valid_sub_OVIS_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/OVIS/train',
     'ann_file': '../datasets/OVIS/annotations_valid_sub.json',
-    'test_mode': False,
+    'has_gt': False,
 })
 
 valid_OVIS_dataset = dataset_base_vis.copy({
 
     'img_prefix': '../datasets/OVIS/valid',
     'ann_file': '../datasets/OVIS/annotations_valid.json',
-    'test_mode': True,
+    'has_gt': False,
 })
 
 test_OVIS_dataset = dataset_base_vis.copy({
 
     'img_prefix': '../datasets/OVIS/test',
     'ann_file': '../datasets/OVIS/annotations_test.json',
-    'test_mode': True,
+    'has_gt': False,
 })
 
 
@@ -703,7 +695,7 @@ STMask_base_config = base_config.copy({
     'train_boxes': True,
     'train_centerness': True,
     'use_boxiou_loss': True,
-    'use_repulsion_loss': True,
+    'use_repulsion_loss': False,
 
     # train class
     'train_class': True,
@@ -742,18 +734,18 @@ STMask_base_config = base_config.copy({
     'use_dcn_mask': False,
 
     # SipMask uses multi heads for obtaining better mask segmentation
-    'use_sipmask': False,
+    'use_sipmask': True,
     'sipmask_head': 4,
 
     # loss settings
     'positive_iou_threshold': 0.5,
     'negative_iou_threshold': 0.3,
     'crowd_iou_threshold': 0.7,
-    'use_semantic_segmentation_loss': False,
+    'use_semantic_segmentation_loss': True,
     'semantic_segmentation_alpha': 1,
 
     # eval
-    'eval_frames_of_clip': 21,
+    'eval_frames_of_clip': 1,
     'nms_conf_thresh': 0.2,
     'nms_thresh': 0.5,
     'eval_conf_thresh': 0.2,
@@ -1040,8 +1032,8 @@ STMask_base_coco_ori_config = STMask_base_config.copy({
     'max_size': 768,
 
     # Training params
-    'lr_steps': (18, 24, 30),
-    'max_epoch': 36,
+    'lr_steps': (12, 16, 20),
+    'max_epoch': 24,
 
     'backbone': STMask_base_config.backbone.copy({
         'path': 'resnet101_reducedfc.pth',
@@ -1087,30 +1079,17 @@ STMask_resnet50_coco_ori_config = STMask_base_coco_ori_config.copy({
     }),
 })
 
-STMask_resnet152_coco_config = STMask_base_config.copy({
-    'name': 'STMask_resnet152_coco',
+STMask_resnet152_coco_ori_config = STMask_base_coco_ori_config.copy({
+    'name': 'STMask_resnet152_coco_ori',
     'backbone': resnet152_backbone.copy({
         'selected_layers': list(range(1, 4)),
         'pred_scales': STMask_base_config.backbone.pred_scales,
         'pred_aspect_ratios': STMask_base_config.backbone.pred_aspect_ratios,
     }),
 
-    # Dataset stuff
-    'dataset': coco2017_dataset,
-    'num_classes': len(coco2017_dataset.class_names),
-
-    # Image Size
-    'min_size': 400,
-    'max_size': 512,
-
-    # Training params, 1X = 12 epochs
-    'lr_steps': (18, 24, 30),
-    'max_epoch': 36,
-
-    'train_track': False,
 })
 
-STMask_plus_resnet152_coco_config = STMask_resnet152_coco_config.copy({
+STMask_plus_resnet152_coco_config = STMask_resnet152_coco_ori_config.copy({
     'name': 'STMask_plus_resnet152_coco',
     'backbone': resnet152_dcn_inter3_backbone.copy({
         'selected_layers': list(range(1, 4)),

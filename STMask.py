@@ -160,6 +160,7 @@ class STMask(nn.Module):
         model_dict = self.state_dict()
 
         # only remain same modules and layers between pre-trained model and our model
+        # TODO: double check backbone.layers or bakcbon.layer
         for key in list(state_dict.keys()):
             if key not in model_dict.keys():
                 del state_dict[key]
@@ -171,22 +172,20 @@ class STMask(nn.Module):
             print('parameters without load weights from pre-trained models')
             print([k for k, v in model_dict.items() if k not in state_dict])
         model_dict.update(state_dict)
+        self.load_state_dict(model_dict, strict=True)
 
         # Initialize the rest of the conv layers with xavier
-        for k, v in model_dict.items():
-            if k not in state_dict:
+        for name, module in self.named_modules():
+            if isinstance(module, nn.Conv2d) and name not in state_dict:
                 if local_rank == 0:
-                    print('init weights by Xavier:', k)
-                if 'weight' in k:
-                    nn.init.xavier_uniform_(model_dict[k])
-                elif 'bias' in k:
-                    if 'conf_layer' in k:
-                        data = -torch.tensor((1 - cfg.focal_loss_init_pi) / cfg.focal_loss_init_pi).log()
-                        model_dict[k] = data.repeat(cfg.num_classes * self.num_priors)
-                    else:
-                        model_dict[k].zero_()
+                    print('init weights by Xavier:', name)
 
-        self.load_state_dict(model_dict, strict=True)
+                nn.init.xavier_uniform_(module.weight.data)
+                if module.bias is not None:
+                    if 'conf_layer' in name:
+                        module.bias.data[0:] = - np.log((1 - cfg.focal_loss_init_pi) / cfg.focal_loss_init_pi)
+                    else:
+                        module.bias.data.zero_()
 
     def init_weights(self, backbone_path, local_rank=1):
         """ Initialize weights for training. """

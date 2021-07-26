@@ -217,10 +217,10 @@ class MultiBoxLoss(nn.Module):
 
                 decoded_loc_p = torch.clamp(decode(loc_p, pos_priors, cfg.use_yolo_regressors), min=0, max=1)
                 decoded_loc_t = torch.clamp(decode(loc_t, pos_priors, cfg.use_yolo_regressors), min=0, max=1)
-                # if cfg.use_DIoU:
-                #     IoU_loss = 1. - compute_DIoU(decoded_loc_p, decoded_loc_t).diag()
-                # else:
-                IoU_loss = giou_loss(decoded_loc_p, decoded_loc_t, reduction='none')
+                if cfg.use_DIoU:
+                    IoU_loss = 1. - compute_DIoU(decoded_loc_p, decoded_loc_t).diag()
+                else:
+                    IoU_loss = giou_loss(decoded_loc_p, decoded_loc_t, reduction='none')
 
                 if cfg.use_boxiou_loss:
                     losses['BIoU'] = IoU_loss.mean() * cfg.BIoU_alpha
@@ -388,8 +388,7 @@ class MultiBoxLoss(nn.Module):
 
             # extract features from bounding boxes
             bboxes_feats_ref_crop = bbox_feat_extractor(t2s_in_feats_for[i].unsqueeze(0),
-                                                        bboxes_ref_cur,
-                                                        feat_h, feat_w, 7)
+                                                        bboxes_ref_cur, feat_h, feat_w, 7)
             # display_correlation_map(bboxes_feats_ref_crop[:, 256:377])
             if cfg.maskshift_loss:
                 bboxes_ref_reg, mask_coeff_ref_reg = self.net.TemporalNet(bboxes_feats_ref_crop)
@@ -397,14 +396,17 @@ class MultiBoxLoss(nn.Module):
                 bboxes_ref_reg = self.net.TemporalNet(bboxes_feats_ref_crop)
 
             # B_shift loss
-            pre_loss = F.smooth_l1_loss(bboxes_ref_reg, bboxes_ref_reg_gt, reduction='none').sum(dim=1)
+            pre_loss = F.smooth_l1_loss(bboxes_ref_reg, bboxes_ref_reg_gt, reduction='none').sum(dim=-1)
             loss_B_shift += pre_loss.mean()
 
             # BIoU_shift loss
             bboxes_next_tracked = decode(bboxes_ref_reg, center_size(bboxes_ref_cur), cfg.use_yolo_regressors)
-            loss_BIoU_shift += giou_loss(bboxes_next_tracked, bboxes_next_cur, reduction='mean')
+            if cfg.use_DIoU:
+                loss_BIoU_shift += (1. - compute_DIoU(bboxes_next_tracked, bboxes_next_cur).diag()).mean()
+            else:
+                loss_BIoU_shift += giou_loss(bboxes_next_tracked, bboxes_next_cur, reduction='mean')
 
-        losses = {'BIoU_shift': loss_BIoU_shift / bs * cfg.bboxiou_alpha,
+        losses = {'BIoU_shift': loss_BIoU_shift / bs * cfg.BIoU_alpha,
                   'B_shift': loss_B_shift / bs * cfg.bbox_alpha}
 
         return losses
@@ -458,7 +460,7 @@ class MultiBoxLoss(nn.Module):
                 bbox_reg, shift_mask_coeff = self.net.TemporalNet(bbox_feats)
             else:
                 bbox_reg = self.net.TemporalNet(bbox_feats)
-            pre_loss_B = F.smooth_l1_loss(bbox_reg, gt_bboxes_reg[pos], reduction='none').sum(dim=1)
+            pre_loss_B = F.smooth_l1_loss(bbox_reg, gt_bboxes_reg[pos], reduction='none').sum(dim=-1)
             loss_B_shift += pre_loss_B.mean()
 
             if cfg.maskshift_loss:
@@ -523,7 +525,7 @@ class MultiBoxLoss(nn.Module):
         bs, track_h, track_w, t_dim = track_data.size()
         loss = torch.tensor(0., device=track_data.device)
 
-        n_bs_track, n_bs_class, n_clip = torch.zeros(1), torch.zeros(1), 2
+        n_bs_track, n_clip = 0, 2
         for i in range(bs//n_clip):
             mu, var, obj_ids = [], [], []
 
@@ -551,17 +553,14 @@ class MultiBoxLoss(nn.Module):
 
                 # We hope the kl_divergence between same instance Ids is small, otherwise the kl_divergence is large.
                 inst_eq = (obj_ids.view(-1, 1) == obj_ids.view(1, -1)).float()
-                cur_weights = torch.ones(mu.size(0))
-                loss_weights = cur_weights.view(-1, 1) @ cur_weights.view(1, -1)
-                loss_weights = torch.triu(loss_weights, diagonal=1) + torch.triu(loss_weights.t(), diagonal=1).t()
 
                 # If they are the same instance, use cosine distance, else use consine similarity
                 # pos: log(1+kl), neg: exp(1-kl)
                 pre_loss = inst_eq * (1 + 2 * kl_divergence).log() \
                            + (1. - inst_eq) * torch.exp(1 - 0.1 * kl_divergence)
-                loss += (pre_loss * loss_weights).sum() / loss_weights.sum()
+                loss += pre_loss.mean()
 
-        losses = {'T': cfg.track_alpha * loss / torch.clamp(n_bs_track, min=1)}
+        losses = {'T': cfg.track_alpha * loss / max(n_bs_track, 1)}
 
         return losses
 
@@ -740,26 +739,28 @@ class MultiBoxLoss(nn.Module):
         '''
         # Note num_classes here is without the background class so cfg.num_classes-1
         segment_data = segment_data.permute(0, 3, 1, 2).contiguous()
-        mask_t_h, mask_t_w = mask_t[0].size()[-2:]
-        upsampled_segment_data = F.interpolate(segment_data, (mask_t_h, mask_t_w),
-                                               mode=interpolation_mode, align_corners=False)
-
-        # prepare one_hot
-        segment_t = torch.zeros_like(upsampled_segment_data)
-        for idx in range(segment_data.size(0)):
-            with torch.no_grad():
-                for obj_idx, obj_mask_t in enumerate(mask_t[idx]):
-                    segment_t[idx, class_t[idx][obj_idx]-1][obj_mask_t > 0] = 1
-
+        bs, _, mask_h, mask_w = segment_data.size()
         sem_loss = 0
-        for i in range(self.num_classes):
-            # void out of memory
-            sem_loss += sigmoid_focal_loss_jit(
-                            upsampled_segment_data[:, i],
-                            segment_t[:, i],
+        # void out of memory so as to calcuate loss for a single image
+        for idx in range(bs):
+            mask_t_downsample = F.interpolate(mask_t[idx].unsqueeze(0), (mask_h, mask_w),
+                                              mode=interpolation_mode, align_corners=False).squeeze(0).gt_(0.5)
+
+            # prepare one-hat
+            segment_t = torch.zeros_like(segment_data[idx])
+            with torch.no_grad():
+                for obj_idx, obj_mask_t in enumerate(mask_t_downsample):
+                    obj_class = (class_t[idx][obj_idx]-1).long()
+                    segment_t[obj_class][obj_mask_t == 1] = 1
+
+            # avoid out of memory so as to calculate semantic loss for a single image
+            pre_sem_loss = sigmoid_focal_loss_jit(
+                            segment_data[idx],
+                            segment_t,
                             alpha=cfg.focal_loss_alpha,
                             gamma=cfg.focal_loss_gamma,
                             reduction="sum"
                         )
+            sem_loss += pre_sem_loss / segment_t.sum()
 
-        return sem_loss / segment_t.sum() * cfg.semantic_segmentation_alpha
+        return sem_loss / float(bs) * cfg.semantic_segmentation_alpha

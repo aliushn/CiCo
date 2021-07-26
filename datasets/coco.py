@@ -9,6 +9,7 @@ import numpy as np
 from .config import cfg
 from pycocotools import mask as maskUtils
 import random
+from .utils import ImageList_from_tensors
 
 
 def get_label_map():
@@ -260,7 +261,7 @@ def enforce_size(img, targets, masks, num_crowds, new_w, new_h):
         return img, targets, masks, num_crowds
 
 
-def detection_collate(batch):
+def detection_collate_coco(batch):
     """Custom collate fn for dealing with batches of images that have a different
     number of associated object annotations (bounding boxes).
 
@@ -284,4 +285,30 @@ def detection_collate(batch):
         masks.append(torch.FloatTensor(sample[1][1]))
         num_crowds.append(sample[1][2])
 
-    return imgs, (targets, masks, num_crowds)
+    imgs_batch = ImageList_from_tensors(imgs, size_divisibility=32)
+    image_sizes_ori_h = [im.shape[-2] for im in imgs]
+    image_sizes_ori_w = [im.shape[-1] for im in imgs]
+    h, w = imgs_batch.size()[-2:]
+    bboxes_list = []
+    for i in range(len(masks)):
+        # padding for bboxes (bboxes with precent coords)
+        targets[i][:, 0:4:2] *= (image_sizes_ori_w[i] / float(w))
+        targets[i][:, 1:4:2] *= (image_sizes_ori_h[i] / float(h))
+        bboxes_list.append(targets[i][:, :4])
+
+        padding_size = [0, w - image_sizes_ori_w[i], 0, h - image_sizes_ori_h[i]]
+        masks[i] = F.pad(masks[i], padding_size, value=0)
+
+    return imgs_batch, masks, targets, num_crowds
+
+
+def prepare_data_coco(data_batch, devices):
+    with torch.no_grad():
+        # padding images with different scales
+        imgs = data_batch[0].cuda(devices)
+        masks_list = [mask.cuda(devices) for mask in data_batch[1]]
+        bboxes_list = [target[:, :4].cuda(devices) for target in data_batch[2]]
+        labels_list = [target[:, -1].cuda(devices) for target in data_batch[2]]
+        num_crowds = data_batch[3]
+
+        return imgs, masks_list, bboxes_list, labels_list,  num_crowds

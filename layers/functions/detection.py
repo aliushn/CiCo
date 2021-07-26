@@ -91,6 +91,9 @@ class Detect(object):
         assert cfg.train_class or cfg.use_semantic_segmentation_loss, \
             'The training process should include train_class or train_stuff.'
 
+        if center_data is not None:
+            scores *= center_data.view(1, -1)
+
         if cfg.train_class:
             conf_scores, _ = torch.max(scores, dim=0)
             keep = conf_scores > self.conf_thresh
@@ -113,10 +116,10 @@ class Detect(object):
         else:
             if cfg.use_DIoU:
                 if cfg.nms_as_miou:
-                    # (0.5 + 0.5 * 0.8) * nms_thresh
-                    nms_thresh = 0.9 * self.nms_thresh
+                    # (0.5 + 0.5 * 0.85) * nms_thresh
+                    nms_thresh = 0.925 * self.nms_thresh
                 else:
-                    nms_thresh = 0.8 * self.nms_thresh
+                    nms_thresh = 0.85 * self.nms_thresh
             else:
                 nms_thresh = self.nms_thresh
 
@@ -134,9 +137,6 @@ class Detect(object):
         if cfg.train_class:
             # Collapse all the classes into 1
             scores, classes = scores.max(dim=0)
-
-        if centerness_scores is not None:
-            scores = scores * centerness_scores
 
         if cfg.use_dynamic_mask:
             det_masks_soft = net.DynamicMaskHead(proto_data.permute(2, 0, 1).unsqueeze(0), masks_coeff, boxes, prior_levels)

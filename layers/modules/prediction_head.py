@@ -88,7 +88,7 @@ class PredictionModule(nn.Module):
                                                     deformable_groups=self.deform_groups,
                                                     use_pred_offset=cfg.use_pred_offset)
                 else:
-                    self.track_layer = nn.Conv2d(out_channels, self.num_priors * self.embed_dim,
+                    self.track_layer = nn.Conv2d(out_channels, self.num_priors * self.track_dim,
                                                  kernel_size=kernel_size, padding=padding)
 
             if cfg.use_dcn_mask:

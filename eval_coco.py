@@ -1,6 +1,5 @@
-from datasets import COCODetection, get_label_map, MEANS, COLORS, cfg, set_cfg, set_dataset
+from datasets import *
 from STMask import STMask
-from utils.augmentations import BaseTransform, FastBaseTransform, Resize
 from utils.functions import MovingAverage, ProgressBar, SavePath
 from layers.utils import jaccard, center_size, mask_iou, postprocess, undo_image_transformation
 from utils import timer
@@ -854,7 +853,7 @@ def evalvideo(net: STMask, path: str, out_path: str = None):
     cleanup_and_exit()
 
 
-def evaluate(net: STMask, dataset, train_mode=False, iteration=None):
+def evaluate(net: STMask, dataset, train_mode=False, epoch=None, iteration=None):
     cfg.mask_proto_debug = args.mask_proto_debug
 
     # TODO Currently we do not support Fast Mask Re-scroing in evalimage, evalimages, and evalvideo
@@ -997,7 +996,7 @@ def evaluate(net: STMask, dataset, train_mode=False, iteration=None):
                     with open(args.ap_data_file, 'wb') as f:
                         pickle.dump(ap_data, f)
 
-                return calc_map(ap_data, iteration)
+                return calc_map(ap_data, epoch, iteration)
         elif args.benchmark:
             print()
             print()
@@ -1010,7 +1009,7 @@ def evaluate(net: STMask, dataset, train_mode=False, iteration=None):
         print('Stopping...')
 
 
-def calc_map(ap_data, iteration=None):
+def calc_map(ap_data, epoch=None, iteration=None):
     print('Calculating mAP...')
     aps = [{'box': [], 'mask': []} for _ in iou_thresholds]
 
@@ -1032,14 +1031,14 @@ def calc_map(ap_data, iteration=None):
             all_maps[iou_type][int(threshold * 100)] = mAP
         all_maps[iou_type]['all'] = (sum(all_maps[iou_type].values()) / (len(all_maps[iou_type].values()) - 1))
 
-    print_maps(all_maps, iteration)
+    print_maps(all_maps, epoch, iteration)
 
     # Put in a prettier format so we can serialize it to json during training
     all_maps = {k: {j: round(u, 2) for j, u in v.items()} for k, v in all_maps.items()}
     return all_maps
 
 
-def print_maps(all_maps, iteration):
+def print_maps(all_maps, epoch, iteration):
     # Warning: hacky
     make_row = lambda vals: (' %5s |' * len(vals)) % tuple(vals)
     make_sep = lambda n: ('-------+' * n)
@@ -1054,7 +1053,7 @@ def print_maps(all_maps, iteration):
 
     if args.save_path is not None:
         print()
-        print('iteration:', iteration, file=open(args.save_path, "a"))
+        print('epoch:', epoch, 'iteration:', iteration, file=open(args.save_path, "a"))
         print(make_row([''] + [('.%d ' % x if isinstance(x, int) else x + ' ') for x in all_maps['box'].keys()]),
               file=open(args.save_path, "a"))
         print(make_sep(len(all_maps['box']) + 1), file=open(args.save_path, "a"))
