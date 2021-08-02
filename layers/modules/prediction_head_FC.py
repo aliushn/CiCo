@@ -48,7 +48,6 @@ class PredictionModule_FC(nn.Module):
         self.pred_aspect_ratios = pred_aspect_ratios
         self.pred_scales = pred_scales
         self.parent = [parent]  # Don't include this in the state dict
-        self.num_heads = cfg.num_heads
 
         if cfg.use_sipmask:
             self.mask_dim = self.mask_dim * cfg.sipmask_head
@@ -59,6 +58,8 @@ class PredictionModule_FC(nn.Module):
                             + cfg.mask_dim * cfg.dynamic_mask_head_layers + 1
             if not cfg.disable_rel_coords:
                 self.mask_dim += cfg.mask_dim
+        elif cfg.mask_proto_with_levels:
+            self.mask_dim = self.mask_dim * 2
 
         if parent is None:
 
@@ -127,7 +128,7 @@ class PredictionModule_FC(nn.Module):
                                                              ))
                     else:
                         self.track_layer.append(nn.Conv2d(self.out_channels,
-                                                          self.num_priors * self.trck_dim,
+                                                          self.num_priors * self.track_dim,
                                                           kernel_size=kernel_size, padding=padding))
 
             # What is this ugly lambda doing in the middle of all this clean prediction module code?
@@ -232,7 +233,7 @@ class PredictionModule_FC(nn.Module):
             bbox[:, :, 0] /= conv_w
             bbox[:, :, 1] /= conv_h
 
-        priors, prior_levels = self.make_priors(idx, x.size(2), x.size(3), x.device)  # [1, h*w*num_priors*num_ratios, 4]
+        priors, prior_levels = self.make_priors(idx, x.size(2), x.size(3), x.device)  #[1, h*w*num_priors*num_ratios, 4]
 
         preds = {'mask_coeff': mask, 'priors': priors, 'prior_levels': prior_levels}
 

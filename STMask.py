@@ -7,7 +7,7 @@ from collections import defaultdict
 from datasets.config import cfg
 from layers.modules import PredictionModule_FC, PredictionModule, make_net, FPN, BiFPN, TemporalNet, DynamicMaskHead
 from layers.functions import Detect, Detect_TF, Track, generate_candidate, Track_TF, Track_TF_Clip
-from layers.utils import aligned_bilinear
+from layers.utils import aligned_bilinear, display_conf_outs
 from backbone import construct_backbone
 from utils import timer
 
@@ -32,8 +32,18 @@ class STMask(nn.Module):
         super().__init__()
 
         self.backbone = construct_backbone(cfg.backbone)
-        self.proto_src = cfg.mask_proto_src
+        src_channels = self.backbone.channels
+        if cfg.fpn is not None:
+            # Some hacky rewiring to accomodate the FPN
+            self.fpn = FPN([src_channels[i] for i in cfg.backbone.selected_layers])
+            self.selected_layers = list(range(len(cfg.backbone.selected_layers) + cfg.fpn.num_downsample))
+            src_channels = [cfg.fpn.num_features] * len(self.selected_layers)
+            if cfg.use_bifpn:
+                self.bifpn = nn.Sequential(*[BiFPN(cfg.fpn.num_features)
+                                             for _ in range(cfg.num_bifpn)])
 
+        # ------------ build ProtoNet ------------
+        self.proto_src = cfg.mask_proto_src
         if self.proto_src is None:
             in_channels = 3
         elif cfg.fpn is not None:
@@ -50,36 +60,19 @@ class STMask(nn.Module):
 
         # The include_last_relu=false here is because we might want to change it to another function
         self.proto_net, proto_channles = make_net(in_channels, cfg.mask_proto_net, include_bn=True, include_last_relu=True)
-        proto_arch = [(proto_channles, 3, {'padding': 1})] + [(cfg.mask_dim, 1, {})]
-        self.proto_conv, cfg.mask_dim = make_net(proto_channles, proto_arch, include_bn=True, include_last_relu=False)
+        self.proto_dim = cfg.mask_dim * (len(self.selected_layers) + 1) if cfg.mask_proto_with_levels else cfg.mask_dim
+        # the last two Conv layers for predicting prototypes
+        proto_arch = [(proto_channles, 3, {'padding': 1})] + [(self.proto_dim, 1, {})]
+        self.proto_conv, _ = make_net(proto_channles, proto_arch, include_bn=True, include_last_relu=False)
         if cfg.use_dynamic_mask:
             self.DynamicMaskHead = DynamicMaskHead()
 
-        if cfg.train_track:
-            track_arch = [(proto_channles, 3, {'padding': 1})] + [(cfg.track_dim, 1, {})]
-            self.track_conv, _ = make_net(proto_channles, track_arch, include_bn=True, include_last_relu=False)
-        if cfg.use_semantic_segmentation_loss:
-            sem_seg_head = [(proto_channles, 3, {'padding': 1})] + [(cfg.num_classes, 1, {})]
-            self.semantic_seg_conv, _ = make_net(proto_channles, sem_seg_head, include_bn=True, include_last_relu=False)
-
-        self.selected_layers = cfg.backbone.selected_layers
+        # ------- Build multi-scales prediction head  ------------
         self.pred_scales = cfg.backbone.pred_scales
         self.pred_aspect_ratios = cfg.backbone.pred_aspect_ratios
         self.num_priors = len(self.pred_scales[0])
-        src_channels = self.backbone.channels
-
-        if cfg.fpn is not None:
-            # Some hacky rewiring to accomodate the FPN
-            self.fpn = FPN([src_channels[i] for i in self.selected_layers])
-            self.selected_layers = list(range(len(self.selected_layers) + cfg.fpn.num_downsample))
-            src_channels = [cfg.fpn.num_features] * len(self.selected_layers)
-            if cfg.use_bifpn:
-                self.bifpn = nn.Sequential(*[BiFPN(cfg.fpn.num_features)
-                                             for _ in range(cfg.num_bifpn)])
-
         # prediction layers for loc, conf, mask
         self.prediction_layers = nn.ModuleList()
-        cfg.num_heads = len(self.selected_layers)  # yolact++
         for idx, layer_idx in enumerate(self.selected_layers):
             # If we're sharing prediction module weights, have every module's parent be the first one
             parent, parent_t = None, None
@@ -101,28 +94,41 @@ class STMask(nn.Module):
 
             self.prediction_layers.append(pred)
 
-        if cfg.train_track and cfg.use_temporal_info:
-            # temporal fusion
-            self.correlation_selected_layer = cfg.correlation_selected_layer
-            # evaluation for frame-level tracking
-            self.Detect_TF = Detect_TF(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k,
-                                       conf_thresh=cfg.nms_conf_thresh, nms_thresh=cfg.nms_thresh)
-            if cfg.eval_frames_of_clip > 1:
-                self.Track_TF_Clip = Track_TF_Clip()
-            else:
-                self.Track_TF = Track_TF()
+        # ---------------- Build track head ----------------
+        if cfg.train_track:
+            track_arch = [(proto_channles, 3, {'padding': 1})] * 2 + [(cfg.track_dim, 1, {})]
+            self.track_conv, _ = make_net(proto_channles, track_arch, include_bn=True, include_last_relu=False)
 
-            # track to segment
-            if cfg.temporal_fusion_module:
-                corr_channels = 2*in_channels + cfg.correlation_patch_size**2
-                self.TemporalNet = TemporalNet(corr_channels, cfg.mask_dim)
+            if cfg.use_temporal_info:
+                # temporal fusion between multi frames for tracking
+                self.correlation_selected_layer = cfg.correlation_selected_layer
+                # evaluation for frame-level tracking
+                self.Detect_TF = Detect_TF(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k,
+                                           conf_thresh=cfg.nms_conf_thresh, nms_thresh=cfg.nms_thresh)
+                if cfg.eval_frames_of_clip > 1:
+                    self.Track_TF_Clip = Track_TF_Clip()
+                else:
+                    self.Track_TF = Track_TF()
+
+                # track to segment
+                if cfg.temporal_fusion_module:
+                    corr_channels = 2*in_channels + cfg.correlation_patch_size**2
+                    self.TemporalNet = TemporalNet(corr_channels, cfg.mask_dim)
+
+            else:
+                # track instance frame-by-frame
+                self.detect = Detect(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k, conf_thresh=cfg.nms_conf_thresh,
+                                     nms_thresh=cfg.nms_thresh)
+                self.Track = Track()
 
         else:
             self.detect = Detect(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k, conf_thresh=cfg.nms_conf_thresh,
                                  nms_thresh=cfg.nms_thresh)
 
-            if cfg.train_track:
-                self.Track = Track()
+        if cfg.use_semantic_segmentation_loss:
+            sem_seg_head = [(proto_channles, 3, {'padding': 1})]*2 + [(cfg.num_classes, 1, {})]
+            self.semantic_seg_conv, _ = make_net(proto_channles, sem_seg_head, include_bn=True,
+                                                 include_last_relu=False)
 
         self.candidate_clip = []
         self.img_meta_clip = []
@@ -160,23 +166,28 @@ class STMask(nn.Module):
         model_dict = self.state_dict()
 
         # only remain same modules and layers between pre-trained model and our model
-        # TODO: double check backbone.layers or bakcbon.layer
         for key in list(state_dict.keys()):
-            if key not in model_dict.keys():
+            new_key = key[7:] if key.startswith('module') else key
+            if new_key not in model_dict.keys():
                 del state_dict[key]
-            elif model_dict[key].shape != state_dict[key].shape:
+            elif model_dict[new_key].shape != state_dict[key].shape:
+                del state_dict[key]
+            else:
+                state_dict[new_key] = state_dict[key]
                 del state_dict[key]
 
         state_dict = {k: v for k, v in state_dict.items() if k in model_dict}
         if local_rank == 0:
-            print('parameters without load weights from pre-trained models')
-            print([k for k, v in model_dict.items() if k not in state_dict])
+            for k in model_dict.keys():
+                if k not in state_dict:
+                    print('parameters without load weights from pre-trained models:', k)
+
         model_dict.update(state_dict)
         self.load_state_dict(model_dict, strict=True)
 
         # Initialize the rest of the conv layers with xavier
         for name, module in self.named_modules():
-            if isinstance(module, nn.Conv2d) and name not in state_dict:
+            if isinstance(module, nn.Conv2d) and name+'.weight' not in state_dict:
                 if local_rank == 0:
                     print('init weights by Xavier:', name)
 
@@ -220,6 +231,9 @@ class STMask(nn.Module):
 
             is_conv_layer = isinstance(module, nn.Conv2d) or is_script_conv
             if is_conv_layer and module not in self.backbone.backbone_modules:
+                if local_rank == 0:
+                    print('init weights by Xavier:', name)
+
                 nn.init.xavier_uniform_(module.weight.data)
 
                 if module.bias is not None:
@@ -275,6 +289,8 @@ class STMask(nn.Module):
 
         with timer.env('pred_heads'):
             pred_outs = {'mask_coeff': [], 'priors': [], 'prior_levels': []}
+            if cfg.train_track and not cfg.track_by_Gaussian:
+                pred_outs['track'] = []
 
             if cfg.train_boxes:
                 pred_outs['loc'] = []
@@ -297,18 +313,18 @@ class STMask(nn.Module):
                 p = pred_layer(pred_x, idx)
 
                 for k, v in p.items():
-                    pred_outs[k].append(v)  # [batch_size, h*w*anchors, dim]
+                    pred_outs[k].append(v)  # [batch_size, h*w*anchors, dim
 
             for k, v in pred_outs.items():
                 pred_outs[k] = torch.cat(v, 1)
 
-        if cfg.train_track:
-            with timer.env('track'):
-                pred_outs['track'] = self.track_conv(proto_out_ori).permute(0, 2, 3, 1).contiguous()
+        if cfg.train_track and cfg.track_by_Gaussian:
+            with timer.env('track_by_Gaussian'):
+                pred_outs['track'] = self.track_conv(proto_x).permute(0, 2, 3, 1).contiguous()
 
         if cfg.use_semantic_segmentation_loss or not cfg.train_class:
             with timer.env('sem_seg'):
-                pred_outs['sem_seg'] = self.semantic_seg_conv(proto_out_ori).permute(0, 2, 3, 1).contiguous()
+                pred_outs['sem_seg'] = self.semantic_seg_conv(proto_x).permute(0, 2, 3, 1).contiguous()
 
         pred_outs['proto'] = proto_dict
 
@@ -345,22 +361,20 @@ class STMask(nn.Module):
         return index, pred_outs_all
 
     def forward(self, x, img_meta=None):
+        batch_size, c, h, w = x.size()
+        fpn_outs, pred_outs = self.forward_single(x)
+        # for nn.DataParallel
+        pred_outs['priors'] = pred_outs['priors'].repeat(batch_size, 1, 1)
+        pred_outs['prior_levels'] = pred_outs['prior_levels'].repeat(batch_size, 1)
+
+        if cfg.train_track and cfg.use_temporal_info:
+            # calculate correlation map
+            pred_outs['fpn_feat'] = fpn_outs[self.correlation_selected_layer]
+
         if self.training:
-            batch_size, c, h, w = x.size()
-            fpn_outs, pred_outs = self.forward_single(x)
-
-            if cfg.train_track and cfg.use_temporal_info:
-                # calculate correlation map
-                pred_outs['fpn_feat'] = fpn_outs[self.correlation_selected_layer]
-
-            # for nn.DataParallel
-            pred_outs['priors'] = pred_outs['priors'].repeat(batch_size, 1, 1)
-            pred_outs['prior_levels'] = pred_outs['prior_levels'].repeat(batch_size, 1)
 
             return pred_outs
         else:
-
-            fpn_outs, pred_outs = self.forward_single(x)
 
             if cfg.train_class:
                 pred_outs['conf'] = pred_outs['conf'].sigmoid()
@@ -371,8 +385,6 @@ class STMask(nn.Module):
             # track instances frame-by-frame
             if cfg.train_track and cfg.use_temporal_info:
 
-                # we only use the bbox features in the P3 layer
-                pred_outs['fpn_feat'] = fpn_outs[1]
                 candidate = generate_candidate(pred_outs)
                 candidate_after_NMS = self.Detect_TF(self, candidate)
 
@@ -436,6 +448,7 @@ class STMask(nn.Module):
                     return pred_outs_after_track, out_imgs, out_img_metas
 
             else:
+
                 # detect instances by NMS for each single frame on COCO datasets
                 pred_outs_after_NMS = self.detect(self, pred_outs)
 

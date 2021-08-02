@@ -9,11 +9,11 @@ from matplotlib.patches import Polygon
 
 from datasets import cfg, MEANS, STD, activation_func
 import os
-from ..utils import sanitize_coordinates, center_size, generate_mask
+from ..utils import sanitize_coordinates, center_size, generate_single_mask, jaccard
 
 
-def postprocess(det_output, ori_h, ori_w, img_h, img_w, batch_idx=0, interpolation_mode='bilinear',
-                visualize_lincomb=False, score_threshold=0):
+def postprocess(det_output, ori_h, ori_w, img_h, img_w, img_id, batch_idx=0, interpolation_mode='bilinear',
+                visualize_lincomb=False, score_threshold=0, output_file=None):
     """
     Postprocesses the output of Yolact on testing mode into a format that makes sense,
     accounting for all the possible configuration settings.
@@ -59,19 +59,29 @@ def postprocess(det_output, ori_h, ori_w, img_h, img_w, batch_idx=0, interpolati
     scores = dets['score']
     masks_coeff = dets['mask_coeff']
 
+    coeffs_norm = F.normalize(cfg.mask_proto_coeff_activation(masks_coeff), dim=1)
+    cos_sim = torch.mm(coeffs_norm, coeffs_norm.t())
+    # Rescale to be between 0 and 1
+    cos_sim = (cos_sim + 1) / 2
+
+    instance_t = classes.view(-1)  # juuuust to make sure
+    # inst_eq = (instance_t[:, None].expand_as(cos_sim) == instance_t[None, :].expand_as(cos_sim))
+    # box_iou = jaccard(boxes, boxes)
+
     if cfg.eval_mask_branch:
         # At this points masks is only the coefficients
-        proto_data = dets['proto'][:img_h, :img_w]
+        proto_data = dets['proto'][:int(dets['proto'].size(0)/pad_h * img_h), :int(dets['proto'].size(1)/pad_w * img_w)]
 
         # Test flag, do not upvote
         if cfg.mask_proto_debug:
             np.save('scripts/proto.npy', proto_data.cpu().numpy())
 
-        if visualize_lincomb:
-            display_lincomb(proto_data, masks_coeff)
-
         # First undo padding area and then scale masks up to the full image
         masks = dets['mask'][:, :img_h, :img_w]
+
+        if visualize_lincomb:
+            display_lincomb(proto_data, masks, masks_coeff, img_ids=[img_id], output_file=output_file)
+
         masks = F.interpolate(masks.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode, align_corners=False).squeeze(0)
 
         # Binarize the masks
@@ -90,7 +100,7 @@ def postprocess(det_output, ori_h, ori_w, img_h, img_w, batch_idx=0, interpolati
 
 def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
                        display_mask=False, visualize_lincomb=False, crop_masks=True, score_threshold=0,
-                       img_ids=None, mask_det_file=None):
+                       img_ids=None, output_file=None):
     """
     Postprocesses the output of Yolact on testing mode into a format that makes sense,
     accounting for all the possible configuration settings.
@@ -113,14 +123,14 @@ def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
     for k, v in detection.items():
         dets[k] = v.clone()
 
+    if dets['box'].nelement() == 0:
+        dets['segm'] = torch.Tensor()
+        return dets
+
     ori_h, ori_w = img_meta['ori_shape'][:2]
     img_h, img_w = img_meta['img_shape'][:2]
     pad_h, pad_w = img_meta['pad_shape'][:2]
     s_w, s_h = (img_w / pad_w, img_h / pad_h)
-
-    if dets['box'].nelement() == 0:
-        dets['segm'] = torch.Tensor()
-        return dets
 
     # double check
     if score_threshold > 0:
@@ -155,18 +165,13 @@ def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
         masks_non_target = None
 
     if visualize_lincomb:
-        display_lincomb(dets['proto'], masks, mask_coeff, img_ids, mask_det_file, masks_non_target)
+        display_lincomb(dets['proto'], masks, mask_coeff, img_ids, output_file, masks_non_target)
 
     # Undo padding for masks
     masks = masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
     # Scale masks up to the full image
-    if cfg.preserve_aspect_ratio:
-        masks = F.interpolate(masks.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode,
-                              align_corners=False).squeeze(0)
-    else:
-        masks = F.interpolate(masks.unsqueeze(0), (img_h, img_w), mode=interpolation_mode,
-                              align_corners=False).squeeze(0)
-
+    masks = F.interpolate(masks.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode,
+                          align_corners=False).squeeze(0)
     # Binarize the masks
     masks.gt_(0.5)
 
@@ -182,18 +187,11 @@ def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
         dets['segm'] = masks_output_json
 
     # Undo padding for bboxes
-    boxes[:, 0::2] = boxes[:, 0::2] / s_w
-    boxes[:, 1::2] = boxes[:, 1::2] / s_h
+    boxes[:, 0::2] /= s_w
+    boxes[:, 1::2] /= s_h
 
-    if cfg.preserve_aspect_ratio:
-        out_w = ori_w
-        out_h = ori_h
-    else:
-        out_w = img_w
-        out_h = img_h
-
-    boxes[:, 0], boxes[:, 2] = sanitize_coordinates(boxes[:, 0], boxes[:, 2], out_w, cast=False)
-    boxes[:, 1], boxes[:, 3] = sanitize_coordinates(boxes[:, 1], boxes[:, 3], out_h, cast=False)
+    boxes[:, 0], boxes[:, 2] = sanitize_coordinates(boxes[:, 0], boxes[:, 2], ori_w, cast=False)
+    boxes[:, 1], boxes[:, 3] = sanitize_coordinates(boxes[:, 1], boxes[:, 3], ori_h, cast=False)
 
     boxes = boxes.long()
     dets['box'] = boxes
@@ -230,18 +228,26 @@ def undo_image_transformation(img, ori_h, ori_w, img_h=None, img_w=None, interpo
     return img_numpy
 
 
-def display_lincomb(proto_data, out_masks, masks_coeff=None, img_ids=None, mask_det_file=None, masks_non_target=None):
-    proto_data = proto_data[0]
+def display_lincomb(protos_data, out_masks, masks_coeff=None, img_ids=None, output_file=None, masks_non_target=None):
 
-    for kdx in range(1):
+    bs = 1 if protos_data.dim() == 3 else protos_data.size(0)
+
+    masks_coeff = cfg.mask_proto_coeff_activation(masks_coeff)
+    out_masks_pos = generate_single_mask(protos_data, torch.clamp(masks_coeff, min=0))
+    out_masks_neg = generate_single_mask(protos_data, torch.clamp(masks_coeff, max=0))
+
+    out_masks_temp = cfg.mask_proto_mask_activation(out_masks_pos + out_masks_neg)
+    out_masks_pos = cfg.mask_proto_mask_activation(out_masks_pos)
+    out_masks_neg = cfg.mask_proto_mask_activation(-out_masks_neg)
+
+    for kdx in range(bs):
         import matplotlib.pyplot as plt
+        proto_data = protos_data if protos_data.dim() == 3 else protos_data[kdx]
 
-        arr_h, arr_w = (4, 4)
-        print(proto_data.size(), img_ids)
+        arr_h, arr_w = (4, 8)
         proto_h, proto_w, _ = proto_data.size()
         arr_img = np.zeros([proto_h * arr_h, proto_w * arr_w])
         arr_run = np.zeros([proto_h * arr_h, proto_w * arr_w])
-        test = torch.sum(proto_data, -1).cpu().numpy()
 
         for y in range(arr_h):
             for x in range(arr_w):
@@ -263,13 +269,16 @@ def display_lincomb(proto_data, out_masks, masks_coeff=None, img_ids=None, mask_
                             running_total_nonlin > 0.5).astype(np.float)
         plt.imshow(arr_img)
         plt.axis('off')
-        root_dir = ''.join([mask_det_file[:-12], 'out_proto/', str(img_ids[0]), '/'])
+        root_dir = ''.join([output_file, 'out/'])
+        if len(img_ids) > 1:
+            root_dir = ''.join([root_dir, str(img_ids[0]), '/'])
+
         if not os.path.exists(root_dir):
             os.makedirs(root_dir)
 
-        if img_ids is not None:
-            plt.title(str(img_ids))
-            plt.savefig(''.join([root_dir, str(img_ids[1]), '_protos.png']))
+        plt.title(str(img_ids[-1]))
+        plt.savefig(''.join([root_dir, str(img_ids[-1]), '_protos.png']))
+        plt.clf()
         # plt.show()
         # plt.imshow(arr_run)
         # plt.show()
@@ -277,16 +286,30 @@ def display_lincomb(proto_data, out_masks, masks_coeff=None, img_ids=None, mask_
         # plt.show()
 
     for jdx in range(out_masks.size(0)):
+        # plot mask coeffs
+        y = masks_coeff[jdx].cpu().numpy()
+        x = torch.arange(len(y)).cpu().numpy()
+        y0 = torch.zeros(len(y)).cpu().numpy()
+        plt.plot(x, y, 'r+--', x, y0)
+        plt.ylim(-1, 1)
+        plt.title(str(img_ids[-1]))
+        # plt.savefig(''.join([root_dir, str(img_ids[-1]), '_', str(jdx), '_mask_coeff.png']))
+        plt.clf()
+
+        # plot single mask
         plt.imshow(out_masks[jdx].cpu().numpy())
-        if img_ids is not None:
-            plt.title(str(img_ids))
-            plt.savefig(''.join([root_dir, str(img_ids[1]), '_', str(jdx), '_mask.png']))
-        # plt.show()
+        plt.axis('off')
+        plt.title(str(img_ids[-1]))
+        # plt.savefig(''.join([root_dir, str(img_ids[-1]), '_', str(jdx), '_mask.png']))
+        plt.clf()
+
+        # plt masks with non-target objects
         if masks_non_target is not None:
             plt.imshow(masks_non_target[jdx].cpu().numpy())
             if img_ids is not None:
                 plt.title(str(img_ids))
                 plt.savefig(''.join([root_dir, str(img_ids[1]), '_', str(jdx), '_mask_non_target.png']))
+                plt.clf()
 
 
 def display_fpn_outs(outs, img_ids=None, mask_det_file=None):
@@ -309,5 +332,25 @@ def display_fpn_outs(outs, img_ids=None, mask_det_file=None):
                 plt.title(str(img_ids))
                 plt.savefig(''.join([mask_det_file, str(img_ids), 'outs', str(batch_idx), str(idx), '.png']))
             plt.show()
+
+
+def display_conf_outs(tensor, img_id=0, mask_det_file=None):
+    mask_det_file = 'weights/COCO/weights_r50_m32_yolact_DIoU_012_640_768_randomclip_c5/'
+    tensor = torch.tanh(tensor)
+
+    for batch_idx in range(tensor.size(0)):
+        import matplotlib.pyplot as plt
+        h, w = tensor.size()[-2:]
+        arr_img = np.zeros([3 * h, 3 * w])
+        for idx in range(3):
+            for jdx in range(3):
+                cur_conf = tensor[batch_idx][24 * ((idx * 3) + jdx)]
+                arr_img[jdx * h:(jdx + 1) * h, idx * w:(idx + 1) * w] = ((cur_conf - cur_conf.min()) / cur_conf.max()).cpu().numpy()
+
+        plt.imshow(arr_img)
+        plt.axis('off')
+        plt.savefig(''.join([mask_det_file, 'out/', str(img_id), '_proto', '.png']))
+        plt.clf()
+
 
 

@@ -15,6 +15,7 @@ class YTVOSDataset(data.Dataset):
     def __init__(self,
                  ann_file,
                  img_prefix,
+                 preserve_aspect_ratio=True,
                  transform=None,
                  size_divisor=None,
                  with_mask=True,
@@ -25,6 +26,7 @@ class YTVOSDataset(data.Dataset):
                  has_gt=False):
         # prefix of images path
         self.img_prefix = img_prefix
+        self.preserve_aspect_ratio = preserve_aspect_ratio
 
         # load annotations (and proposals)
         self.vid_infos = self.load_annotations(ann_file)
@@ -155,14 +157,14 @@ class YTVOSDataset(data.Dataset):
         vid_idx = self.vid_ids.index(vid)
         vid_info = self.vid_infos[vid_idx]
         basename = osp.basename(vid_info['filenames'][frame_id])
-        clip_frame_ids = self.sample_ref(idx) + [frame_id]
-        clip_frame_ids.sort()
+        ref_frame_ids = self.sample_ref(idx)
+        clip_frame_ids = ref_frame_ids + [frame_id]
         imgs = [mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][id])) for id in clip_frame_ids]
         height, width, depth = imgs[0].shape
         ori_shape = (height, width, depth)
 
         # load annotation of ref_frames
-        masks, bboxes, labels, obj_ids, bboxes_ignore = [], [], [], [], []
+        masks, bboxes, labels, obj_ids, bboxes_ignore, img_meta = [], [], [], [], [], []
         for id in clip_frame_ids:
             ann = self.get_ann_info(vid, id)
             bboxes.append(ann['bboxes'])
@@ -178,18 +180,35 @@ class YTVOSDataset(data.Dataset):
             if self.with_crowd:
                 bboxes_ignore.append(ann['bboxes_ignore'])
 
+            img_meta.append(dict(
+                ori_shape=ori_shape,
+                video_id=vid,
+                frame_id=id,
+                is_first=(id == 0)))
+
         # apply transforms
         imgs, masks, bboxes, labels = self.transform(imgs, masks, bboxes, labels)
 
+        for i, img in enumerate(imgs):
+            ori_h, ori_w = img_meta[i]['ori_shape'][:2]
+            pad_h, pad_w = img.shape[:2]
+
+            if self.preserve_aspect_ratio:
+                # resize long edges
+                if (ori_h/float(ori_w)) < (pad_h/float(pad_w)):
+                    img_w, img_h = pad_w, int(ori_h * (pad_w / ori_w))
+                else:
+                    img_w, img_h = int(ori_w * (pad_h / ori_h)), pad_h
+            else:
+                img_w, img_h = pad_w, pad_h
+
+            img_meta[i]['img_shape'] = (img_h, img_w, 3)
+            img_meta[i]['pad_shape'] = (pad_h, pad_w, 3)
+
+        # TODO: how to deal wit
         # if self.with_crowd:
         #     for i in range(len(clip_frame_ids)):
         #         bboxes_ignore[i] = self.transform(bboxes_ignore[i], img_shape, pad_shape, scale_factor, flip)
-
-        img_meta = dict(
-            ori_shape=ori_shape,
-            video_id=vid,
-            frame_id=frame_id,
-            is_first=(frame_id == 0))
 
         return imgs, img_meta, (masks, bboxes, labels, obj_ids)
 
@@ -199,16 +218,31 @@ class YTVOSDataset(data.Dataset):
         vid_idx = self.vid_ids.index(vid)
         vid_info = self.vid_infos[vid_idx]
         img = [mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][frame_id]))]
-        height, width, depth = img[0].shape
-        ori_shape = (height, width, depth)
+        ori_h, ori_w, depth = img[0].shape
+        ori_shape = (ori_h, ori_w, depth)
         # apply transforms
         img, _, _, _ = self.transform(img)
+        pad_h, pad_w = img[0].shape[:2]
 
-        img_meta = dict(
+        if self.preserve_aspect_ratio:
+            # resize long edges
+            if (ori_h / float(ori_w)) < (pad_h / float(pad_w)):
+                img_w, img_h = pad_w, int(ori_h * (pad_w / ori_w))
+            else:
+                img_w, img_h = int(ori_w * (pad_h / ori_h)), pad_h
+        else:
+            img_w, img_h = pad_w, pad_h
+
+        img_shape = (img_h, img_w, 3)
+        pad_shape = (pad_h, pad_w, 3)
+
+        img_meta = [dict(
             ori_shape=ori_shape,
+            img_shape=img_shape,
+            pad_shape=pad_shape,
             video_id=vid,
             frame_id=frame_id,
-            is_first=(frame_id == 0))
+            is_first=(frame_id == 0))]
 
         return img, img_meta, None
 
@@ -320,45 +354,46 @@ def detection_collate_vis(batch):
 
     for sample in batch:
         imgs += [torch.from_numpy(img).permute(2, 0, 1) for img in sample[0]]
-        img_metas.append(sample[1])
+        img_metas += sample[1]
         if sample[2] is not None:
             masks += [torch.from_numpy(mask) for mask in sample[2][0]]
             bboxes += [torch.from_numpy(box) for box in sample[2][1]]
             labels += [torch.from_numpy(label) for label in sample[2][2]]
             ids += [torch.from_numpy(id) for id in sample[2][3]]
 
-    # padding all images in a minibatch
-    imgs_batch = ImageList_from_tensors(imgs, size_divisibility=32)
+    imgs_batch = torch.stack(imgs, dim=0)
 
-    # padding masks and bboxes
     if len(masks) > 0:
-        image_sizes_ori_h = [im.shape[-2] for im in imgs]
-        image_sizes_ori_w = [im.shape[-1] for im in imgs]
-        h, w = imgs_batch.size()[-2:]
-
-        for i in range(len(bboxes)):
-            # padding for bboxes (bboxes with precent coords)
-            bboxes[i][:, 0::2] *= (image_sizes_ori_w[i] / float(w))
-            bboxes[i][:, 1::2] *= (image_sizes_ori_h[i] / float(h))
-
-            padding_size = [0, w - image_sizes_ori_w[i], 0, h - image_sizes_ori_h[i]]
-            masks[i] = F.pad(masks[i], padding_size, value=0)
-
-        return imgs_batch, img_metas, (masks, bboxes, labels, ids)
+        return imgs_batch, img_metas, (bboxes, labels, masks, ids)
     else:
         return imgs_batch, img_metas
 
 
-def prepare_data_vis(data_batch, devices, train_mode=True):
-    with torch.no_grad():
-        images = data_batch[0].cuda(devices)
-        images_meta_list = data_batch[1]
-        masks_list = [mask.cuda(devices) for mask in data_batch[2][0]]
-        bboxes_list = [box.cuda(devices) for box in data_batch[2][1]]
-        labels_list = [label.cuda(devices) for label in data_batch[2][2]]
-        ids_list = [id.cuda(devices) for id in data_batch[2][3]]
+def prepare_data_vis(data_batch, devices):
+    images, image_metas, (bboxes, labels, masks, obj_ids) = data_batch
+    d = len(devices) * 2
+    if images.size(0) % d != 0:
+        # TODO: if read multi frames (n_f) as a clip, thus the condition should be images.size(0) / n_f % len(devices)
+        idx = [i % images.size(0) for i in range(d)]
+        remainder = d - images.size(0) % d
+        images = torch.cat([images, images[idx[:remainder]]])
+        bboxes += [bboxes[i] for i in idx[:remainder]]
+        labels += [labels[i] for i in idx[:remainder]]
+        masks += [masks[i] for i in idx[:remainder]]
+        obj_ids += [obj_ids[i] for i in idx[:remainder]]
+    n = images.size(0) // len(devices)
 
-        return images, images_meta_list, masks_list, bboxes_list, labels_list, ids_list
+    with torch.no_grad():
+        images_list, masks_list, bboxes_list, labels_list, obj_ids_list, num_crowds_list = [], [], [], [], [], []
+        for idx, device in enumerate(devices):
+            images_list.append(gradinator(images[idx * n:(idx + 1) * n].to(device)))
+            masks_list.append([gradinator(masks[jdx].to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            bboxes_list.append([gradinator(bboxes[jdx].to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            labels_list.append([gradinator(labels[jdx].to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            obj_ids_list.append([gradinator(obj_ids[jdx].to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            num_crowds_list.append([0] * n)
+
+        return images_list, bboxes_list, labels_list, masks_list, obj_ids_list, num_crowds_list
 
 
 def gradinator(x):

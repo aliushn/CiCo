@@ -46,6 +46,9 @@ def parse_args():
     parser.add_argument('--start_iter', default=-1, type=int,
                         help='Resume training at this iter. If this is -1, the iteration will be' \
                          'determined from the file name.')
+    parser.add_argument('--start_epoch', default=-1, type=int,
+                        help='Resume training at this iter. If this is -1, the iteration will be' \
+                             'determined from the file name.')
     parser.add_argument('--num_workers', default=2, type=int,
                         help='Number of workers used in data_loading')
     parser.add_argument('--backbone.pred_scales_num', default=3, type=int,
@@ -84,7 +87,7 @@ def replace(name):
     if getattr(args, name) == None: setattr(args, name, getattr(cfg, name))
 
 
-loss_types = ['B', 'BIoU', 'Rep', 'C', 'stuff', 'M_bce', 'M_dice', 'center', 'T', 'B_shift', 'BIoU_shift', 'M_shift',
+loss_types = ['B', 'BIoU', 'center', 'Rep', 'C', 'stuff', 'M_bce', 'M_dice', 'M_coeff',  'T', 'B_shift', 'BIoU_shift', 'M_shift',
               'P', 'D', 'S', 'I']
 
 
@@ -96,6 +99,7 @@ def train():
         device = torch.device("cuda", args.local_rank)
     else:
         torch.cuda.set_device(torch.cuda.current_device())
+        device = torch.cuda.current_device()
 
     if not os.path.exists(args.save_folder) and args.local_rank == 0:
         os.mkdir(args.save_folder)
@@ -119,14 +123,20 @@ def train():
         args.resume = SavePath.get_latest(args.save_folder, cfg.name)
 
     if args.resume is not None:
-        print('Resuming training, loading {}...'.format(args.resume))
-        net.load_weights(path=args.resume)
+        if args.is_distributed:
+            if args.local_rank == 0:
+                print('Resuming training on local _rank=0, loading {}...'.format(args.resume))
+                net.load_weights(path=args.resume)
+        else:
+            print('Resuming training, loading {}...'.format(args.resume))
+            net.load_weights(path=args.resume)
         cur_lr = args.lr
 
         if args.start_iter == -1:
             args.start_iter = SavePath.from_str(args.resume).iteration
+            args.start_epoch = SavePath.from_str(args.resume).epoch
     else:
-        if train_type == 'coco':
+        if cfg.data_type == 'coco':
             print('Initializing weights based ImageNet ...')
             net.init_weights(backbone_path='weights/pretrained_models_coco/' + cfg.backbone.path,
                              local_rank=args.local_rank)
@@ -135,29 +145,34 @@ def train():
             net.init_weights_coco(backbone_path='weights/pretrained_models_coco/' + cfg.backbone.path,
                                   local_rank=args.local_rank)
 
+    optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
     criterion = MultiBoxLoss(net=net,
                              num_classes=cfg.num_classes,
                              pos_threshold=cfg.positive_iou_threshold,
                              neg_threshold=cfg.negative_iou_threshold)
 
-    if train_type == 'coco':
+    if cfg.data_type == 'coco':
         train_dataset = COCODetection(image_path=cfg.dataset.train_images,
                                       info_file=cfg.dataset.train_info,
                                       transform=SSDAugmentation(MEANS))
         detection_collate = detection_collate_coco
     else:
-        train_dataset = get_dataset(cfg.valid_sub_dataset, cfg.backbone.transform)
+        train_dataset = get_dataset(cfg.train_dataset, cfg.backbone.transform)
         detection_collate = detection_collate_vis
 
     if args.is_distributed:
-        # net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(net)
+        if args.batch_size < 8:
+            if args.local_rank == 0:
+                print('Batch size of each gpu is:', args.batch_size, 'turn on sync batchnorm for DDP')
+            net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(net)
         net = torch.nn.parallel.DistributedDataParallel(net.to(device), device_ids=[args.local_rank])
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
-        net = torch.nn.DataParallel(net, device_ids=range(torch.cuda.device_count()))
+        netloss = CustomDataParallel(NetLoss(net, criterion))
+        netloss = netloss.cuda()
+        # net = torch.nn.DataParallel(net, device_ids=range(torch.cuda.device_count()))
         train_sampler = None
 
-    optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
     data_loader = data.DataLoader(train_dataset, args.batch_size,
                                   num_workers=args.num_workers,
                                   collate_fn=detection_collate,
@@ -167,6 +182,7 @@ def train():
 
     # loss counters
     iteration = max(args.start_iter, 0)
+    start_epoch = max(args.start_epoch, 0)
     last_time = time.time()
     if args.is_distributed:
         epoch_size = len(train_dataset) // (torch.cuda.device_count() * args.batch_size)
@@ -188,7 +204,7 @@ def train():
         print()
     # try-except so you can use ctrl+c to save early and stop training
     try:
-        for epoch in range(cfg.max_epoch):
+        for epoch in range(start_epoch, cfg.max_epoch):
 
             # for datum in data_loader:
             for i, data_batch in enumerate(data_loader):
@@ -203,19 +219,17 @@ def train():
                     cur_lr = args.lr * (args.gamma ** step_index)
                     set_lr(optimizer, cur_lr)
 
-                if train_type == 'vis':
-                    num_crowds = None
-                    imgs, img_meta, gt_masks, gt_bboxes, gt_labels, gt_ids = prepare_data_vis(data_batch,
-                                                                                              devices=device)
+                optimizer.zero_grad()
+                if args.is_distributed:
+                    imgs, img_meta, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds = \
+                        prepare_data_dist(data_batch, device)
+                    preds = net(imgs)
+                    losses = criterion(imgs, preds, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds)
 
                 else:
-                    gt_ids = None
-                    imgs, gt_masks, gt_bboxes, gt_labels, num_crowds = prepare_data_coco(data_batch,
-                                                                                         devices=torch.cuda.current_device())
+                    losses = netloss(data_batch)
+                    losses = {k: (v).mean() for k, v in losses.items()}  # Mean here because Dataparallel
 
-                optimizer.zero_grad()
-                preds = net(imgs)
-                losses = criterion(imgs, preds, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds)
                 loss = sum([losses[k] for k in losses])  # same weights in three sub-losses
                 loss.backward()  # Do this to free up vram even if loss is not finite
                 optimizer.step()
@@ -264,9 +278,9 @@ def train():
                                 os.remove(latest)
 
                         # This is done per epoch
-                        save_path_valid_metrics = save_path(epoch-1, iteration).replace('.pth', '.json')
+                        save_path_valid_metrics = save_path(epoch, iteration).replace('.pth', '.json')
 
-                        if train_type == 'vis':
+                        if cfg.data_type == 'vis':
                             setup_eval()
                             # valid_sub, the last one ten of training data
                             cfg.valid_sub_dataset.has_gt = False
@@ -314,6 +328,29 @@ def reduce_tensor(tensor: torch.Tensor):
 def set_lr(optimizer, new_lr):
     for param_group in optimizer.param_groups:
         param_group['lr'] = new_lr
+
+
+def prepare_data_dist(data_batch, device):
+    with torch.no_grad():
+        imgs, targets, masks, num_crowds = data_batch
+        imgs = imgs.cuda(device)
+        if cfg.data_type == 'coco':
+            # padding images with different scales
+            masks_list = [mask.cuda(device) for mask in masks]
+            bboxes_list = [target[:, :4].cuda(device) for target in targets]
+            labels_list = [target[:, -1].cuda(device) for target in targets]
+            num_crowds = data_batch[3]
+            ids_list, images_meta_list = None, None
+
+        elif cfg.data_type == 'vis':
+            images_meta_list = data_batch[1]
+            bboxes_list = [box.cuda(device) for box in data_batch[2][0]]
+            labels_list = [label.cuda(device) for label in data_batch[2][1]]
+            masks_list = [mask.cuda(device) for mask in data_batch[2][2]]
+            ids_list = [id.cuda(device) for id in data_batch[2][3]]
+            num_crowds = None
+
+        return imgs, images_meta_list, bboxes_list, labels_list, masks_list, ids_list, num_crowds
 
 
 def compute_validation_loss(net, data_loader, dataset_size):
@@ -402,11 +439,11 @@ if __name__ == '__main__':
         torch.set_default_tensor_type('torch.FloatTensor')
 
     args = parse_args()
-    train_type = 'vis'
+    cfg.data_type = 'vis'
     if args.config is not None:
         set_cfg(args.config)
         if 'coco' in args.config:
-            train_type = 'coco'
+            cfg.data_type = 'coco'
 
     # This is managed by set_lr
     cur_lr = args.lr

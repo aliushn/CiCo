@@ -171,7 +171,7 @@ class ResNetBackbone(nn.Module):
                 state_dict.pop(key)
 
         # Note: Using strict=False is berry scary. Triple check this.
-        self.load_state_dict(state_dict, strict=False)
+        self.load_state_dict(state_dict, strict=True)
 
     def add_layer(self, conv_channels=1024, downsample=2, depth=1, block=Bottleneck):
         """ Add a downsample layer to the backbone as per what SSD does. """

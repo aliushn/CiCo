@@ -10,6 +10,7 @@ from utils import timer
 from itertools import product
 from math import sqrt
 from mmcv.ops import DeformConv2d
+from ..utils import display_conf_outs
 
 
 class PredictionModule(nn.Module):
@@ -50,7 +51,6 @@ class PredictionModule(nn.Module):
         self.pred_scales = pred_scales
         self.deform_groups = deform_groups
         self.parent = [parent]  # Don't include this in the state dict
-        self.num_heads = cfg.num_heads
 
         if cfg.use_sipmask:
             self.mask_dim = self.mask_dim * cfg.sipmask_head
@@ -61,6 +61,8 @@ class PredictionModule(nn.Module):
                             + cfg.mask_dim * cfg.dynamic_mask_head_layers + 1
             if not cfg.disable_rel_coords:
                 self.mask_dim += cfg.mask_dim * 2
+        elif cfg.mask_proto_with_levels:
+            self.mask_dim = self.mask_dim * 2
 
         kernel_size = cfg.pred_conv_kernels[0]
         padding = [(kernel_size[0] - 1) // 2, (kernel_size[1] - 1) // 2]
@@ -80,7 +82,7 @@ class PredictionModule(nn.Module):
                     self.conf_layer = nn.Conv2d(self.out_channels, self.num_priors * self.num_classes,
                                                 kernel_size=kernel_size, padding=padding)
 
-            if cfg.train_track:
+            if cfg.train_track and not cfg.track_by_Gaussian:
                 if cfg.use_dcn_track:
                     self.track_layer = FeatureAlign(self.out_channels,
                                                     self.num_priors * self.embed_dim,
@@ -152,7 +154,7 @@ class PredictionModule(nn.Module):
                 conf = src.conf_layer(conf_x)
             conf = conf.permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.num_classes)
 
-        if cfg.train_track:
+        if cfg.train_track and not cfg.track_by_Gaussian:
             if cfg.use_dcn_track:
                 track = src.track_layer(track_x, bbox.detach())
             else:
@@ -179,7 +181,7 @@ class PredictionModule(nn.Module):
         preds = {'loc': bbox_output, 'conf': conf, 'mask_coeff': mask,
                  'priors': priors, 'prior_levels': prior_levels}
 
-        if cfg.train_track:
+        if cfg.train_track and not cfg.track_by_Gaussian:
             preds['track'] = track
 
         if cfg.train_centerness:

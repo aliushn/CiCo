@@ -147,7 +147,7 @@ def compute_kl_div(p_mu, p_var, q_mu=None, q_var=None):
 
 
 def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta, add_bbox_dummy=False,
-                        bbox_dummy_iou=0, match_coeff=None, use_FEELVOS=False):
+                        bbox_dummy_iou=0, match_coeff=None):
     # compute comprehensive matching score based on matchig likelihood,
     # bbox confidence, and ious
     if add_bbox_dummy:
@@ -164,9 +164,6 @@ def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta
     else:
         # match coeff needs to be length of 4
         assert (len(match_coeff) == 4)
-        if use_FEELVOS:
-            match_coeff[1] = match_coeff[1] + match_coeff[2]
-            match_coeff[2] = 0
         return match_ll + match_coeff[0] * bbox_scores \
                + match_coeff[1] * mask_ious \
                + match_coeff[2] * bbox_ious \

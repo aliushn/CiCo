@@ -116,10 +116,10 @@ class Detect(object):
         else:
             if cfg.use_DIoU:
                 if cfg.nms_as_miou:
-                    # (0.5 + 0.5 * 0.85) * nms_thresh
-                    nms_thresh = 0.925 * self.nms_thresh
+                    # (0.5 + 0.5 * 0.8) * nms_thresh
+                    nms_thresh = 0.9 * self.nms_thresh
                 else:
-                    nms_thresh = 0.85 * self.nms_thresh
+                    nms_thresh = 0.8 * self.nms_thresh
             else:
                 nms_thresh = self.nms_thresh
 
@@ -133,7 +133,7 @@ class Detect(object):
         return out_after_NMS
 
     def cc_fast_nms(self, net, boxes, masks_coeff, proto_data, scores, sem_data, centerness_scores, prior_levels,
-                    iou_threshold: float = 0.5, top_k: int = 100):
+                    iou_threshold: float = 0.5, top_k: int = 200):
         if cfg.train_class:
             # Collapse all the classes into 1
             scores, classes = scores.max(dim=0)
@@ -144,17 +144,19 @@ class Detect(object):
                 _, pred_masks = crop(det_masks_soft.permute(1, 2, 0).contiguous(), boxes)
                 det_masks_soft = pred_masks.permute(2, 0, 1).contiguous()
         else:
-            det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
+            if cfg.mask_proto_crop:
+                det_masks_soft = generate_mask(proto_data, masks_coeff, boxes, prior_levels)
+            else:
+                det_masks_soft = generate_mask(proto_data, masks_coeff, None, prior_levels)
 
         # if area_box / area_mask < 0.2 and score < 0.2, the box is likely to be wrong.
-        h, w = det_masks_soft.size()[1:]
-        boxes_c = center_size(boxes)
-        area_box = boxes_c[:, 2] * boxes_c[:, 3] * h * w
-        area_mask = det_masks_soft.gt(0.5).float().sum(dim=(1, 2))
-        area_rate = area_mask / area_box
+        # h, w = det_masks_soft.size()[1:]
+        # boxes_c = center_size(boxes)
+        # area_box = boxes_c[:, 2] * boxes_c[:, 3] * h * w
+        # area_mask = det_masks_soft.gt(0.5).float().sum(dim=(1, 2))
+        # area_rate = area_mask / area_box
 
-        _, idx = (scores * area_rate).sort(0, descending=True)
-        # keep_idx = (area_rate > 0.2)[idx]
+        _, idx = scores.sort(0, descending=True)
         idx = idx[:top_k]
 
         if len(idx) == 0:
@@ -237,7 +239,7 @@ class Detect(object):
                 _, pred_masks = crop(det_masks_soft.permute(1, 2, 0).contiguous(), boxes)
                 det_masks_soft = pred_masks.permute(2, 0, 1).contiguous()
         else:
-            det_masks_soft = generate_mask(proto_data, masks_coeff, boxes)
+            det_masks_soft = generate_mask(proto_data, masks_coeff, boxes, prior_levels)
 
         det_masks = det_masks_soft.gt(0.5).float()
         mask_h, mask_w = det_masks.size()[1:]

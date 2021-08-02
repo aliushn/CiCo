@@ -42,7 +42,7 @@ def parse_args(argv=None):
     parser.add_argument('--trained_model',
                         default='weights/ssd300_mAP_77.43_v2.pth', type=str,
                         help='Trained state_dict file path to open. If "interrupt", this will open the interrupt file.')
-    parser.add_argument('--top_k', default=5, type=int,
+    parser.add_argument('--top_k', default=100, type=int,
                         help='Further restrict the number of predictions to parse')
     parser.add_argument('--cuda', default=True, type=str2bool,
                         help='Use cuda to evaulate model')
@@ -135,7 +135,7 @@ coco_cats_inv = {}
 color_cache = defaultdict(lambda: {})
 
 
-def prep_display(dets_out, img, ori_h, ori_w, img_h, img_w, undo_transform=True,
+def prep_display(dets_out, img, ori_h, ori_w, img_h, img_w, img_ids, undo_transform=True, output_file=None,
                  class_color=False, mask_alpha=0.45, fps_str=''):
     """
     Note: If undo_transform=False then im_h and im_w are allowed to be None.
@@ -149,7 +149,7 @@ def prep_display(dets_out, img, ori_h, ori_w, img_h, img_w, undo_transform=True,
 
     with timer.env('Postprocess'):
 
-        classes, scores, boxes, masks = postprocess(dets_out, ori_h, ori_w, img_h, img_w,
+        classes, scores, boxes, masks = postprocess(dets_out, ori_h, ori_w, img_h, img_w, img_ids,
                                                     visualize_lincomb=args.display_lincomb,
                                                     score_threshold=args.score_threshold)
 
@@ -246,9 +246,9 @@ def prep_display(dets_out, img, ori_h, ori_w, img_h, img_w, undo_transform=True,
     return img_numpy
 
 
-def prep_benchmark(dets_out, ori_h, ori_w, img_h, img_w):
+def prep_benchmark(dets_out, ori_h, ori_w, img_h, img_w, img_id):
     with timer.env('Postprocess'):
-        t = postprocess(dets_out, ori_h, ori_w, img_h, img_w, score_threshold=args.score_threshold)
+        t = postprocess(dets_out, ori_h, ori_w, img_h, img_w, img_id, score_threshold=args.score_threshold)
 
     with timer.env('Copy'):
         classes, scores, boxes, masks = [x[:args.top_k] for x in t]
@@ -376,7 +376,7 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, ori_h, ori_w, img_h, img_w, n
                 crowd_classes, gt_classes = split(gt_classes)
 
     with timer.env('Postprocess'):
-        classes, scores, boxes, masks = postprocess(dets, ori_h, ori_w, img_h, img_w,
+        classes, scores, boxes, masks = postprocess(dets, ori_h, ori_w, img_h, img_w, image_id,
                                                     score_threshold=args.score_threshold)
 
         if classes.size(0) == 0:
@@ -915,6 +915,7 @@ def evaluate(net: STMask, dataset, train_mode=False, epoch=None, iteration=None)
         # Main eval loop
         for it, image_idx in enumerate(dataset_indices):
             timer.reset()
+            img_ids = dataset.ids[image_idx]
 
             with timer.env('Load Data'):
                 img, gt, gt_masks, ori_h, ori_w, num_crowd = dataset.pull_item(image_idx)
@@ -930,7 +931,7 @@ def evaluate(net: STMask, dataset, train_mode=False, epoch=None, iteration=None)
                 # Test flag, do not upvote
                 if cfg.mask_proto_debug:
                     with open('scripts/info.txt', 'w') as f:
-                        f.write(str(dataset.ids[image_idx]))
+                        f.write(str(img_ids))
                     np.save('scripts/gt.npy', gt_masks)
 
                 batch = Variable(img.unsqueeze(0))
@@ -938,7 +939,7 @@ def evaluate(net: STMask, dataset, train_mode=False, epoch=None, iteration=None)
                     batch = batch.cuda()
 
             with timer.env('Network Extra'):
-                preds, _, _ = net(batch)
+                preds, _, _ = net(batch, img_ids)
                 for b in range(len(preds)):
                     if preds[b]['mask'].nelement() > 0:
                         preds[b]['mask'] = F.interpolate(preds[b]['mask'].unsqueeze(0), (pad_h, pad_w),
@@ -947,12 +948,13 @@ def evaluate(net: STMask, dataset, train_mode=False, epoch=None, iteration=None)
             # Perform the meat of the operation here depending on our mode.
             if args.display:
                 cfg.preserve_aspect_ratio = True
-                img_numpy = prep_display(preds, img, ori_h, ori_w, img_h, img_w)
+                img_numpy = prep_display(preds, img, ori_h, ori_w, img_h, img_w, img_ids,
+                                         output_file=args.mask_det_file[:-12])
             elif args.benchmark:
-                prep_benchmark(preds, ori_h, ori_w, img_h, img_w)
+                prep_benchmark(preds, ori_h, ori_w, img_h, img_w, img_ids)
             else:
                 prep_metrics(ap_data, preds, img, gt, gt_masks, ori_h, ori_w, img_h, img_w,
-                             num_crowd, dataset.ids[image_idx], detections)
+                             num_crowd, img_ids, detections)
 
             # First couple of images take longer because we're constructing the graph.
             # Since that's technically initialization, don't include those in the FPS calculations.
@@ -967,9 +969,9 @@ def evaluate(net: STMask, dataset, train_mode=False, epoch=None, iteration=None)
                     os.makedirs(root_dir)
 
                 plt.imshow(img_numpy)
-                plt.title(str(dataset.ids[image_idx]))
+                plt.title(str(img_ids))
                 plt.axis('off')
-                plt.savefig(''.join([root_dir, '/', str(dataset.ids[image_idx]), '.png']))
+                plt.savefig(''.join([root_dir, '/', str(img_ids), '_768.png']))
                 plt.clf()
 
             elif not args.no_bar:

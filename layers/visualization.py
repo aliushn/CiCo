@@ -64,7 +64,7 @@ def display_pos_smaples(pos, img_gpu, decoded_priors, bbox):
 
 
 def display_box_shift(box, box_shift, img_meta, img_gpu=None, conf=None):
-    save_dir = 'weights/OVIS/weights_r101_t2s_forward_B/box_shift/'
+    save_dir = 'weights/OVIS/weights_r152_m32_yolact_dice_DIoU_012_768_960_randomclip_c5/box_shift/'
     save_dir = os.path.join(save_dir, str(img_meta['video_id']))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
@@ -192,7 +192,7 @@ def display_correlation_map(x_corr, img_meta=None):
     else:
         video_id, frame_id = 0, 0
 
-    save_dir = 'weights/OVIS/weights_r101_t2s_forward_B/box_shift/'
+    save_dir = 'weights/OVIS/weights_r152_m32_yolact_dice_DIoU_012_768_960_randomclip_c5/box_shift/'
     save_dir = os.path.join(save_dir, str(video_id))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)

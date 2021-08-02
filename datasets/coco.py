@@ -289,26 +289,41 @@ def detection_collate_coco(batch):
     image_sizes_ori_h = [im.shape[-2] for im in imgs]
     image_sizes_ori_w = [im.shape[-1] for im in imgs]
     h, w = imgs_batch.size()[-2:]
-    bboxes_list = []
     for i in range(len(masks)):
         # padding for bboxes (bboxes with precent coords)
         targets[i][:, 0:4:2] *= (image_sizes_ori_w[i] / float(w))
         targets[i][:, 1:4:2] *= (image_sizes_ori_h[i] / float(h))
-        bboxes_list.append(targets[i][:, :4])
 
         padding_size = [0, w - image_sizes_ori_w[i], 0, h - image_sizes_ori_h[i]]
         masks[i] = F.pad(masks[i], padding_size, value=0)
 
-    return imgs_batch, masks, targets, num_crowds
+    return imgs_batch, targets, masks, num_crowds
 
 
 def prepare_data_coco(data_batch, devices):
-    with torch.no_grad():
-        # padding images with different scales
-        imgs = data_batch[0].cuda(devices)
-        masks_list = [mask.cuda(devices) for mask in data_batch[1]]
-        bboxes_list = [target[:, :4].cuda(devices) for target in data_batch[2]]
-        labels_list = [target[:, -1].cuda(devices) for target in data_batch[2]]
-        num_crowds = data_batch[3]
+    images, targets, masks, num_crowds = data_batch
+    if images.size(0) % len(devices) != 0:
+        idx = [i % images.size(0) for i in range(len(devices))]
+        remainder = images.size(0) % len(devices)
+        images = torch.cat([images, images[idx[:remainder]]])
+        targets += [targets[i] for i in idx[:remainder]]
+        masks += [masks[i] for i in idx[:remainder]]
+        num_crowds += [num_crowds[i] for i in idx[:remainder]]
+    n = images.size(0) // len(devices)
 
-        return imgs, masks_list, bboxes_list, labels_list,  num_crowds
+    with torch.no_grad():
+        images_list, masks_list, bboxes_list, labels_list, obj_ids_list, num_crowds_list = [], [], [], [], [], []
+        for idx, device in enumerate(devices):
+            images_list.append(gradinator(images[idx*n:(idx+1)*n].to(device)))
+            masks_list.append([gradinator(masks[jdx].to(device)) for jdx in range(idx*n, (idx+1)*n)])
+            bboxes_list.append([gradinator(targets[jdx][:, :4].to(device)) for jdx in range(idx*n, (idx+1)*n)])
+            labels_list.append([gradinator(targets[jdx][:, -1].to(device)) for jdx in range(idx*n, (idx+1)*n)])
+            obj_ids_list.append([None] * n)
+            num_crowds_list.append(num_crowds[idx*n:(idx+1)*n])
+
+        return images_list, bboxes_list, labels_list, masks_list, obj_ids_list, num_crowds_list
+
+
+def gradinator(x):
+    x.requires_grad = False
+    return x

@@ -81,7 +81,7 @@ def plot_protos(protos, pred_masks, img_meta, num):
                          str(num), '.png']))
 
 
-def generate_mask(proto_data, mask_coeff, bbox=None):
+def generate_mask(proto_data, mask_coeff, bbox=None, fpn_levels=None):
     '''
     :param proto_data: [h, w, 32] or [n, h, w, 32]
     :param mask_coeff: [n, 32]
@@ -89,10 +89,12 @@ def generate_mask(proto_data, mask_coeff, bbox=None):
     :return:
     '''
 
-    mask_coeff = cfg.mask_proto_coeff_activation(mask_coeff)
+    dim_proto = proto_data.dim()
 
     # get masks
     if cfg.use_sipmask:
+
+        mask_coeff = cfg.mask_proto_coeff_activation(mask_coeff)
         pred_masks00 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data,  mask_coeff[:, :cfg.mask_dim]))
         pred_masks01 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim:cfg.mask_dim*2]))
         pred_masks10 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim*2:cfg.mask_dim*3]))
@@ -100,11 +102,27 @@ def generate_mask(proto_data, mask_coeff, bbox=None):
         assert bbox is not None
         pred_masks = crop_sipmask(pred_masks00, pred_masks01, pred_masks10, pred_masks11, bbox)
 
+    elif cfg.mask_proto_with_levels:
+        mask_coeff = cfg.mask_proto_coeff_activation(mask_coeff)
+
+        assert fpn_levels is not None
+        n = mask_coeff.size(0)
+        mask_coeff_expand = torch.zeros([n, 6, cfg.mask_dim], device=mask_coeff.device)
+        mask_coeff_expand[:, fpn_levels.tolist()] = mask_coeff[:, :cfg.mask_dim]
+        mask_coeff_expand[:, -1] = mask_coeff[:, -cfg.mask_dim:]
+        pred_masks = generate_single_mask(proto_data, mask_coeff_expand.reshape(n, -1))
+        pred_masks = cfg.mask_proto_mask_activation(pred_masks)
+        if bbox is not None:
+            _, pred_masks = crop(pred_masks, bbox)
+
     else:
 
         if not cfg.mask_proto_coeff_occlusion:
+            mask_coeff = cfg.mask_proto_coeff_activation(mask_coeff)
             pred_masks = generate_single_mask(proto_data, mask_coeff)
+
         else:
+            mask_coeff = cfg.mask_proto_coeff_activation(mask_coeff)
             # background
             pred_masks_b = generate_single_mask(proto_data, mask_coeff[:, :cfg.mask_dim])
             # target objects
@@ -113,11 +131,10 @@ def generate_mask(proto_data, mask_coeff, bbox=None):
             pred_masks_o = generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim*2:])
             pred_masks = torch.stack([pred_masks_b, pred_masks_t, pred_masks_o], dim=-2)    # [h, w, 3, n]
         pred_masks = cfg.mask_proto_mask_activation(pred_masks)
-
         if bbox is not None:
             _, pred_masks = crop(pred_masks, bbox)                                          # [h, w, n] or [h, w, 3, n]
 
-    if not cfg.mask_proto_coeff_occlusion:
+    if dim_proto == 3:
         pred_masks = pred_masks.permute(2, 0, 1).contiguous()                               # [n, h, w]
     else:
         pred_masks = pred_masks.permute(3, 0, 1, 2).contiguous()                            # [n, h, w, 3]
@@ -126,7 +143,7 @@ def generate_mask(proto_data, mask_coeff, bbox=None):
 
 
 def generate_single_mask(proto_data, mask_coeff):
-    dim_proto = len(proto_data.size())
+    dim_proto = proto_data.dim()
     if dim_proto == 3:
         pred_masks = proto_data @ mask_coeff.t()
     elif dim_proto == 4:

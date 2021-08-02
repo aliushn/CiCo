@@ -56,6 +56,7 @@ class Detect_TF(object):
         proto_data = candidate['proto'].squeeze(0)
         sem_data = candidate['sem_seg'].squeeze(0) if cfg.use_semantic_segmentation_loss else None  # [h, w, num_class]
         centerness_scores = candidate['centerness'] if cfg.train_centerness else None
+        track_data = candidate['track'] if cfg.train_track and not cfg.track_by_Gaussian else None
 
         if boxes.size(0) == 0:
             out_aft_nms = {'box': boxes, 'mask_coeff': mask_coeff, 'class': torch.Tensor(), 'score': torch.Tensor(),
@@ -64,38 +65,39 @@ class Detect_TF(object):
                 out_aft_nms['centerness'] = torch.Tensor()
 
         else:
-            if cfg.use_DIoU:
-                if cfg.nms_as_miou:
-                    # (0.5 + 0.5 * 0.8) * nms_thresh
-                    nms_thresh = 0.9 * self.nms_thresh
-                else:
-                    nms_thresh = 0.8 * self.nms_thresh
-            else:
-                nms_thresh = self.nms_thresh
+            # if cfg.use_DIoU:
+            #     if cfg.nms_as_miou:
+            #         (0.5 + 0.5 * 0.9) * nms_thresh
+                    # nms_thresh = 0.95 * self.nms_thresh
+                # else:
+                #     nms_thresh = 0.9 * self.nms_thresh
+            # else:
+            nms_thresh = self.nms_thresh
+
+            if centerness_scores is not None:
+                scores = scores * centerness_scores.view(-1)
 
             if self.use_cross_class_nms:
-                out_aft_nms = self.cc_fast_nms(net, boxes, mask_coeff, proto_data, scores,
+                out_aft_nms = self.cc_fast_nms(net, boxes, mask_coeff, proto_data, scores, track_data,
                                                sem_data, centerness_scores, nms_thresh, self.top_k)
             else:
-                out_aft_nms = self.fast_nms(net, boxes, mask_coeff, proto_data, scores, sem_data, centerness_scores,
-                                            nms_thresh, self.top_k)
+                out_aft_nms = self.fast_nms(net, boxes, mask_coeff, proto_data, scores, track_data,
+                                            sem_data, centerness_scores, nms_thresh, self.top_k)
 
         for k, v in candidate.items():
-            if k in {'fpn_feat', 'proto', 'track', 'sem_seg'}:
+            if k in {'fpn_feat', 'proto', 'sem_seg'}:
                 out_aft_nms[k] = v
+
+        if cfg.train_track and cfg.track_by_Gaussian:
+            out_aft_nms['track'] = candidate['track']
 
         return out_aft_nms
 
-    def cc_fast_nms(self, net, boxes, masks_coeff, proto_data, scores, sem_data, centerness_scores,
-                    iou_threshold: float = 0.5, top_k: int = 200):
+    def cc_fast_nms(self, net, boxes, masks_coeff, proto_data, scores, track_data, sem_data, centerness_scores,
+                    iou_threshold: float = 0.5, top_k: int = 100):
         # Collapse all the classes into 1
         if cfg.train_class:
             scores, classes = scores.max(dim=0)   # [n_dets]
-
-        if centerness_scores is not None:
-            scores_used = scores * centerness_scores.view(-1)
-        else:
-            scores_used = scores
 
         if cfg.use_dynamic_mask:
             det_masks_soft = net.DynamicMaskHead(proto_data.permute(2, 0, 1).unsqueeze(0), masks_coeff, boxes)
@@ -120,9 +122,9 @@ class Detect_TF(object):
         area_mask = det_masks_soft.gt(0.5).float().sum(dim=(1, 2))
         area_rate = area_mask / area_box
 
-        _, idx = (area_rate * scores_used).sort(0, descending=True)
-        keep_idx = (area_rate > 0.2)[idx]
-        idx = idx[keep_idx][:top_k]
+        _, idx = scores.sort(0, descending=True)
+        # keep_idx = (area_rate > 0.2)[idx]
+        idx = idx[:top_k]
 
         if len(idx) == 0:
             out_after_NMS = {'box': torch.Tensor(), 'mask_coeff': torch.Tensor(), 'class': torch.Tensor(),
@@ -131,6 +133,8 @@ class Detect_TF(object):
                 out_after_NMS['centerness'] = torch.Tensor()
             if cfg.mask_proto_coeff_occlusion:
                 out_after_NMS['mask_non_target'] = torch.Tensor()
+            if track_data is not None:
+                out_after_NMS['track'] = torch.Tensor()
 
         else:
 
@@ -181,6 +185,8 @@ class Detect_TF(object):
 
             out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': classes, 'score': scores,
                              'mask': det_masks_soft}
+            if track_data is not None:
+                out_after_NMS['track'] = track_data[idx_out]
 
             if cfg.train_centerness:
                 out_after_NMS['centerness'] = centerness_scores[idx_out]
@@ -189,7 +195,7 @@ class Detect_TF(object):
 
         return out_after_NMS
 
-    def fast_nms(self, boxes, masks_coeff, proto_data, scores, sem_data, centerness_scores,
+    def fast_nms(self, boxes, masks_coeff, proto_data, scores, track_data, sem_data, centerness_scores,
                  iou_threshold: float = 0.5, top_k: int = 200,
                  second_threshold: bool = True):
 
@@ -220,14 +226,14 @@ class Detect_TF(object):
 
         else:
             num_classes, num_dets = idx.size()
+            # TODO: double check repeated bboxes, mask_coeff, track_data...
+            boxes = boxes[idx.view(-1), :]
+            masks_coeff = masks_coeff[idx.view(-1), :]
             if cfg.use_DIoU:
                 iou = compute_DIoU(boxes, boxes)
             else:
                 iou = jaccard(boxes, boxes)  # [num_classes, num_dets, num_dets]
-
             if cfg.nms_as_miou:
-                boxes = boxes[idx.view(-1), :]
-                masks_coeff = masks_coeff[idx.view(-1), :]
                 det_masks = generate_mask(proto_data, masks_coeff, boxes).view(num_classes, num_dets, proto_data.size(0), proto_data.size(1))
                 det_masks = det_masks.gt(0.5).float()
                 m_iou = mask_iou(det_masks, det_masks)  # [n_class, num_dets, num_dets]
@@ -256,6 +262,8 @@ class Detect_TF(object):
             scores = scores[keep]
 
             out_after_NMS = {'box': boxes, 'mask_coeff': masks_coeff, 'class': classes, 'score': scores}
+            if track_data is not None:
+                out_after_NMS['track'] = track_data[idx.view(-1), :].view(num_classes, num_dets, -1)[keep]
             if centerness_scores is not None:
                 out_after_NMS['centerness'] = centerness_scores[idx.view(-1), :].view(num_classes, num_dets, -1)[keep]
 

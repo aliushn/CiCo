@@ -151,6 +151,7 @@ def match(bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t
     # if a bbox is matched with two or more groundtruth boxes, this bbox will be assigned as -1
     thresh = 0.5 * (pos_thresh + neg_thresh)
     multiple_bbox = (overlaps > pos_thresh).sum(dim=0) > 1
+    # print((best_truth_overlap > pos_thresh).sum(), 'multi:', multiple_bbox.sum(), 'gt:', bbox.size(0))
     best_truth_overlap[multiple_bbox] = thresh
     # temp = (best_truth_overlap > pos_thresh).reshape(-1)
     # print(temp.sum(), bbox.size(0))
@@ -323,6 +324,8 @@ def sanitize_coordinates(_x1, _x2, img_size:int, padding:int=0, cast:bool=True):
     If cast is false, the result won't be cast to longs.
     Warning: this does things in-place behind the scenes so copy if necessary.
     """
+    _x1 = torch.clamp(_x1, min=0, max=1)
+    _x2 = torch.clamp(_x2, min=0, max=1)
     _x1 = _x1 * img_size
     _x2 = _x2 * img_size
     if cast:

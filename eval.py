@@ -151,12 +151,11 @@ def prep_display(dets_out, img, img_ids=None, img_meta=None, undo_transform=True
 
     with timer.env('Postprocess'):
         cfg.mask_proto_debug = args.mask_proto_debug
-        # cfg.preserve_aspect_ratio = False
         dets_out = postprocess_ytbvis(dets_out, img_meta, display_mask=True,
                                       visualize_lincomb=args.display_lincomb,
-                                      # score_threshold=cfg.eval_conf_thresh,
+                                      score_threshold=cfg.eval_conf_thresh,
                                       img_ids=img_ids,
-                                      mask_det_file=args.mask_det_file)
+                                      output_file=args.mask_det_file[:-12])
         torch.cuda.synchronize()
 
     if 'segm' in dets_out:
@@ -277,8 +276,8 @@ def prep_display(dets_out, img, img_ids=None, img_meta=None, undo_transform=True
                     text_str = '%s' % _class
 
                 font_face = cv2.FONT_HERSHEY_DUPLEX
-                font_scale = 0.5
-                font_thickness = 1
+                font_scale = 2
+                font_thickness = 2
 
                 text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
 
@@ -314,7 +313,7 @@ def prep_display_single(dets_out, img, img_ids=None, img_meta=None, undo_transfo
                                       crop_masks=args.crop,
                                       score_threshold=cfg.eval_conf_thresh,
                                       img_ids=img_ids,
-                                      mask_det_file=args.mask_det_file)
+                                      output_file=args.mask_det_file[:-12])
         torch.cuda.synchronize()
         scores = dets_out['score'][:args.top_k].detach().cpu().numpy()
         boxes = dets_out['box'][:args.top_k].detach().cpu().numpy()
@@ -486,7 +485,7 @@ def validation(net: STMask, dataset, device=0, output_metrics_file=None):
                     batch_size = images.size(0)
 
                 for pred, img_meta in zip(preds, images_meta):
-                    preds_cur = postprocess_ytbvis(pred, img_meta)
+                    preds_cur = postprocess_ytbvis(pred, img_meta, output_file=args.mask_det_file)
                     segm_results = bbox2result_with_id(preds_cur, img_meta, cfg.classes)
                     results.append(segm_results)
 
@@ -574,7 +573,8 @@ def evaluate(net: STMask, dataset, output_metrics_file=None):
                                 plt.clf()
 
                     else:
-                        preds_cur = postprocess_ytbvis(pred, out_img_metas[batch_id])
+                        preds_cur = postprocess_ytbvis(pred, out_img_metas[batch_id],
+                                                       output_file=args.mask_det_file[:-12])
                         segm_results = bbox2result_with_id(preds_cur, out_img_metas[batch_id], cfg.classes)
                         results.append(segm_results)
 
@@ -708,19 +708,19 @@ if __name__ == '__main__':
         if cfg.use_train_sub:
             print('load train_sub dataset')
             cfg.train_dataset.has_gt = False
-            val_dataset = get_dataset(cfg.train_dataset)
+            val_dataset = get_dataset(cfg.train_dataset, cfg.backbone.transform)
         elif cfg.use_valid_sub:
             print('load valid_sub dataset')
             cfg.valid_sub_dataset.has_gt = False
-            val_dataset = get_dataset(cfg.valid_sub_dataset)
+            val_dataset = get_dataset(cfg.valid_sub_dataset, cfg.backbone.transform)
 
         elif cfg.use_test:
             print('load test dataset')
             cfg.test_dataset.has_gt = False
-            val_dataset = get_dataset(cfg.test_dataset)
+            val_dataset = get_dataset(cfg.test_dataset, cfg.backbone.transform)
         else:
             print('load valid dataset')
-            val_dataset = get_dataset(cfg.valid_dataset)
+            val_dataset = get_dataset(cfg.valid_dataset, cfg.backbone.transform)
     else:
         val_dataset = None
 

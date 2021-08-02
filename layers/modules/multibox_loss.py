@@ -149,8 +149,11 @@ class MultiBoxLoss(nn.Module):
                 losses.update(losses_shift)
 
         if cfg.train_track:
-            losses_clip = self.track_loss(track_data, gt_masks, gt_ids, proto_data, mask_coeff,
-                                          gt_bboxes, loc_data, priors, conf_t, ids_t, idx_t)
+            if cfg.track_by_Gaussian:
+                losses_clip = self.track_gauss_loss(track_data, gt_masks, gt_ids, proto_data, mask_coeff,
+                                                    gt_bboxes, loc_data, priors, conf_t, ids_t, idx_t)
+            else:
+                losses_clip = self.track_loss(track_data, conf_t, ids_t)
             losses.update(losses_clip)
 
         for k, v in losses.items():
@@ -237,7 +240,7 @@ class MultiBoxLoss(nn.Module):
             # Mask Loss
             if cfg.train_masks:
                 loss_m = self.lincomb_mask_loss(pos, idx_t, loc_data, mask_data, priors, prior_levels, proto_data,
-                                                gt_masks, gt_bboxes)
+                                                gt_masks, gt_bboxes, gt_ids)
                 losses.update(loss_m)
 
             # Confidence loss
@@ -520,8 +523,29 @@ class MultiBoxLoss(nn.Module):
 
         return pos_masks, pos_bboxes, pos_ids_t
 
-    def track_loss(self, track_data, gt_masks, gt_ids, proto_data, mask_coeff, gt_bboxes,
-                   loc_data, priors, conf_t, ids_t, idx_t):
+    def track_loss(self, track_data, conf_t, ids_t=None):
+        pos = conf_t > 0  # [2, n]
+
+        pos_track_data = track_data[pos]
+        cos_sim = pos_track_data @ pos_track_data.t()  # [n_pos, n_ref_pos]
+        # Rescale to be between 0 and 1
+        cos_sim = (cos_sim + 1) / 2
+        cos_sim.triu_(diagonal=1)
+
+        pos_ids_t = ids_t[pos]
+        inst_eq = (pos_ids_t.view(-1, 1) == pos_ids_t.view(1, -1)).float()
+
+        # If they are the same instance, use cosine distance, else use consine similarity
+        # loss += ((1 - cos_sim) * inst_eq + cos_sim * (1 - inst_eq)).sum() / (cos_sim.size(0) * cos_sim.size(1))
+        # pos: -log(cos_sim), neg: -log(1-cos_sim)
+        cos_sim_diff = torch.clamp(1 - cos_sim, min=1e-10)
+        loss_m = -1 * (inst_eq * torch.clamp(cos_sim, min=1e-10).log() + (1 - inst_eq) * cos_sim_diff.log())
+        loss_m.triu_(diagonal=1)
+
+        return {'T': loss_m.sum() * cfg.track_alpha / len(pos_ids_t)**2 }
+
+    def track_gauss_loss(self, track_data, gt_masks, gt_ids, proto_data, mask_coeff, gt_bboxes,
+                         loc_data, priors, conf_t, ids_t, idx_t):
         bs, track_h, track_w, t_dim = track_data.size()
         loss = torch.tensor(0., device=track_data.device)
 
@@ -564,42 +588,39 @@ class MultiBoxLoss(nn.Module):
 
         return losses
 
-    def coeff_sparse_loss(self, coeffs):
-        """
-        coeffs:  should be size [num_pos, num_coeffs]
-        """
-        torch.abs(coeffs).sum(1)
-
-    def coeff_diversity_loss(self, weights, coeffs, instance_t):
+    def coeff_diversity_loss(self, coeffs, instance_t, box_t):
         """
         coeffs     should be size [num_pos, num_coeffs]
         instance_t should be size [num_pos] and be values from 0 to num_instances-1
+        box_t      should be size [num_pos, 4]
         """
 
-        instance_t = instance_t.view(-1)  # juuuust to make sure
-
-        coeffs_norm = F.normalize(coeffs, dim=1)
+        coeffs_norm = F.normalize(cfg.mask_proto_coeff_activation(coeffs), dim=1)
         cos_sim = torch.mm(coeffs_norm, coeffs_norm.t())
-
-        inst_eq = (instance_t[:, None].expand_as(cos_sim) == instance_t[None, :].expand_as(cos_sim)).float()
-
         # Rescale to be between 0 and 1
         cos_sim = (cos_sim + 1) / 2
 
+        instance_t = instance_t.view(-1)  # juuuust to make sure
+        inst_eq = (instance_t[:, None].expand_as(cos_sim) == instance_t[None, :].expand_as(cos_sim))
+
+        box_iou = jaccard(box_t, box_t)
+        box_iou[inst_eq] = 0
+        spatial_neighbours = box_iou > 0.1
+
         # If they're the same instance, use cosine distance, else use cosine similarity
         cos_sim_diff = torch.clamp(1 - cos_sim, min=1e-10)
-        loss = -1 * (torch.clamp(cos_sim, min=1e-10).log() * inst_eq + cos_sim_diff.log() * (1 - inst_eq))
-        weights = weights.view(-1, 1) * weights.view(1, -1)
+        loss = -1 * (torch.clamp(cos_sim, min=1e-10).log() * inst_eq.float() + cos_sim_diff.log() * spatial_neighbours.float())
 
         # Only divide by num_pos once because we're summing over a num_pos x num_pos tensor
         # and all the losses will be divided by num_pos at the end, so just one extra time.
-        return cfg.mask_proto_coeff_diversity_alpha * (weights * loss).sum()
+        return cfg.mask_proto_coeff_diversity_alpha * loss.sum() / max(inst_eq.sum() + spatial_neighbours.sum(), 1)
 
     def lincomb_mask_loss(self, pos, idx_t, loc_data, mask_coeff, priors, prior_levels, proto_data,
-                          masks_gt, bboxes_gt, interpolation_mode='bilinear'):
+                          masks_gt, bboxes_gt, obj_ids_gt, interpolation_mode='bilinear'):
 
         bs = mask_coeff.size(0)
         loss_bce, loss_m_occluded = torch.tensor(0., device=pos.device), torch.tensor(0., device=pos.device)
+        loss_coeff_div = torch.tensor(0., device=pos.device)
         if cfg.mask_dice_coefficient:
             loss_dice = torch.tensor(0., device=pos.device)
         if cfg.use_dynamic_mask:
@@ -630,6 +651,13 @@ class MultiBoxLoss(nn.Module):
                 else:
                     mask_t = masks_gt_cur[pos_idx_t]            # [n_pos, mask_h, mask_w]
 
+                if cfg.mask_proto_coeff_diversity_loss:
+                    if obj_ids_gt[idx] is None:
+                        instance_t = pos_idx_t
+                    else:
+                        instance_t = obj_ids_gt[idx][pos_idx_t]
+                    loss_coeff_div += self.coeff_diversity_loss(proto_coeff, instance_t, bboxes_gt[idx][pos_idx_t])
+
                 if cfg.mask_proto_crop or cfg.use_dynamic_mask:
                     # Note: this is in point-form
                     if cfg.mask_proto_crop_with_pred_box:
@@ -639,15 +667,15 @@ class MultiBoxLoss(nn.Module):
                         pos_gt_box_t = bboxes_gt[idx][pos_idx_t]
 
                     pos_gt_box_t_c = center_size(pos_gt_box_t)
-                    pos_gt_box_t_c[:, 2:] *= 1.2
+                    pos_gt_box_t_c[:, 2:] *= 1.3
                     pos_gt_box_t = point_form(torch.clamp(pos_gt_box_t_c, min=1e-5, max=1))
                 else:
                     pos_gt_box_t = None
 
+                fpn_levels = prior_levels[idx, cur_pos]
                 if not cfg.use_dynamic_mask:
-                    pred_masks = generate_mask(proto_masks, proto_coeff, pos_gt_box_t)
+                    pred_masks = generate_mask(proto_masks, proto_coeff, pos_gt_box_t, fpn_levels)
                 else:
-                    fpn_levels = prior_levels[idx, cur_pos]
                     pred_masks = self.net.DynamicMaskHead(proto_masks.permute(2, 0, 1).contiguous().unsqueeze(0),
                                                           proto_coeff, pos_gt_box_t, fpn_levels)
                     if cfg.mask_proto_crop:
@@ -693,11 +721,11 @@ class MultiBoxLoss(nn.Module):
                     loss_dice += pre_loss_dice.mean()
                 else:
                     if cfg.mask_proto_crop:
-                        pos_gt_box_w = torch.clamp(pos_gt_box_t_c[:, 2], min=1e-4, max=1) * W_gt
-                        pos_gt_box_h = torch.clamp(pos_gt_box_t_c[:, 3], min=1e-4, max=1) * H_gt
+                        pos_gt_box_w = torch.clamp(pos_gt_box_t_c[:, 2], min=1e-4, max=1) * pred_masks.size(-1)
+                        pos_gt_box_h = torch.clamp(pos_gt_box_t_c[:, 3], min=1e-4, max=1) * pred_masks.size(-2)
                         pre_loss_bce = pre_loss_bce.sum(dim=(1, 2)) / pos_gt_box_w / pos_gt_box_h
                     else:
-                        pre_loss_bce = pre_loss_bce.sum(dim=(1, 2)) / H_gt / W_gt
+                        pre_loss_bce = pre_loss_bce.sum(dim=(1, 2)) / pred_masks.size(-1) / pred_masks.size(-2)
 
                     keep = (torch.isinf(pre_loss_bce) + torch.isnan(pre_loss_bce)) > 0
                     if keep.sum() > 0:
@@ -708,6 +736,8 @@ class MultiBoxLoss(nn.Module):
             losses = {'M_dice': loss_dice * cfg.mask_alpha / max(bs, 1)}
         else:
             losses = {'M_bce': loss_bce * cfg.mask_alpha / max(bs, 1)}
+        if cfg.mask_proto_coeff_diversity_loss:
+            losses['M_coeff'] = loss_coeff_div / max(bs, 1)
 
         return losses
 
@@ -729,7 +759,7 @@ class MultiBoxLoss(nn.Module):
         ret = intersection / union
         return ret
 
-    def semantic_segmentation_loss(self, segment_data, mask_t, class_t, interpolation_mode='bilinear'):
+    def semantic_segmentation_loss(self, segment_data, mask_t, class_t, interpolation_mode='bilinear', focal_loss=False):
         '''
         :param segment_data: [bs, h, w, num_class]
         :param mask_t: a list of groundtruth masks
@@ -753,14 +783,20 @@ class MultiBoxLoss(nn.Module):
                     obj_class = (class_t[idx][obj_idx]-1).long()
                     segment_t[obj_class][obj_mask_t == 1] = 1
 
-            # avoid out of memory so as to calculate semantic loss for a single image
-            pre_sem_loss = sigmoid_focal_loss_jit(
-                            segment_data[idx],
-                            segment_t,
-                            alpha=cfg.focal_loss_alpha,
-                            gamma=cfg.focal_loss_gamma,
-                            reduction="sum"
-                        )
-            sem_loss += pre_sem_loss / segment_t.sum()
+            if focal_loss:
+                # avoid out of memory so as to calculate semantic loss for a single image
+                pre_sem_loss = sigmoid_focal_loss_jit(
+                    segment_data[idx],
+                    segment_t,
+                    alpha=cfg.focal_loss_alpha,
+                    gamma=cfg.focal_loss_gamma,
+                    reduction="sum"
+                )
+                sem_loss += pre_sem_loss / torch.clamp(segment_t.sum(), min=1)
+
+            else:
+                pre_sem_loss = F.binary_cross_entropy_with_logits(segment_data[idx], segment_t, reduction='sum')
+                sem_loss += pre_sem_loss / mask_h / mask_w * 0.1
 
         return sem_loss / float(bs) * cfg.semantic_segmentation_alpha
+

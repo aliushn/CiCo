@@ -26,8 +26,10 @@ def CandidateShift(net, candidate, ref_candidate, img=None, img_meta=None, updat
 
         ref_candidate_shift = {}
         for k, v in candidate.items():
-            if k in {'proto', 'fpn_feat', 'track', 'sem_seg'}:
+            if k in {'proto', 'fpn_feat', 'sem_seg'}:
                 ref_candidate_shift[k] = v
+        if cfg.track_by_Gaussian:
+            ref_candidate_shift['track'] = candidate['track']
 
         sem_seg_next = candidate['sem_seg'].squeeze(0) if 'sem_seg' in candidate.keys() else None
 
@@ -43,11 +45,8 @@ def CandidateShift(net, candidate, ref_candidate, img=None, img_meta=None, updat
 
                 # extract features on the predicted bbox
                 box_ref = ref_candidate['box'].clone()
-                box_ref_c = center_size(box_ref)
-                box_ref_c[:, 2:] = box_ref_c[:, 2:] * 1.2
-                box_ref_crop = point_form(box_ref_c)
                 feat_h, feat_w = fpn_feat_ref.size()[2:]
-                bbox_feat_input = bbox_feat_extractor(concatenated_features, box_ref_crop, feat_h, feat_w, 7)
+                bbox_feat_input = bbox_feat_extractor(concatenated_features, box_ref, feat_h, feat_w, 7)
                 if cfg.maskshift_loss:
                     loc_ref_shift, mask_coeff_shift = net.TemporalNet(bbox_feat_input)
                     ref_candidate_shift['mask_coeff'] = ref_candidate['mask_coeff'].clone() + mask_coeff_shift
@@ -55,13 +54,10 @@ def CandidateShift(net, candidate, ref_candidate, img=None, img_meta=None, updat
                     loc_ref_shift = net.TemporalNet(bbox_feat_input)
                     ref_candidate_shift['mask_coeff'] = ref_candidate['mask_coeff'].clone()
                 box_ref_shift = decode(loc_ref_shift, center_size(box_ref))
-                # temp = loc_ref_shift[:, :2] * 0.1 * center_size(box_ref)[:, 2:]
-                # print(torch.stack([temp[:, 0]*640, temp[:, 1]*384], dim=-1))
-                # print('shift_BIoU', jaccard(box_ref_shift, box_ref_shift))
 
                 # display = True
                 if display:
-                    # display_correlation_map(bbox_feat_input[:, 256:377], img_meta=img_meta)
+                    display_correlation_map(bbox_feat_input[:, 256:377], img_meta=img_meta)
                     display_box_shift(box_ref, box_ref_shift, img_meta=img_meta, img_gpu=img)
 
                 ref_candidate_shift['box'] = box_ref_shift.clone()
@@ -161,26 +157,32 @@ def CandidateShift(net, candidate, ref_candidate, img=None, img_meta=None, updat
 
 def generate_candidate(predictions):
     batch_Size = predictions['loc'].size(0)
-    priors = predictions['priors'].view(-1, 4)  # [bs, num_anchors*h*w, 4]
-    del predictions['priors']
 
     candidate = []
     for i in range(batch_Size):
         candidate_cur = {}
         if cfg.train_class:
             conf_data = predictions['conf'][i].t().contiguous()
-            scores, _ = torch.max(conf_data[1:, :], dim=0)
+            scores, _ = torch.max(conf_data, dim=0)
         else:
             scores = predictions['stuff'][i].view(-1)
 
+        if 'centerness' in predictions.keys():
+            scores *= predictions['centerness'][i].view(-1)
+
         keep = (scores > cfg.eval_conf_thresh)
         for k, v in predictions.items():
-            if k in {'proto', 'track', 'fpn_feat', 'sem_seg'}:
+            if k in {'proto', 'fpn_feat', 'sem_seg'}:
                 candidate_cur[k] = v[i].unsqueeze(0)
+            elif k == 'track':
+                if cfg.track_by_Gaussian:
+                    candidate_cur[k] = v[i].unsqueeze(0)
+                else:
+                    candidate_cur[k] = v[i][keep]
             else:
                 candidate_cur[k] = v[i][keep]
 
-        candidate_cur['box'] = decode(candidate_cur['loc'], priors[keep])
+        candidate_cur['box'] = decode(candidate_cur['loc'], candidate_cur['priors'])
         candidate.append(candidate_cur)
 
     return candidate

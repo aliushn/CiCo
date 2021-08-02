@@ -93,8 +93,8 @@ class DynamicMaskHead(nn.Module):
         mask_head_params = torch.tanh(mask_head_params)
 
         if not self.disable_rel_coords:
-            # relative_coords = generate_rel_coord_gauss(det_bbox, H, W).unsqueeze(1).detach()
-            relative_coords = generate_rel_coord(det_bbox, fpn_levels.tolist(), self.sizes_of_interest, H, W).detach()
+            relative_coords = generate_rel_coord_gauss(det_bbox, H, W).unsqueeze(1).detach()
+            # relative_coords = generate_rel_coord(det_bbox, fpn_levels.tolist(), self.sizes_of_interest, H, W).detach()
             mask_head_inputs = torch.cat([relative_coords, mask_feats.repeat(n_inst, 1, 1, 1)], dim=1)
         else:
             mask_head_inputs = mask_feats.repeat(n_inst, 1, 1, 1)

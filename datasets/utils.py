@@ -112,8 +112,7 @@ def get_dataset(dataset, backbone_transform):
     dataset = YTVOSDataset(ann_file=dataset.ann_file,
                            img_prefix=dataset.img_prefix,
                            transform=BaseTransform_vis(
-                                    min_size=dataset.min_size,
-                                    max_size=dataset.max_size,
+                                    img_scales=dataset.img_scales,
                                     Flip=flip,
                                     MS_train=MS_train,
                                     preserve_aspect_ratio=dataset.preserve_aspect_ratio,
