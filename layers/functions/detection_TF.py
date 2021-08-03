@@ -1,5 +1,5 @@
 import torch
-from layers.utils import jaccard, mask_iou, crop, generate_mask, compute_DIoU, center_size
+from layers.utils import jaccard, mask_iou, crop, generate_mask, compute_DIoU, center_size, decode
 from utils import timer
 from datasets import cfg
 import torch.nn.functional as F
@@ -28,7 +28,7 @@ class Detect_TF(object):
         self.use_cross_class_nms = True
         self.use_fast_nms = True
 
-    def __call__(self, net, candidate):
+    def __call__(self, net, predictions):
         """
         Args:
             candidate: (tensor) Shape: Conf preds from conf layers
@@ -42,8 +42,33 @@ class Detect_TF(object):
 
         with timer.env('Detect'):
             result = []
-            for i in range(len(candidate)):
-                result.append(self.detect(net, candidate[i]))
+            batch_size = predictions['loc'].size(0)
+            for i in range(batch_size):
+                candidate_cur = {}
+                if cfg.train_class:
+                    conf_data = predictions['conf'][i].t().contiguous()
+                    scores, _ = torch.max(conf_data, dim=0)
+                else:
+                    scores = predictions['stuff'][i].view(-1)
+
+                # if 'centerness' in predictions.keys():
+                #     scores *= predictions['centerness'][i].view(-1)
+
+                keep = (scores > cfg.eval_conf_thresh)
+                for k, v in predictions.items():
+                    if k in {'proto', 'fpn_feat', 'sem_seg'}:
+                        candidate_cur[k] = v[i].unsqueeze(0)
+                    elif k == 'track':
+                        if cfg.track_by_Gaussian:
+                            candidate_cur[k] = v[i].unsqueeze(0)
+                        else:
+                            candidate_cur[k] = v[i][keep]
+                    else:
+                        candidate_cur[k] = v[i][keep]
+
+                candidate_cur['box'] = decode(candidate_cur['loc'], candidate_cur['priors'])
+
+                result.append(self.detect(net, candidate_cur))
 
         return result
 
@@ -65,24 +90,16 @@ class Detect_TF(object):
                 out_aft_nms['centerness'] = torch.Tensor()
 
         else:
-            # if cfg.use_DIoU:
-            #     if cfg.nms_as_miou:
-            #         (0.5 + 0.5 * 0.9) * nms_thresh
-                    # nms_thresh = 0.95 * self.nms_thresh
-                # else:
-                #     nms_thresh = 0.9 * self.nms_thresh
-            # else:
-            nms_thresh = self.nms_thresh
 
             if centerness_scores is not None:
                 scores = scores * centerness_scores.view(-1)
 
             if self.use_cross_class_nms:
                 out_aft_nms = self.cc_fast_nms(net, boxes, mask_coeff, proto_data, scores, track_data,
-                                               sem_data, centerness_scores, nms_thresh, self.top_k)
+                                               sem_data, centerness_scores, self.nms_thresh, self.top_k)
             else:
                 out_aft_nms = self.fast_nms(net, boxes, mask_coeff, proto_data, scores, track_data,
-                                            sem_data, centerness_scores, nms_thresh, self.top_k)
+                                            sem_data, centerness_scores, self.nms_thresh, self.top_k)
 
         for k, v in candidate.items():
             if k in {'fpn_feat', 'proto', 'sem_seg'}:
@@ -94,7 +111,7 @@ class Detect_TF(object):
         return out_aft_nms
 
     def cc_fast_nms(self, net, boxes, masks_coeff, proto_data, scores, track_data, sem_data, centerness_scores,
-                    iou_threshold: float = 0.5, top_k: int = 100):
+                    iou_threshold: float = 0.5, top_k: int = 200):
         # Collapse all the classes into 1
         if cfg.train_class:
             scores, classes = scores.max(dim=0)   # [n_dets]

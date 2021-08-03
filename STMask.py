@@ -6,7 +6,7 @@ from collections import defaultdict
 
 from datasets.config import cfg
 from layers.modules import PredictionModule_FC, PredictionModule, make_net, FPN, BiFPN, TemporalNet, DynamicMaskHead
-from layers.functions import Detect, Detect_TF, Track, generate_candidate, Track_TF, Track_TF_Clip
+from layers.functions import Detect, Detect_TF, Track, Track_TF, Track_TF_Clip
 from layers.utils import aligned_bilinear, display_conf_outs
 from backbone import construct_backbone
 from utils import timer
@@ -94,6 +94,10 @@ class STMask(nn.Module):
 
             self.prediction_layers.append(pred)
 
+        # ---------------- Build detection ----------------
+        self.Detect_TF = Detect_TF(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k,
+                                   conf_thresh=cfg.nms_conf_thresh, nms_thresh=cfg.nms_thresh)
+
         # ---------------- Build track head ----------------
         if cfg.train_track:
             track_arch = [(proto_channles, 3, {'padding': 1})] * 2 + [(cfg.track_dim, 1, {})]
@@ -102,9 +106,6 @@ class STMask(nn.Module):
             if cfg.use_temporal_info:
                 # temporal fusion between multi frames for tracking
                 self.correlation_selected_layer = cfg.correlation_selected_layer
-                # evaluation for frame-level tracking
-                self.Detect_TF = Detect_TF(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k,
-                                           conf_thresh=cfg.nms_conf_thresh, nms_thresh=cfg.nms_thresh)
                 if cfg.eval_frames_of_clip > 1:
                     self.Track_TF_Clip = Track_TF_Clip()
                 else:
@@ -120,10 +121,6 @@ class STMask(nn.Module):
                 self.detect = Detect(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k, conf_thresh=cfg.nms_conf_thresh,
                                      nms_thresh=cfg.nms_thresh)
                 self.Track = Track()
-
-        else:
-            self.detect = Detect(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k, conf_thresh=cfg.nms_conf_thresh,
-                                 nms_thresh=cfg.nms_thresh)
 
         if cfg.use_semantic_segmentation_loss:
             sem_seg_head = [(proto_channles, 3, {'padding': 1})]*2 + [(cfg.num_classes, 1, {})]
@@ -382,24 +379,16 @@ class STMask(nn.Module):
                 pred_outs['stuff'] = pred_outs['stuff'].sigmoid()
                 pred_outs['sem_seg'] = pred_outs['sem_seg'].sigmoid()
 
+            pred_outs_after_NMS = self.Detect_TF(self, pred_outs)
+
             # track instances frame-by-frame
-            if cfg.train_track and cfg.use_temporal_info:
-
-                candidate = generate_candidate(pred_outs)
-                candidate_after_NMS = self.Detect_TF(self, candidate)
-
-                if cfg.eval_frames_of_clip == 1:
-                    # two-frames
-                    pred_outs_after_NMS = self.Track_TF(self, candidate_after_NMS, img_meta, img=x)
-
-                    return pred_outs_after_NMS, x, img_meta
-
-                else:
+            if cfg.train_track:
+                if cfg.use_temporal_info and cfg.eval_frames_of_clip > 1:
                     # two-clips
                     n_frame_eval_clip = cfg.eval_frames_of_clip
                     T = n_frame_eval_clip // 2
                     self.imgs_clip += x
-                    self.candidate_clip += candidate_after_NMS
+                    self.candidate_clip += pred_outs_after_NMS
                     self.img_meta_clip += img_meta
                     n_frames_cur_clip = len(self.candidate_clip)
                     pred_outs_after_track, out_imgs, out_img_metas = [], [], []
@@ -447,13 +436,16 @@ class STMask(nn.Module):
 
                     return pred_outs_after_track, out_imgs, out_img_metas
 
+                else:
+                    if cfg.use_temporal_info:
+                        # two-frames
+                        pred_outs_after_track = self.Track_TF(self, pred_outs_after_NMS, img_meta, img=x)
+
+                    else:
+                        pred_outs_after_track = self.Track(pred_outs_after_NMS, img_meta)
+
+                    return pred_outs_after_track, x, img_meta
+
             else:
-
-                # detect instances by NMS for each single frame on COCO datasets
-                pred_outs_after_NMS = self.detect(self, pred_outs)
-
-                if cfg.train_track:
-                    pred_outs_after_NMS = self.Track(pred_outs_after_NMS, img_meta)
-
-                return pred_outs_after_NMS, x, img_meta
+                return pred_outs_after_NMS
 

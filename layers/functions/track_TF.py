@@ -67,7 +67,7 @@ class Track_TF(object):
         if cfg.use_semantic_segmentation_loss:
             sem_seg = candidate['sem_seg'].squeeze(0).permute(2, 0, 1).contiguous()
 
-        det_track_embed = F.normalize(candidate['track'], dim=-1)
+        det_track_embed = candidate['track']
         if cfg.track_by_Gaussian:
             det_track_mu, det_track_var = generate_track_gaussian(det_track_embed.squeeze(0), det_masks_soft, det_bbox)
             candidate['track_mu'] = det_track_mu
@@ -178,13 +178,13 @@ class Track_TF(object):
 
         # missed_idx = self.prev_candidate['tracked_mask'] > 0
         # if area_box / area_mask < 0.2 and score < 0.2, the box is likely to be wrong.
-        boxes_c = center_size(self.prev_candidate['box'])
-        area_box = boxes_c[:, 2] * boxes_c[:, 3] * det_masks_soft.size(1) * det_masks_soft.size(2)
-        area_mask = self.prev_candidate['mask'].gt(0.5).float().sum(dim=(1, 2))
-        area_rate = area_mask / area_box
-        cond4 = area_rate > 0.2
+        # boxes_c = center_size(self.prev_candidate['box'])
+        # area_box = boxes_c[:, 2] * boxes_c[:, 3] * det_masks_soft.size(1) * det_masks_soft.size(2)
+        # area_mask = self.prev_candidate['mask'].gt(0.5).float().sum(dim=(1, 2))
+        # area_rate = area_mask / area_box
+        # cond4 = area_rate > 0.2
 
-        keep = cond1 & cond2 & cond3 & cond4
+        keep = cond1 & cond2 & cond3
 
         if keep.sum() == 0:
             detection = {'box': torch.Tensor(), 'box_ids': torch.Tensor(), 'mask_coeff': torch.Tensor(),

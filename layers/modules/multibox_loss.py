@@ -77,7 +77,7 @@ class MultiBoxLoss(nn.Module):
             conf_data = None
             stuff_data = predictions['stuff']
         mask_coeff = predictions['mask_coeff']
-        track_data = F.normalize(predictions['track'], dim=-1) if cfg.train_track else None
+        track_data = predictions['track'] if cfg.train_track else None
 
         # This is necessary for training on multiple GPUs because
         # DataParallel will cat the priors from each GPU together
@@ -266,7 +266,7 @@ class MultiBoxLoss(nn.Module):
                     losses['C'] = cfg.conf_alpha * class_loss / len(pos_inds)
                 else:
                     neg = self.select_neg_bboxes(conf_data_f, conf_t_f, type='class')
-                    keep = (pos.reshape(-1) + neg).gt(0)
+                    keep = (pos.view(-1) + neg).gt(0)
                     class_loss = F.binary_cross_entropy_with_logits(conf_data_f[keep], class_target[keep], reduction='mean')
 
                     losses['C'] = cfg.conf_alpha * class_loss
@@ -525,24 +525,28 @@ class MultiBoxLoss(nn.Module):
 
     def track_loss(self, track_data, conf_t, ids_t=None):
         pos = conf_t > 0  # [2, n]
+        loss = torch.tensor(0., device=track_data.device)
 
-        pos_track_data = track_data[pos]
-        cos_sim = pos_track_data @ pos_track_data.t()  # [n_pos, n_ref_pos]
-        # Rescale to be between 0 and 1
-        cos_sim = (cos_sim + 1) / 2
-        cos_sim.triu_(diagonal=1)
+        bs, n_clip = pos.size(0), 2
+        for i in range(bs // n_clip):
+            pos_cur = pos[i*n_clip:(i+1)*n_clip]
+            pos_track_data = track_data[i*n_clip:(i+1)*n_clip][pos_cur]
+            cos_sim = pos_track_data @ pos_track_data.t()  # [n_pos, n_ref_pos]
+            # Rescale to be between 0 and 1
+            cos_sim = (cos_sim + 1) / 2
+            cos_sim.triu_(diagonal=1)
 
-        pos_ids_t = ids_t[pos]
-        inst_eq = (pos_ids_t.view(-1, 1) == pos_ids_t.view(1, -1)).float()
+            pos_ids_t = ids_t[i*n_clip:(i+1)*n_clip][pos_cur]
+            inst_eq = (pos_ids_t.view(-1, 1) == pos_ids_t.view(1, -1)).float()
 
-        # If they are the same instance, use cosine distance, else use consine similarity
-        # loss += ((1 - cos_sim) * inst_eq + cos_sim * (1 - inst_eq)).sum() / (cos_sim.size(0) * cos_sim.size(1))
-        # pos: -log(cos_sim), neg: -log(1-cos_sim)
-        cos_sim_diff = torch.clamp(1 - cos_sim, min=1e-10)
-        loss_m = -1 * (inst_eq * torch.clamp(cos_sim, min=1e-10).log() + (1 - inst_eq) * cos_sim_diff.log())
-        loss_m.triu_(diagonal=1)
+            # If they are the same instance, use cosine distance, else use consine similarity
+            # loss += ((1 - cos_sim) * inst_eq + cos_sim * (1 - inst_eq)).sum() / (cos_sim.size(0) * cos_sim.size(1))
+            # pos: -log(cos_sim), neg: -log(1-cos_sim)
+            cos_sim_diff = torch.clamp(1 - cos_sim, min=1e-10)
+            loss_t = -1 * (inst_eq * torch.clamp(cos_sim, min=1e-10).log() + (1 - inst_eq) * cos_sim_diff.log())
+            loss += loss_t.triu_(diagonal=1).sum() / len(pos_ids_t) / (len(pos_ids_t)-1)
 
-        return {'T': loss_m.sum() * cfg.track_alpha / len(pos_ids_t)**2 }
+        return {'T': loss / bs * cfg.track_alpha}
 
     def track_gauss_loss(self, track_data, gt_masks, gt_ids, proto_data, mask_coeff, gt_bboxes,
                          loc_data, priors, conf_t, ids_t, idx_t):
@@ -605,7 +609,7 @@ class MultiBoxLoss(nn.Module):
 
         box_iou = jaccard(box_t, box_t)
         box_iou[inst_eq] = 0
-        spatial_neighbours = box_iou > 0.1
+        spatial_neighbours = box_iou > 0.05
 
         # If they're the same instance, use cosine distance, else use cosine similarity
         cos_sim_diff = torch.clamp(1 - cos_sim, min=1e-10)

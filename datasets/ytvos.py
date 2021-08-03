@@ -381,10 +381,12 @@ def prepare_data_vis(data_batch, devices):
         labels += [labels[i] for i in idx[:remainder]]
         masks += [masks[i] for i in idx[:remainder]]
         obj_ids += [obj_ids[i] for i in idx[:remainder]]
+        image_metas += [image_metas[i] for i in idx[:remainder]]
     n = images.size(0) // len(devices)
 
     with torch.no_grad():
         images_list, masks_list, bboxes_list, labels_list, obj_ids_list, num_crowds_list = [], [], [], [], [], []
+        image_metas_list = []
         for idx, device in enumerate(devices):
             images_list.append(gradinator(images[idx * n:(idx + 1) * n].to(device)))
             masks_list.append([gradinator(masks[jdx].to(device)) for jdx in range(idx * n, (idx + 1) * n)])
@@ -392,8 +394,9 @@ def prepare_data_vis(data_batch, devices):
             labels_list.append([gradinator(labels[jdx].to(device)) for jdx in range(idx * n, (idx + 1) * n)])
             obj_ids_list.append([gradinator(obj_ids[jdx].to(device)) for jdx in range(idx * n, (idx + 1) * n)])
             num_crowds_list.append([0] * n)
+            image_metas_list.append(image_metas[idx * n:(idx + 1) * n])
 
-        return images_list, bboxes_list, labels_list, masks_list, obj_ids_list, num_crowds_list
+        return images_list, bboxes_list, labels_list, masks_list, obj_ids_list, num_crowds_list, image_metas_list
 
 
 def gradinator(x):

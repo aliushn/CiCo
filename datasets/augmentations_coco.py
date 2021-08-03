@@ -101,35 +101,31 @@ class Pad(object):
 
     Note: this expects im_w <= width and im_h <= height
     """
-    def __init__(self, mean=MEANS, MS_train=True, pad_gt=True):
+    def __init__(self, img_scales=None, mean=MEANS, MS_train=True, pad_gt=True):
         self.mean = mean
-        self.max_size = cfg.max_size
+        self.img_scales = img_scales
         self.MS_train = MS_train
         self.pad_gt = pad_gt
 
     def __call__(self, image, masks, boxes=None, labels=None):
         im_h, im_w, depth = image.shape
 
-        if not self.MS_train:
-            width, height = self.max_size, self.max_size
+        width, height = max(self.img_scales), max(self.img_scales)
+        expand_image = np.zeros((height, width, depth), dtype=image.dtype)
+        expand_image[:, :, :] = self.mean
+        expand_image[:im_h, :im_w] = image
+        image = expand_image
 
-            expand_image = np.zeros(
-                (height, width, depth),
-                dtype=image.dtype)
-            expand_image[:, :, :] = self.mean
-            expand_image[:im_h, :im_w] = image
-            image = expand_image
+        if self.pad_gt:
+            expand_masks = np.zeros(
+                (masks.shape[0], height, width),
+                dtype=masks.dtype)
+            expand_masks[:,:im_h,:im_w] = masks
+            masks = expand_masks
 
-            if self.pad_gt:
-                expand_masks = np.zeros(
-                    (masks.shape[0], height, width),
-                    dtype=masks.dtype)
-                expand_masks[:,:im_h,:im_w] = masks
-                masks = expand_masks
-
-                # Scale bounding boxes (which are currently percent coordinates)
-                boxes[:, [0, 2]] *= (im_w / width)
-                boxes[:, [1, 3]] *= (im_h / height)
+            # Scale bounding boxes (which are currently percent coordinates)
+            boxes[:, [0, 2]] *= (im_w / width)
+            boxes[:, [1, 3]] *= (im_h / height)
 
         return image, masks, boxes, labels
 
@@ -144,44 +140,32 @@ class Resize(object):
     the image so the long side is max_size.
     """
 
-    @staticmethod
-    def faster_rcnn_scale(width, height, min_size, max_size):
-        min_scale = min_size / min(width, height)
-        width  *= min_scale
-        height *= min_scale
-
-        max_scale = max_size / max(width, height)
-        if max_scale < 1: # If a size is greater than max_size
-            width  *= max_scale
-            height *= max_scale
-        
-        return int(width), int(height)
-
-    def __init__(self, MS_train=False, resize_gt=True):
+    def __init__(self, img_scales, preserve_aspect_ratio=True, MS_train=False, resize_gt=True):
         self.divisibility = 32
         self.resize_gt = resize_gt
         self.MS_train = MS_train
-        self.min_size = cfg.min_size
-        self.max_size = cfg.max_size
-        self.preserve_aspect_ratio = cfg.preserve_aspect_ratio
+        self.img_scales = img_scales
+        self.preserve_aspect_ratio = preserve_aspect_ratio
 
     def __call__(self, image, masks, boxes, labels=None):
         img_h, img_w, _ = image.shape
 
         if self.MS_train:
-            ms_size = np.random.random_integers(self.min_size, self.max_size)
-            ms_size = int((ms_size + (self.divisibility - 1)) // self.divisibility * self.divisibility)
+            ms_idx = np.random.randint(len(self.img_scales))
+            pad_h, pad_w = self.img_scales[ms_idx], self.img_scales[ms_idx]
         else:
-            ms_size = self.max_size
+            pad_h, pad_w = max(self.img_scales), max(self.img_scales)
+        img_ratio, pad_ratio = img_h / img_w, pad_h / pad_w
 
         if self.preserve_aspect_ratio:
             # resize long edges
-            if img_w > img_h:
-                width, height = ms_size, int(img_h * (ms_size / img_w))
+            if img_ratio < pad_ratio:
+                width, height = pad_w, int(img_h * (pad_w / img_w))
             else:
-                width, height = int(img_w * (ms_size / img_h)), ms_size
+                width, height = int(img_w * (pad_h / img_h)), pad_h
         else:
-            width, height = ms_size, ms_size
+            width, height = pad_w, pad_h
+        assert width <= pad_w and height <= pad_h
 
         image = cv2.resize(image, (width, height))
         
@@ -618,15 +602,17 @@ class BackboneTransform(object):
         return img.astype(np.float32), masks, boxes, labels
 
 
-class BaseTransform(object):
+class BaseTransform_coco(object):
     """ Transorm to be used when evaluating. """
 
-    def __init__(self, mean=MEANS, std=STD):
+    def __init__(self, img_scales, Flip=False, MS_train=False, preserve_aspect_ratio=True,
+                 backbone_transform=None, resize_gt=True, pad_gt=True, mean=MEANS, std=STD):
         self.augment = Compose([
             ConvertFromInts(),
-            Resize(MS_train=False, resize_gt=False),
-            Pad(mean, MS_train=False, pad_gt=False),
-            BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')
+            enable_if(Flip, RandomFlip()),
+            Resize(img_scales, preserve_aspect_ratio=preserve_aspect_ratio, MS_train=MS_train, resize_gt=resize_gt),
+            Pad(img_scales, MS_train=MS_train, pad_gt=pad_gt),
+            BackboneTransform(backbone_transform, mean, std, 'BGR')
         ])
 
     def __call__(self, img, masks=None, boxes=None, labels=None):
@@ -685,7 +671,7 @@ def enable_if(condition, obj):
 class SSDAugmentation(object):
     """ Transform to be used when training. """
 
-    def __init__(self, mean=MEANS, std=STD):
+    def __init__(self, img_scales, preserve_aspect_ratio=True, MS_train=True, mean=MEANS, std=STD):
         self.augment = Compose([
             ConvertFromInts(),
             # if cfg.augment_expand = True, it is easier to compile
@@ -698,8 +684,8 @@ class SSDAugmentation(object):
             # enable_if(cfg.augment_random_mirror, RandomMirror()),
             enable_if(cfg.augment_random_flip, RandomFlip()),
             # enable_if(cfg.augment_random_rot90, RandomRot90()),
-            Resize(MS_train=cfg.MS_train),
-            Pad(mean, MS_train=cfg.MS_train),
+            Resize(img_scales, preserve_aspect_ratio=preserve_aspect_ratio, MS_train=MS_train),
+            Pad(img_scales, mean, MS_train=MS_train),
             # ToPercentCoords(),
             BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')
         ])

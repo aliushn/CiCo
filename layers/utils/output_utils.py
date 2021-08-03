@@ -12,7 +12,7 @@ import os
 from ..utils import sanitize_coordinates, center_size, generate_single_mask, jaccard
 
 
-def postprocess(det_output, ori_h, ori_w, img_h, img_w, img_id, batch_idx=0, interpolation_mode='bilinear',
+def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, interpolation_mode='bilinear',
                 visualize_lincomb=False, score_threshold=0, output_file=None):
     """
     Postprocesses the output of Yolact on testing mode into a format that makes sense,
@@ -34,8 +34,6 @@ def postprocess(det_output, ori_h, ori_w, img_h, img_w, img_id, batch_idx=0, int
         - masks   [num_det, h, w]: Full image masks for each detection.
     """
 
-    dets = det_output[batch_idx]
-
     if dets is None:
         return [torch.Tensor()] * 4  # Warning, this is 4 copies of the same thing
 
@@ -53,31 +51,18 @@ def postprocess(det_output, ori_h, ori_w, img_h, img_w, img_id, batch_idx=0, int
         return [torch.Tensor()] * 4
 
     # Actually extract everything from dets now
-    pad_h, pad_w = dets['mask'].size()[-2:]
+    masks = dets['mask']
     classes = dets['class']
     boxes = dets['box']
     scores = dets['score']
     masks_coeff = dets['mask_coeff']
 
-    coeffs_norm = F.normalize(cfg.mask_proto_coeff_activation(masks_coeff), dim=1)
-    cos_sim = torch.mm(coeffs_norm, coeffs_norm.t())
-    # Rescale to be between 0 and 1
-    cos_sim = (cos_sim + 1) / 2
-
-    instance_t = classes.view(-1)  # juuuust to make sure
-    # inst_eq = (instance_t[:, None].expand_as(cos_sim) == instance_t[None, :].expand_as(cos_sim))
-    # box_iou = jaccard(boxes, boxes)
-
     if cfg.eval_mask_branch:
         # At this points masks is only the coefficients
-        proto_data = dets['proto'][:int(dets['proto'].size(0)/pad_h * img_h), :int(dets['proto'].size(1)/pad_w * img_w)]
-
-        # Test flag, do not upvote
-        if cfg.mask_proto_debug:
-            np.save('scripts/proto.npy', proto_data.cpu().numpy())
+        proto_data = dets['proto'][:int(dets['proto'].size(0)*s_h), :int(dets['proto'].size(1)*s_w)]
 
         # First undo padding area and then scale masks up to the full image
-        masks = dets['mask'][:, :img_h, :img_w]
+        masks = masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
 
         if visualize_lincomb:
             display_lincomb(proto_data, masks, masks_coeff, img_ids=[img_id], output_file=output_file)
@@ -88,8 +73,8 @@ def postprocess(det_output, ori_h, ori_w, img_h, img_w, img_id, batch_idx=0, int
         masks.gt_(0.5)
 
     # Undo padding for bboxes
-    boxes[:, 0::2] *= pad_w / img_w
-    boxes[:, 1::2] *= pad_h / img_h
+    boxes[:, 0::2] /= s_w
+    boxes[:, 1::2] /= s_h
     # scale boxes upto the original width and height
     boxes[:, 0], boxes[:, 2] = sanitize_coordinates(boxes[:, 0], boxes[:, 2], ori_w, cast=False)
     boxes[:, 1], boxes[:, 3] = sanitize_coordinates(boxes[:, 1], boxes[:, 3], ori_h, cast=False)
@@ -130,7 +115,7 @@ def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
     ori_h, ori_w = img_meta['ori_shape'][:2]
     img_h, img_w = img_meta['img_shape'][:2]
     pad_h, pad_w = img_meta['pad_shape'][:2]
-    s_w, s_h = (img_w / pad_w, img_h / pad_h)
+    s_w, s_h = img_w / pad_w, img_h / pad_h
 
     # double check
     if score_threshold > 0:

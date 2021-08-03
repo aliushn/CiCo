@@ -151,14 +151,8 @@ def train():
                              pos_threshold=cfg.positive_iou_threshold,
                              neg_threshold=cfg.negative_iou_threshold)
 
-    if cfg.data_type == 'coco':
-        train_dataset = COCODetection(image_path=cfg.dataset.train_images,
-                                      info_file=cfg.dataset.train_info,
-                                      transform=SSDAugmentation(MEANS))
-        detection_collate = detection_collate_coco
-    else:
-        train_dataset = get_dataset(cfg.train_dataset, cfg.backbone.transform)
-        detection_collate = detection_collate_vis
+    train_dataset = get_dataset(cfg.data_type, cfg.train_dataset, cfg.backbone.transform)
+    detection_collate = detection_collate_coco if cfg.data_type == 'coco' else detection_collate_vis
 
     if args.is_distributed:
         if args.batch_size < 8:
@@ -263,46 +257,44 @@ def train():
                     log.log('train', loss=loss_info, epoch=epoch, iter=iteration,
                             lr=round(cur_lr, 10), elapsed=elapsed)
 
-                # if i == 0 and epoch > 0:
+                # if args.save_interval > 0:
                 #     if epoch % args.save_interval == 0 and args.local_rank == 0:
                 if iteration % args.save_interval == 0 and iteration > 1 and args.local_rank == 0:
-                        if args.keep_latest:
-                            latest = SavePath.get_latest(args.save_folder, cfg.name)
+                    if args.keep_latest:
+                        latest = SavePath.get_latest(args.save_folder, cfg.name)
 
-                        print('Saving state, epoch:', epoch)
-                        torch.save(net.state_dict(), save_path(epoch, iteration))
+                    print('Saving state, epoch:', epoch)
+                    torch.save(net.state_dict(), save_path(epoch, iteration))
 
-                        if args.keep_latest and latest is not None:
-                            if args.keep_latest_interval <= 0 or iteration % args.keep_latest_interval != args.save_interval:
-                                print('Deleting old save...')
-                                os.remove(latest)
+                    if args.keep_latest and latest is not None:
+                        if args.keep_latest_interval <= 0 or iteration % args.keep_latest_interval != args.save_interval:
+                            print('Deleting old save...')
+                            os.remove(latest)
 
-                        # This is done per epoch
-                        save_path_valid_metrics = save_path(epoch, iteration).replace('.pth', '.json')
+                    # This is done per epoch
+                    save_path_valid_metrics = save_path(epoch, iteration).replace('.pth', '.json')
 
+                    if args.save_interval > 0:
                         if cfg.data_type == 'vis':
                             setup_eval()
                             # valid_sub, the last one ten of training data
                             cfg.valid_sub_dataset.has_gt = False
-                            valid_sub_dataset = get_dataset(cfg.valid_sub_dataset, cfg.backbone.transform)
+                            valid_sub_dataset = get_dataset('vis', cfg.valid_sub_dataset, cfg.backbone.transform)
 
                             compute_validation_map(net, valid_sub_dataset,
                                                    output_metrics_file=save_path_valid_metrics)
                             print('calculate evaluation metrics for valid_sub data (divided from traning data) ...')
                             ann_file = cfg.valid_sub_dataset.ann_file
                             dt_file = save_path_valid_metrics
-                            calc_metrics(ann_file, dt_file, output_file=save_path_valid_metrics.replace('.json', 'txt'))
+                            calc_metrics(ann_file, dt_file, output_file=save_path_valid_metrics.replace('.json', '.txt'))
 
                             # valid datasets
-                            valid_dataset = get_dataset(cfg.valid_dataset, cfg.backbone.transform)
-                            compute_validation_map(net, valid_dataset,
-                                                   output_metrics_file=save_path_valid_metrics)
+                            # valid_dataset = get_dataset(cfg.valid_dataset, cfg.backbone.transform)
+                            # compute_validation_map(net, valid_dataset,
+                            #                        output_metrics_file=save_path_valid_metrics)
                         else:
                             setup_eval_coco()
-                            val_dataset = COCODetection(image_path=cfg.dataset.valid_images,
-                                                        info_file=cfg.dataset.valid_info,
-                                                        transform=BaseTransform(MEANS))
-                            compute_validation_map_coco(epoch, iteration, net, val_dataset, log if args.log else None)
+                            compute_validation_map_coco(epoch, iteration, net, cfg.valid_dataset, log if args.log else None)
 
                 iteration += 1
 
@@ -400,14 +392,14 @@ def compute_validation_map(net, dataset, output_metrics_file=None):
         net.train()
 
 
-def compute_validation_map_coco(epoch, iteration, net, dataset, log: Log = None):
+def compute_validation_map_coco(epoch, iteration, net, dataset_config, log: Log = None):
     with torch.no_grad():
         net.eval()
 
         start = time.time()
         print()
         print("Computing validation mAP (this may take a while)...", flush=True)
-        val_info = eval_coco_script.evaluate(net, dataset, train_mode=True, epoch=epoch, iteration=iteration)
+        val_info = eval_coco_script.evaluate(net, dataset_config, train_mode=True, epoch=epoch, iteration=iteration)
         end = time.time()
 
         if log is not None:

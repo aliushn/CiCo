@@ -109,6 +109,123 @@ def change(gt, priors):
     return -torch.sqrt((diff ** 2).sum(dim=2) )
 
 
+def match_clip(bbox_clip, labels_clip, obj_ids_clip, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t, obj_ids_t, idx,
+               pos_thresh=0.5, neg_thresh=0.3, img_gpu=None):
+    """Match each prior box with the ground truth box of the highest jaccard
+    overlap, encode the bounding boxes, then return the matched indices
+    corresponding to both confidence and location preds.
+    Args:
+        pos_thresh: (float) IoU > pos_thresh ==> positive.
+        neg_thresh: (float) IoU < neg_thresh ==> negative.
+        bbox_clip: (tensor) Ground truth boxes, Shape: [num_obj, 4].  [x1, y1, x2, y2]
+        labels_clip: (tensor) All the class labels for the image, Shape: [num_obj].
+        obj_ids_clip: (tensor) the instance ids of each gt bbox
+        priors: (tensor) Prior boxes from priorbox layers, Shape: [n_priors,4]. [cx,cy,w,h]
+        loc_data: (tensor) The predicted bbox regression coordinates for this batch. [\delta x, \delta y,  \delta w,  \delta h]
+        loc_t: (tensor) Tensor to be filled w/ endcoded location targets.
+        conf_t: (tensor) Tensor to be filled w/ matched indices for conf preds. Note: -1 means neutral.
+        idx_t: (tensor) Tensor to be filled w/ the index of the matched gt box for each prior.
+        obj_ids_t: (tensor) Tensor to be filled w/ the ids of the matched gt instance for each prior.
+        idx: (int) current batch index.
+    Return:
+        The matched indices corresponding to 1)location and 2)confidence preds.
+    """
+    # some error annotations with width = 0 or height = 0
+    n_clip = len(bbox_clip)
+    for cdx in range(n_clip):
+        bbox_c = center_size(bbox_clip[cdx])
+        bbox_c[:, 2:] = torch.clamp(bbox_c[:, 2:], min=1e-7)
+        bbox_clip[cdx] = point_form(bbox_c)
+
+    # decoded_priors [cx, cy, w, h] => [x1, y1, x2, y2]
+    decoded_priors = point_form(priors)
+
+    # ids
+    obj_ids_unique = torch.cat(obj_ids_clip).unique()
+
+
+    # Size [num_objects, num_priors]
+    overlaps_clip = []
+    for cdx in range(n_clip):
+        if cfg.use_DIoU:
+            overlaps = compute_DIoU(bbox_clip[cdx], decoded_priors) if not cfg.use_change_matching else change(bbox_clip[cdx], decoded_priors)
+            pos_thresh, neg_thresh = 0.85 * pos_thresh, 0.85 * neg_thresh
+        else:
+            overlaps = jaccard(bbox_clip[cdx], decoded_priors) if not cfg.use_change_matching else change(bbox_clip[cdx], decoded_priors)
+
+        # Size [num_priors] best ground truth for each prior
+        best_truth_overlap, best_truth_idx = overlaps.max(0)
+
+    # if a bbox is matched with two or more groundtruth boxes, this bbox will be assigned as -1
+    thresh = 0.5 * (pos_thresh + neg_thresh)
+    multiple_bbox = (overlaps > pos_thresh).sum(dim=0) > 1
+    # print((best_truth_overlap > pos_thresh).sum(), 'multi:', multiple_bbox.sum(), 'gt:', bbox.size(0))
+    best_truth_overlap[multiple_bbox] = thresh
+    # temp = (best_truth_overlap > pos_thresh).reshape(-1)
+    # print(temp.sum(), bbox.size(0))
+    # print(best_truth_overlap[temp])
+
+    # We want to ensure that each gt gets used at least once so that we don't
+    # waste any training data. In order to do that, find the max overlap anchor
+    # with each gt, and force that anchor to use that gt.
+    for _ in range(overlaps.size(0)):
+        # Find j, the gt with the highest overlap with a prior
+        # In effect, this will loop through overlaps.size(0) in a "smart" order,
+        # always choosing the highest overlap first.
+        best_prior_overlap, best_prior_idx = overlaps.max(1)
+        j = best_prior_overlap.max(0)[1]
+
+        # Find i, the highest overlap anchor with this gt
+        i = best_prior_idx[j]
+
+        # Set all other overlaps with i to be -1 so that no other gt uses it
+        overlaps[:, i] = -1
+        # Set all other overlaps with j to be -1 so that this loop never uses j again
+        overlaps[j, :] = -1
+
+        # Overwrite i's score to be 2 so it doesn't get thresholded ever
+        best_truth_overlap[i] = 2
+        # Set the gt to be used for i to be j, overwriting whatever was there
+        best_truth_idx[i] = j
+
+    matches = bbox_clip[best_truth_idx]  # Shape: [num_priors,4]  [x1, y1, x2, y2]
+    conf = labels_clip[best_truth_idx]  # Shape: [num_priors]
+    conf[best_truth_overlap < pos_thresh] = -1  # label as neutral
+    conf[best_truth_overlap < neg_thresh] = 0  # label as background
+
+    if img_gpu is not None:
+        pos = conf > 0
+        display_pos_smaples(pos, img_gpu, decoded_priors, bbox_clip)
+
+    # Deal with crowd annotations for COCO
+    if crowd_boxes is not None and cfg.crowd_iou_threshold < 1:
+        # Size [num_priors, num_crowds]
+        crowd_overlaps = jaccard(decoded_priors, crowd_boxes, iscrowd=True)
+        # Size [num_priors]
+        best_crowd_overlap, best_crowd_idx = crowd_overlaps.max(1)
+        # Set non-positives with crowd iou of over the threshold to be neutral.
+        conf[(conf <= 0) & (best_crowd_overlap > cfg.crowd_iou_threshold)] = -1
+
+    loc = encode(matches, priors, cfg.use_yolo_regressors)  # [cx, cy, w, h]
+    keep = (torch.isinf(loc).sum(-1) + torch.isnan(loc).sum(-1)) > 0
+    if keep.sum() > 0:
+        print('Inf or Nan occur in loc_t:', loc[keep])
+        conf[keep] = -1
+    # filter out those predicted boxes with inf or nan
+    keep = (torch.isinf(loc_data).sum(-1) + torch.isnan(loc_data).sum(-1)) > 0
+    if len(torch.nonzero(keep)) > 0:
+        print('Num of Inf or Nan', len(torch.nonzero(keep)))
+        conf[keep] = -1
+
+    loc_t[idx] = loc  # [num_priors,4] encoded offsets to learn
+    conf_t[idx] = conf  # [num_priors] top class label for each prior
+    idx_t[idx] = best_truth_idx  # [num_priors] indices for lookup
+    if obj_ids_clip is not None:
+        id_cur = obj_ids_clip[best_truth_idx]
+        id_cur[best_truth_overlap < pos_thresh] = 0  # Only remain positive boxes for tracking
+        obj_ids_clip[idx] = id_cur
+
+
 def match(bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t, ids_t, idx,
           pos_thresh=0.5, neg_thresh=0.3, img_gpu=None):
     """Match each prior box with the ground truth box of the highest jaccard
@@ -141,7 +258,7 @@ def match(bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t
     # Size [num_objects, num_priors]
     if cfg.use_DIoU:
         overlaps = compute_DIoU(bbox, decoded_priors) if not cfg.use_change_matching else change(bbox, decoded_priors)
-        pos_thresh, neg_thresh = 0.8 * pos_thresh, 0.8 * neg_thresh
+        pos_thresh, neg_thresh = 0.85 * pos_thresh, 0.85 * neg_thresh
     else:
         overlaps = jaccard(bbox, decoded_priors) if not cfg.use_change_matching else change(bbox, decoded_priors)
 

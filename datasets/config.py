@@ -140,8 +140,8 @@ dataset_base_coco = Config({
     'name': 'Base Dataset',
 
     # Training images and annotations
-    'train_images': '../datasets/coco/train2017/',
-    'train_info': 'path_to_annotation_file',
+    'img_prefix': '../datasets/coco/train2017/',
+    'ann_file': 'path_to_annotation_file',
 
     # Validation images and annotations.
     'valid_images': '../datasets/coco/val2017/',
@@ -149,6 +149,9 @@ dataset_base_coco = Config({
 
     # Whether or not to load GT. If this is False, eval.py quantitative evaluation won't work.
     'has_gt': True,
+    'img_scales': [640, 672, 704, 736, 768, 800],
+    'MS_train': True,
+    'preserve_aspect_ratio': True,
 
     # A list of names for each of you classes.
     'class_names': COCO_CLASSES,
@@ -156,35 +159,38 @@ dataset_base_coco = Config({
     # COCO class ids aren't sequential, so this is a bandage fix. If your ids aren't sequential,
     # provide a map from category_id -> index in class_names + 1 (the +1 is there because it's 1-indexed).
     # If not specified, this just assumes category ids start at 1 and increase sequentially.
-    'label_map': None
-})
-
-coco2014_dataset = dataset_base_coco.copy({
-    'name': 'COCO 2014',
-
-    'train_info': './data/coco/annotations/instances_train2014.json',
-    'valid_info': './data/coco/annotations/instances_val2014.json',
-
     'label_map': COCO_LABEL_MAP
 })
 
-coco2017_dataset = dataset_base_coco.copy({
-    'name': 'COCO 2017',
+coco2014_train_dataset = dataset_base_coco.copy({
+    'name': 'COCO_2014_train',
+    'img_prefix': '../datasets/coco/train2017/',
+    'ann_file': '../datasets/coco/annotations//instances_train2014.json',
+})
 
-    'train_info': '../datasets/coco/annotations/instances_train2017.json',
-    'valid_info': '../datasets/coco/annotations/instances_val2017.json',
+coco2014_valid_dataset = dataset_base_coco.copy({
+    'name': 'COCO_2014_valid',
+    'img_prefix': '../datasets/coco/val2017/',
+    'ann_file': '../datasets/coco/annotations/instances_val2017.json',
+})
 
-    'label_map': COCO_LABEL_MAP
+coco2017_train_dataset = dataset_base_coco.copy({
+    'name': 'COCO_2017_train',
+    'img_prefix': '../datasets/coco/train2017/',
+    'ann_file': '../datasets/coco/annotations/instances_train2017.json',
+})
+
+coco2017_valid_dataset = dataset_base_coco.copy({
+    'name': 'COCO_2017_valid',
+    'img_prefix': '../datasets/coco/val2017/',
+    'ann_file': '../datasets/coco/annotations/instances_val2017.json',
 })
 
 coco2017_testdev_dataset = dataset_base_coco.copy({
-    'name': 'COCO 2017 Test-Dev',
-
-    'valid_info': '../datasets/coco/annotations/image_info_test-dev2017.json',
-    'valid_images': '../datasets/coco/test2017/',
+    'name': 'COCO_2017_testdev',
+    'img_prefix': '../datasets/coco/test2017/',
+    'ann_file': '../datasets/coco/annotations/image_info_test-dev2017.json',
     'has_gt': False,
-
-    'label_map': COCO_LABEL_MAP
 })
 
 # ----------------------- DATASETS ----------------------- #
@@ -195,7 +201,8 @@ dataset_base_vis = Config({
     # images and annotations path
     'ann_file': 'path_to_annotation_file',
     'img_prefix': 'path_to_images_file',
-    'img_scales': [(640, 384), (800, 480), (960, 576)],
+    # 'img_scales': [(640, 384), (800, 480), (960, 576)],
+    'img_scales': [(800, 480)],
     'MS_train': True,
     'preserve_aspect_ratio': True,
     'tranform': None,
@@ -528,20 +535,6 @@ base_config = Config({
     'mask_proto_double_loss_alpha': 1,
     'mask_proto_crop_with_pred_box': False,
 
-    # SSD data augmentation parameters
-    # Randomize hue, vibrance, etc.
-    'augment_photometric_distort': False,
-    # Have a chance to scale down the image and pad (to emulate smaller detections)
-    'augment_expand': False,
-    # Potentialy sample a random crop from the image and put it in a random place
-    'augment_random_sample_crop': False,
-    # Mirror the image with a probability of 1/2
-    'augment_random_mirror': False,
-    # Flip the image vertically with a probability of 1/2
-    'augment_random_flip': True,
-    # With uniform probability, rotate the image [0,90,180,270] degrees
-    'augment_random_rot90': False,
-
     # Set this to a config object if you want an FPN (inherit from fpn_base). See fpn_base for details.
     'fpn': None,
 
@@ -749,15 +742,15 @@ STMask_base_config = base_config.copy({
 
     # eval
     'eval_frames_of_clip': 1,
-    'nms_conf_thresh': 0.25,
+    'nms_conf_thresh': 0.2,
     'nms_thresh': 0.5,
-    'eval_conf_thresh': 0.25,
-    'candidate_conf_thresh': 0.25,
-    'nms_as_miou': False,
+    'eval_conf_thresh': 0.2,
+    'candidate_conf_thresh': 0.2,
+    'nms_as_miou': True,
     'remove_false_inst': True,
     'add_missed_masks': False,
     'use_train_sub': False,
-    'use_valid_sub': True,
+    'use_valid_sub': False,
     'use_test': False,
     'only_calc_metrics': False,
     'only_count_classes': False,
@@ -981,11 +974,11 @@ STMask_plus_resnet152_OVIS_config = STMask_base_OVIS_config.copy({
     'backbone': resnet152_dcn_inter3_backbone.copy({
         'path': 'STMask_plus_resnet152_coco_20.pth',
         'selected_layers': list(range(1, 4)),
-        'pred_scales': STMask_plus_base_config.backbone.pred_scales,
-        'pred_aspect_ratios': STMask_plus_base_config.backbone.pred_aspect_ratios,
+        'pred_scales': STMask_base_config.backbone.pred_scales,
+        'pred_aspect_ratios': STMask_base_config.backbone.pred_aspect_ratios,
     }),
-    'use_feature_calibration': True,
-    'pred_conv_kernels': [[3,3], [3,5], [5,3]],
+    'use_feature_calibration': False,
+    'pred_conv_kernels': [[3,3], [3,3], [3,3]],
 
 })
 
@@ -1044,8 +1037,10 @@ STMask_base_coco_ori_config = STMask_base_config.copy({
     'name': 'STMask_base_coco_ori',
 
     # Dataset stuff
-    'dataset': coco2017_dataset,
-    'num_classes': len(coco2017_dataset.class_names),
+    'train_dataset': coco2017_train_dataset,
+    'valid_dataset': coco2017_valid_dataset,
+    'test_dataset': coco2017_testdev_dataset,
+    'num_classes': 80,
 
     # Image Size
     'MS_train': True,

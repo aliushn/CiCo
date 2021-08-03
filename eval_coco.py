@@ -6,6 +6,7 @@ from utils import timer
 from layers.visualization import get_color
 import pycocotools
 import torch.nn.functional as F
+import torch.utils.data as data
 
 import numpy as np
 import torch
@@ -39,6 +40,8 @@ def str2bool(v):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='YOLACT COCO Evaluation')
+    parser.add_argument('--batch_size', default=1, type=int,
+                        help='batch size')
     parser.add_argument('--trained_model',
                         default='weights/ssd300_mAP_77.43_v2.pth', type=str,
                         help='Trained state_dict file path to open. If "interrupt", this will open the interrupt file.')
@@ -58,8 +61,6 @@ def parse_args(argv=None):
                         help='Whether or not to display scores in addition to classes')
     parser.add_argument('--display', dest='display', action='store_true',
                         help='Display qualitative results instead of quantitative ones.')
-    parser.add_argument('--shuffle', dest='shuffle', action='store_true',
-                        help='Shuffles the images when displaying them. Doesn\'t have much of an effect when display is off though.')
     parser.add_argument('--ap_data_file', default='results/ap_data.pkl', type=str,
                         help='In quantitative mode, the file to save detections before calculating mAP.')
     parser.add_argument('--resume', dest='resume', action='store_true',
@@ -86,8 +87,6 @@ def parse_args(argv=None):
                         help='If the config uses lincomb masks, output a visualization of how those masks are created.')
     parser.add_argument('--benchmark', default=False, dest='benchmark', action='store_true',
                         help='Equivalent to running display mode but without displaying an image.')
-    parser.add_argument('--no_sort', default=False, dest='no_sort', action='store_true',
-                        help='Do not sort images by hashed image ID.')
     parser.add_argument('--seed', default=None, type=int,
                         help='The seed to pass into random.seed. Note: this is only really for the shuffle and does not (I think) affect cuda stuff.')
     parser.add_argument('--mask_proto_debug', default=False, dest='mask_proto_debug', action='store_true',
@@ -145,11 +144,11 @@ def prep_display(dets_out, img, ori_h, ori_w, img_h, img_w, img_ids, undo_transf
         img_gpu = torch.Tensor(img_numpy).cuda()
     else:
         img_gpu = img / 255.0
-        h, w, _ = img.shape
+    _, pad_h, pad_w = img.shape
 
     with timer.env('Postprocess'):
-
-        classes, scores, boxes, masks = postprocess(dets_out, ori_h, ori_w, img_h, img_w, img_ids,
+        s_h,  s_w = img_h / pad_h, img_w / pad_w
+        classes, scores, boxes, masks = postprocess(dets_out, ori_h, ori_w, s_h, s_w, img_ids,
                                                     visualize_lincomb=args.display_lincomb,
                                                     score_threshold=args.score_threshold)
 
@@ -227,7 +226,7 @@ def prep_display(dets_out, img, ori_h, ori_w, img_h, img_w, img_ids, undo_transf
                 cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 1)
 
             if args.display_text:
-                _class = cfg.dataset.class_names[classes[j]-1]
+                _class = cfg.train_dataset.class_names[classes[j]-1]
                 text_str = '%s: %.2f' % (_class, score) if args.display_scores else _class
 
                 font_face = cv2.FONT_HERSHEY_DUPLEX
@@ -246,9 +245,10 @@ def prep_display(dets_out, img, ori_h, ori_w, img_h, img_w, img_ids, undo_transf
     return img_numpy
 
 
-def prep_benchmark(dets_out, ori_h, ori_w, img_h, img_w, img_id):
+def prep_benchmark(dets_out, ori_h, ori_w, img_h, img_w, pad_h, pad_w, img_id):
     with timer.env('Postprocess'):
-        t = postprocess(dets_out, ori_h, ori_w, img_h, img_w, img_id, score_threshold=args.score_threshold)
+        s_h, s_w = img_h / pad_h, img_w / pad_w
+        t = postprocess(dets_out, ori_h, ori_w, s_h, s_w, img_id, score_threshold=args.score_threshold)
 
     with timer.env('Copy'):
         classes, scores, boxes, masks = [x[:args.top_k] for x in t]
@@ -358,16 +358,16 @@ class Detections:
             json.dump(output, f)
 
 
-def prep_metrics(ap_data, dets, img, gt, gt_masks, ori_h, ori_w, img_h, img_w, num_crowd, image_id,
+def prep_metrics(ap_data, dets, gt, gt_masks, ori_h, ori_w, img_h, img_w, pad_h, pad_w, num_crowd, image_id,
                  detections: Detections = None):
     """ Returns a list of APs for this image, with each element being for a class  """
     if not args.output_coco_json:
         with timer.env('Prepare gt'):
-            gt_boxes = torch.Tensor(gt[:, :4])
+            gt_boxes = gt[:, :4].cuda() if args.cuda else gt_masks
             gt_boxes[:, [0, 2]] *= ori_w
             gt_boxes[:, [1, 3]] *= ori_h
-            gt_classes = list(gt[:, 4].astype(int))
-            gt_masks = torch.Tensor(gt_masks)
+            gt_classes = gt[:, 4].long().tolist()
+            gt_masks = gt_masks.cuda() if args.cuda else gt_masks
 
             if num_crowd > 0:
                 split = lambda x: (x[-num_crowd:], x[:-num_crowd])
@@ -376,7 +376,8 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, ori_h, ori_w, img_h, img_w, n
                 crowd_classes, gt_classes = split(gt_classes)
 
     with timer.env('Postprocess'):
-        classes, scores, boxes, masks = postprocess(dets, ori_h, ori_w, img_h, img_w, image_id,
+        s_h, s_w = img_h / pad_h, img_w / pad_w
+        classes, scores, boxes, masks = postprocess(dets, ori_h, ori_w, s_h, s_w, image_id,
                                                     score_threshold=args.score_threshold)
 
         if classes.size(0) == 0:
@@ -853,8 +854,7 @@ def evalvideo(net: STMask, path: str, out_path: str = None):
     cleanup_and_exit()
 
 
-def evaluate(net: STMask, dataset, train_mode=False, epoch=None, iteration=None):
-    cfg.mask_proto_debug = args.mask_proto_debug
+def evaluate(net: STMask, dataset_config, train_mode=False, epoch=None, iteration=None):
 
     # TODO Currently we do not support Fast Mask Re-scroing in evalimage, evalimages, and evalvideo
     if args.image is not None:
@@ -876,8 +876,10 @@ def evaluate(net: STMask, dataset, train_mode=False, epoch=None, iteration=None)
             evalvideo(net, args.video)
         return
 
+    dataset = get_dataset('coco', dataset_config, cfg.backbone.transform, inference=True)
+
     frame_times = MovingAverage()
-    dataset_size = len(dataset) if args.max_images < 0 else min(args.max_images, len(dataset))
+    dataset_size = len(dataset) // args.batch_size if args.max_images < 0 else min(args.max_images, len(dataset))
     progress_bar = ProgressBar(30, dataset_size)
 
     print()
@@ -886,95 +888,72 @@ def evaluate(net: STMask, dataset, train_mode=False, epoch=None, iteration=None)
         # For each class and iou, stores tuples (score, isPositive)
         # Index ap_data[type][iouIdx][classIdx]
         ap_data = {
-            'box': [[APDataObject() for _ in cfg.dataset.class_names] for _ in iou_thresholds],
-            'mask': [[APDataObject() for _ in cfg.dataset.class_names] for _ in iou_thresholds]
+            'box': [[APDataObject() for _ in cfg.train_dataset.class_names] for _ in iou_thresholds],
+            'mask': [[APDataObject() for _ in cfg.train_dataset.class_names] for _ in iou_thresholds]
         }
         detections = Detections()
     else:
         timer.disable('Load Data')
 
-    dataset_indices = list(range(len(dataset)))
-
-    if args.shuffle:
-        random.shuffle(dataset_indices)
-    elif not args.no_sort:
-        # Do a deterministic shuffle based on the image ids
-        #
-        # I do this because on python 3.5 dictionary key order is *random*, while in 3.6 it's
-        # the order of insertion. That means on python 3.6, the images come in the order they are in
-        # in the annotations file. For some reason, the first images in the annotations file are
-        # the hardest. To combat this, I use a hard-coded hash function based on the image ids
-        # to shuffle the indices we use. That way, no matter what python version or how pycocotools
-        # handles the data, we get the same result every time.
-        hashed = [badhash(x) for x in dataset.ids]
-        dataset_indices.sort(key=lambda x: hashed[x])
-
-    dataset_indices = dataset_indices[:dataset_size]
+    data_loader = data.DataLoader(dataset, args.batch_size,
+                                  shuffle=False,
+                                  collate_fn=detection_collate_coco,
+                                  pin_memory=True)
 
     try:
         # Main eval loop
-        for it, image_idx in enumerate(dataset_indices):
+        for it, data_batch in enumerate(data_loader):
             timer.reset()
-            img_ids = dataset.ids[image_idx]
 
             with timer.env('Load Data'):
-                img, gt, gt_masks, ori_h, ori_w, num_crowd = dataset.pull_item(image_idx)
-                pad_h, pad_w = img.size()[-2:]
-                if cfg.preserve_aspect_ratio:
-                    if ori_h > ori_w:
-                        img_h, img_w = pad_h, int(ori_w * (pad_h / ori_h))
-                    else:
-                        img_h, img_w = int(ori_h * (pad_w / ori_w)), pad_w
-                else:
-                    img_h, img_w = pad_h, pad_w
-
-                # Test flag, do not upvote
-                if cfg.mask_proto_debug:
-                    with open('scripts/info.txt', 'w') as f:
-                        f.write(str(img_ids))
-                    np.save('scripts/gt.npy', gt_masks)
-
-                batch = Variable(img.unsqueeze(0))
+                imgs, targets, gt_masks, num_crowds, ori_shapes = data_batch
+                imgs = Variable(imgs)
                 if args.cuda:
-                    batch = batch.cuda()
+                    imgs = imgs.cuda()
+
+                img_ids = [dataset.ids[it * args.batch_size + jdx] for jdx in range(imgs.size(0))]
 
             with timer.env('Network Extra'):
-                preds, _, _ = net(batch, img_ids)
-                for b in range(len(preds)):
-                    if preds[b]['mask'].nelement() > 0:
-                        preds[b]['mask'] = F.interpolate(preds[b]['mask'].unsqueeze(0), (pad_h, pad_w),
-                                                         mode='bilinear', align_corners=False).squeeze(0)
+                preds = net(imgs, img_ids)
 
-            # Perform the meat of the operation here depending on our mode.
-            if args.display:
-                cfg.preserve_aspect_ratio = True
-                img_numpy = prep_display(preds, img, ori_h, ori_w, img_h, img_w, img_ids,
-                                         output_file=args.mask_det_file[:-12])
-            elif args.benchmark:
-                prep_benchmark(preds, ori_h, ori_w, img_h, img_w, img_ids)
-            else:
-                prep_metrics(ap_data, preds, img, gt, gt_masks, ori_h, ori_w, img_h, img_w,
-                             num_crowd, img_ids, detections)
+            for jdx in range(imgs.size(0)):
+                pad_h, pad_w = imgs[jdx].size()[-2:]
+                ori_h, ori_w = ori_shapes[jdx]
+                if dataset_config.preserve_aspect_ratio:
+                    if (ori_h / float(ori_w)) < (pad_h / float(pad_w)):
+                        img_w, img_h = pad_w, int(ori_h * (pad_w / ori_w))
+                    else:
+                        img_w, img_h = int(ori_w * (pad_h / ori_h)), pad_h
+                else:
+                    img_w, img_h = pad_w, pad_h
+
+                # Perform the meat of the operation here depending on our mode.
+                if args.display:
+                    img_numpy = prep_display(preds[jdx], imgs[jdx], ori_h, ori_w, img_h, img_w, img_ids[jdx],
+                                             output_file=args.mask_det_file[:-12])
+                elif args.benchmark:
+                    prep_benchmark(preds[jdx], ori_h, ori_w, img_h, img_w, img_ids[jdx])
+                else:
+                    prep_metrics(ap_data, preds[jdx], targets[jdx], gt_masks[jdx], ori_h, ori_w,
+                                 img_h, img_w, pad_h, pad_w, num_crowds[jdx], img_ids[jdx], detections)
+
+                if args.display:
+                    root_dir = os.path.join(args.mask_det_file[:-12], 'out')
+                    if not os.path.exists(root_dir):
+                        os.makedirs(root_dir)
+
+                    plt.imshow(img_numpy)
+                    plt.title(str(img_ids[jdx]))
+                    plt.axis('off')
+                    plt.savefig(''.join([root_dir, '/', str(img_ids[jdx]), '.png']))
+                    plt.clf()
 
             # First couple of images take longer because we're constructing the graph.
             # Since that's technically initialization, don't include those in the FPS calculations.
             if it > 1:
                 frame_times.add(timer.total_time())
 
-            if args.display:
-                if it > 1:
-                    print('Avg FPS: %.4f' % (1 / frame_times.get_avg()))
-                root_dir = os.path.join(args.mask_det_file[:-12], 'out')
-                if not os.path.exists(root_dir):
-                    os.makedirs(root_dir)
-
-                plt.imshow(img_numpy)
-                plt.title(str(img_ids))
-                plt.axis('off')
-                plt.savefig(''.join([root_dir, '/', str(img_ids), '_768.png']))
-                plt.clf()
-
-            elif not args.no_bar:
+            if not args.no_bar:
                 # if it > 1:
                 #     fps = 1 / frame_times.get_avg()
                 # else:
@@ -1015,7 +994,7 @@ def calc_map(ap_data, epoch=None, iteration=None):
     print('Calculating mAP...')
     aps = [{'box': [], 'mask': []} for _ in iou_thresholds]
 
-    for _class in range(len(cfg.dataset.class_names)):
+    for _class in range(len(cfg.train_dataset.class_names)):
         for iou_idx in range(len(iou_thresholds)):
             for iou_type in ('box', 'mask'):
                 ap_obj = ap_data[iou_type][iou_idx][_class]
@@ -1105,13 +1084,6 @@ if __name__ == '__main__':
             calc_map(ap_data)
             exit()
 
-        if args.image is None and args.video is None and args.images is None:
-            dataset = COCODetection(cfg.dataset.valid_images, cfg.dataset.valid_info,
-                                    transform=BaseTransform(), has_gt=cfg.dataset.has_gt)
-            prep_coco_cats()
-        else:
-            dataset = None
-
         print('Loading model...', end='')
         net = STMask()
         net.load_weights(args.trained_model)
@@ -1121,6 +1093,7 @@ if __name__ == '__main__':
         if args.cuda:
             net = net.cuda()
 
-        evaluate(net, dataset)
+        if args.image is None and args.video is None and args.images is None:
+            evaluate(net, cfg.valid_dataset)
 
 

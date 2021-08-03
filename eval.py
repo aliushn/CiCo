@@ -708,19 +708,19 @@ if __name__ == '__main__':
         if cfg.use_train_sub:
             print('load train_sub dataset')
             cfg.train_dataset.has_gt = False
-            val_dataset = get_dataset(cfg.train_dataset, cfg.backbone.transform)
+            val_dataset = get_dataset('vis', cfg.train_dataset, cfg.backbone.transform)
         elif cfg.use_valid_sub:
             print('load valid_sub dataset')
             cfg.valid_sub_dataset.has_gt = False
-            val_dataset = get_dataset(cfg.valid_sub_dataset, cfg.backbone.transform)
+            val_dataset = get_dataset('vis', cfg.valid_sub_dataset, cfg.backbone.transform)
 
         elif cfg.use_test:
             print('load test dataset')
             cfg.test_dataset.has_gt = False
-            val_dataset = get_dataset(cfg.test_dataset, cfg.backbone.transform)
+            val_dataset = get_dataset('vis', cfg.test_dataset, cfg.backbone.transform)
         else:
             print('load valid dataset')
-            val_dataset = get_dataset(cfg.valid_dataset, cfg.backbone.transform)
+            val_dataset = get_dataset('vis', cfg.valid_dataset, cfg.backbone.transform)
     else:
         val_dataset = None
 

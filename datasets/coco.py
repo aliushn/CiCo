@@ -13,10 +13,10 @@ from .utils import ImageList_from_tensors
 
 
 def get_label_map():
-    if cfg.dataset.label_map is None:
-        return {x + 1: x + 1 for x in range(len(cfg.dataset.class_names))}
+    if cfg.train_dataset.label_map is None:
+        return {x + 1: x + 1 for x in range(len(cfg.train_dataset.class_names))}
     else:
-        return cfg.dataset.label_map
+        return cfg.train_dataset.label_map
 
 
 class COCOAnnotationTransform(object):
@@ -96,7 +96,7 @@ class COCODetection(data.Dataset):
                    target is the object returned by ``coco.loadAnns``.
         """
         im, gt, masks, h, w, num_crowds = self.pull_item(index)
-        return im, (gt, masks, num_crowds)
+        return im, (gt, masks, num_crowds), (h, w)
 
     def __len__(self):
         return len(self.ids)
@@ -278,41 +278,38 @@ def detection_collate_coco(batch):
     imgs = []
     masks = []
     num_crowds = []
+    ori_shape = []
 
     for sample in batch:
         imgs.append(sample[0])
-        targets.append(torch.FloatTensor(sample[1][0]))
-        masks.append(torch.FloatTensor(sample[1][1]))
-        num_crowds.append(sample[1][2])
+        if sample[1][0] is not None:
+            targets.append(torch.FloatTensor(sample[1][0]))
+            masks.append(torch.FloatTensor(sample[1][1]))
+            num_crowds.append(sample[1][2])
+        ori_shape.append(sample[2])
+    imgs_batch = torch.stack(imgs, dim=0)
 
-    imgs_batch = ImageList_from_tensors(imgs, size_divisibility=32)
-    image_sizes_ori_h = [im.shape[-2] for im in imgs]
-    image_sizes_ori_w = [im.shape[-1] for im in imgs]
-    h, w = imgs_batch.size()[-2:]
-    for i in range(len(masks)):
-        # padding for bboxes (bboxes with precent coords)
-        targets[i][:, 0:4:2] *= (image_sizes_ori_w[i] / float(w))
-        targets[i][:, 1:4:2] *= (image_sizes_ori_h[i] / float(h))
-
-        padding_size = [0, w - image_sizes_ori_w[i], 0, h - image_sizes_ori_h[i]]
-        masks[i] = F.pad(masks[i], padding_size, value=0)
-
-    return imgs_batch, targets, masks, num_crowds
+    if len(targets) > 0:
+        return imgs_batch, targets, masks, num_crowds, ori_shape
+    else:
+        return imgs_batch, ori_shape
 
 
 def prepare_data_coco(data_batch, devices):
-    images, targets, masks, num_crowds = data_batch
+    images, targets, masks, num_crowds, ori_shape = data_batch
     if images.size(0) % len(devices) != 0:
         idx = [i % images.size(0) for i in range(len(devices))]
-        remainder = images.size(0) % len(devices)
+        remainder = len(devices) - images.size(0) % len(devices)
         images = torch.cat([images, images[idx[:remainder]]])
         targets += [targets[i] for i in idx[:remainder]]
         masks += [masks[i] for i in idx[:remainder]]
         num_crowds += [num_crowds[i] for i in idx[:remainder]]
+        ori_shape += [ori_shape[i] for i in idx[:remainder]]
     n = images.size(0) // len(devices)
 
     with torch.no_grad():
         images_list, masks_list, bboxes_list, labels_list, obj_ids_list, num_crowds_list = [], [], [], [], [], []
+        ori_shape_list = []
         for idx, device in enumerate(devices):
             images_list.append(gradinator(images[idx*n:(idx+1)*n].to(device)))
             masks_list.append([gradinator(masks[jdx].to(device)) for jdx in range(idx*n, (idx+1)*n)])
@@ -320,8 +317,9 @@ def prepare_data_coco(data_batch, devices):
             labels_list.append([gradinator(targets[jdx][:, -1].to(device)) for jdx in range(idx*n, (idx+1)*n)])
             obj_ids_list.append([None] * n)
             num_crowds_list.append(num_crowds[idx*n:(idx+1)*n])
+            ori_shape_list.append(ori_shape[idx*n:(idx+1)*n])
 
-        return images_list, bboxes_list, labels_list, masks_list, obj_ids_list, num_crowds_list
+        return images_list, bboxes_list, labels_list, masks_list, obj_ids_list, num_crowds_list, ori_shape_list
 
 
 def gradinator(x):

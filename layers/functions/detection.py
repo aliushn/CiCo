@@ -31,7 +31,7 @@ class Detect(object):
         
         self.use_cross_class_nms = True
 
-    def __call__(self, net, predictions):
+    def __call__(self, net, candidates):
         """
         Args:
              loc_data: (tensor) Loc preds from loc layers
@@ -51,6 +51,11 @@ class Detect(object):
 
             Note that the outputs are sorted only if cross_class_nms is False
         """
+
+        with timer.env('Detect'):
+            result = []
+            for i in range(len(candidates)):
+                result.append(self.detect(net, candidates[i]))
 
         loc_data = predictions['loc']
         # [bs, h*w*a, n_class] or [bs, h*w*a, 1]

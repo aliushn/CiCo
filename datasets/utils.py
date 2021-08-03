@@ -6,6 +6,7 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 from .augmentations_vis import BaseTransform_vis
+from .augmentations_coco import BaseTransform_coco
 import torch.nn.functional as F
 
 
@@ -99,8 +100,8 @@ def ImageList_from_tensors(
     return batched_imgs.contiguous()
 
 
-def get_dataset(dataset, backbone_transform):
-    if dataset.has_gt:
+def get_dataset(data_type, dataset, backbone_transform, inference=False):
+    if dataset.has_gt and not inference:
         flip, MS_train = True, dataset.MS_train
         resize_gt, pad_gt = True, True
     else:
@@ -108,10 +109,12 @@ def get_dataset(dataset, backbone_transform):
         resize_gt, pad_gt = False, False
 
     from .ytvos import YTVOSDataset
+    from .coco import COCODetection
 
-    dataset = YTVOSDataset(ann_file=dataset.ann_file,
-                           img_prefix=dataset.img_prefix,
-                           transform=BaseTransform_vis(
+    if data_type == 'vis':
+        dataset = YTVOSDataset(ann_file=dataset.ann_file,
+                               img_prefix=dataset.img_prefix,
+                               transform=BaseTransform_vis(
                                     img_scales=dataset.img_scales,
                                     Flip=flip,
                                     MS_train=MS_train,
@@ -119,7 +122,17 @@ def get_dataset(dataset, backbone_transform):
                                     backbone_transform=backbone_transform,
                                     resize_gt=resize_gt,
                                     pad_gt=pad_gt),
-                           has_gt=dataset.has_gt)
+                               has_gt=dataset.has_gt)
+    elif data_type == 'coco':
+        dataset = COCODetection(image_path=dataset.img_prefix,
+                                info_file=dataset.ann_file,
+                                transform=BaseTransform_coco(dataset.img_scales,
+                                                             Flip=flip,
+                                                             MS_train=MS_train,
+                                                             preserve_aspect_ratio=dataset.preserve_aspect_ratio,
+                                                             backbone_transform=backbone_transform,
+                                                             resize_gt=resize_gt,
+                                                             pad_gt=pad_gt))
     return dataset
 
 

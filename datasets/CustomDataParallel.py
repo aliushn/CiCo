@@ -15,7 +15,7 @@ class NetLoss(nn.Module):
         self.net = net
         self.criterion = criterion
 
-    def forward(self, images, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds):
+    def forward(self, images, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds, img_metas):
         preds = self.net(images)
         losses = self.criterion(self.net, preds, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds)
         return losses

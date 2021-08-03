@@ -160,6 +160,7 @@ class PredictionModule(nn.Module):
             else:
                 track = src.track_layer(track_x)
             track = track.permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.track_dim)
+            track = F.normalize(track, dim=-1)
 
         if cfg.use_dcn_mask:
             mask = src.mask_layer(bbox_x, bbox.detach())

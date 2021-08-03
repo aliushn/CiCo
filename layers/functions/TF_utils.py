@@ -155,39 +155,6 @@ def CandidateShift(net, candidate, ref_candidate, img=None, img_meta=None, updat
         return ref_candidate_shift
 
 
-def generate_candidate(predictions):
-    batch_Size = predictions['loc'].size(0)
-
-    candidate = []
-    for i in range(batch_Size):
-        candidate_cur = {}
-        if cfg.train_class:
-            conf_data = predictions['conf'][i].t().contiguous()
-            scores, _ = torch.max(conf_data, dim=0)
-        else:
-            scores = predictions['stuff'][i].view(-1)
-
-        if 'centerness' in predictions.keys():
-            scores *= predictions['centerness'][i].view(-1)
-
-        keep = (scores > cfg.eval_conf_thresh)
-        for k, v in predictions.items():
-            if k in {'proto', 'fpn_feat', 'sem_seg'}:
-                candidate_cur[k] = v[i].unsqueeze(0)
-            elif k == 'track':
-                if cfg.track_by_Gaussian:
-                    candidate_cur[k] = v[i].unsqueeze(0)
-                else:
-                    candidate_cur[k] = v[i][keep]
-            else:
-                candidate_cur[k] = v[i][keep]
-
-        candidate_cur['box'] = decode(candidate_cur['loc'], candidate_cur['priors'])
-        candidate.append(candidate_cur)
-
-    return candidate
-
-
 def merge_candidates(candidate, ref_candidate_clip_shift):
     merged_candidate = {}
     for k, v in candidate.items():
