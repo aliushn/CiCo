@@ -225,7 +225,7 @@ class Track_TF_Clip_json(object):
             for inst_idx in range(len(clip_res)):
                 clip_res[inst_idx]['segmentations'] = clip_res[inst_idx]['segmentations'][self.overlap - n_frames:]
 
-        print(printresults_clip['obj_ids'].tolist())
+        print(results_clip['obj_ids'].tolist())
 
         return clip_res
 

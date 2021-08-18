@@ -1,15 +1,15 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 from collections import defaultdict
 
 from datasets.config import cfg
 from layers.modules import PredictionModule_FC, PredictionModule, make_net, FPN, BiFPN, TemporalNet, DynamicMaskHead
-from layers.functions import Detect, Detect_TF, Track, Track_TF, Track_TF_Clip
-from layers.utils import aligned_bilinear, display_conf_outs
+from layers.functions import Detect, Track, Track_TF, Track_TF_Clip
+from layers.utils import aligned_bilinear, correlate_operator
 from backbone import construct_backbone
 from utils import timer
+from layers.visualization_temporal import display_correlation_map
 
 # This is required for Pytorch 1.0.1 on Windows to initialize Cuda on some driver versions.
 # See the bug report here: https://github.com/pytorch/pytorch/issues/17108
@@ -33,11 +33,22 @@ class STMask(nn.Module):
 
         self.backbone = construct_backbone(cfg.backbone)
         src_channels = self.backbone.channels
+        if cfg.train_track and cfg.clip_prediction_mdoule:
+            self.clip_frames = cfg.train_dataset.clip_frames
+        else:
+            self.clip_frames = 1
+
         if cfg.fpn is not None:
             # Some hacky rewiring to accomodate the FPN
             self.fpn = FPN([src_channels[i] for i in cfg.backbone.selected_layers])
             self.selected_layers = list(range(len(cfg.backbone.selected_layers) + cfg.fpn.num_downsample))
-            src_channels = [cfg.fpn.num_features] * len(self.selected_layers)
+            if cfg.train_track and cfg.clip_prediction_mdoule:
+                if cfg.clip_prediction_with_correlation:
+                    src_channels = [self.clip_frames*cfg.fpn.num_features+cfg.correlation_patch_size**2] * len(self.selected_layers)
+                else:
+                    src_channels = [self.clip_frames * cfg.fpn.num_features] * len(self.selected_layers)
+            else:
+                src_channels = [cfg.fpn.num_features] * len(self.selected_layers)
             if cfg.use_bifpn:
                 self.bifpn = nn.Sequential(*[BiFPN(cfg.fpn.num_features)
                                              for _ in range(cfg.num_bifpn)])
@@ -58,20 +69,21 @@ class STMask(nn.Module):
                 nn.ReLU(inplace=True)
             ]) for _ in range(len(self.proto_src))])
 
-        # The include_last_relu=false here is because we might want to change it to another function
-        self.proto_net, proto_channles = make_net(in_channels, cfg.mask_proto_net, include_bn=True, include_last_relu=True)
-        self.proto_dim = cfg.mask_dim * (len(self.selected_layers) + 1) if cfg.mask_proto_with_levels else cfg.mask_dim
-        # the last two Conv layers for predicting prototypes
-        proto_arch = [(proto_channles, 3, {'padding': 1})] + [(self.proto_dim, 1, {})]
-        self.proto_conv, _ = make_net(proto_channles, proto_arch, include_bn=True, include_last_relu=False)
-        if cfg.use_dynamic_mask:
-            self.DynamicMaskHead = DynamicMaskHead()
+        if cfg.train_masks:
+            # The include_last_relu=false here is because we might want to change it to another function
+            self.proto_net, proto_channles = make_net(in_channels, cfg.mask_proto_net, include_bn=True, include_last_relu=True)
+            self.proto_dim = cfg.mask_dim * (len(self.selected_layers) + 1) if cfg.mask_proto_with_levels else cfg.mask_dim
+            # the last two Conv layers for predicting prototypes
+            proto_arch = [(proto_channles, 3, {'padding': 1})] + [(self.proto_dim, 1, {})]
+            self.proto_conv, _ = make_net(proto_channles, proto_arch, include_bn=True, include_last_relu=False)
+            if cfg.use_dynamic_mask:
+                self.DynamicMaskHead = DynamicMaskHead()
 
         # ------- Build multi-scales prediction head  ------------
         self.pred_scales = cfg.backbone.pred_scales
         self.pred_aspect_ratios = cfg.backbone.pred_aspect_ratios
         self.num_priors = len(self.pred_scales[0])
-        # prediction layers for loc, conf, mask
+        # prediction layers for loc, conf, mask, track
         self.prediction_layers = nn.ModuleList()
         for idx, layer_idx in enumerate(self.selected_layers):
             # If we're sharing prediction module weights, have every module's parent be the first one
@@ -80,13 +92,13 @@ class STMask(nn.Module):
                 parent = self.prediction_layers[0]
 
             if cfg.use_feature_calibration:
-                pred = PredictionModule_FC(src_channels[layer_idx], src_channels[layer_idx],
+                pred = PredictionModule_FC(src_channels[idx],
                                            deform_groups=1,
                                            pred_aspect_ratios=self.pred_aspect_ratios[idx],
                                            pred_scales=self.pred_scales[idx],
                                            parent=parent)
             else:
-                pred = PredictionModule(src_channels[layer_idx], src_channels[layer_idx],
+                pred = PredictionModule(src_channels[idx],
                                         deform_groups=1,
                                         pred_aspect_ratios=self.pred_aspect_ratios[idx],
                                         pred_scales=self.pred_scales[idx],
@@ -95,18 +107,19 @@ class STMask(nn.Module):
             self.prediction_layers.append(pred)
 
         # ---------------- Build detection ----------------
-        self.Detect_TF = Detect_TF(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k,
-                                   conf_thresh=cfg.nms_conf_thresh, nms_thresh=cfg.nms_thresh)
+        self.Detect = Detect(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k,
+                             conf_thresh=cfg.nms_conf_thresh, nms_thresh=cfg.nms_thresh)
 
         # ---------------- Build track head ----------------
         if cfg.train_track:
-            track_arch = [(proto_channles, 3, {'padding': 1})] * 2 + [(cfg.track_dim, 1, {})]
-            self.track_conv, _ = make_net(proto_channles, track_arch, include_bn=True, include_last_relu=False)
+            if cfg.track_by_Gaussian:
+                track_arch = [(in_channels, 3, {'padding': 1})] * 2 + [(cfg.track_dim, 1, {})]
+                self.track_conv, _ = make_net(in_channels, track_arch, include_bn=True, include_last_relu=False)
 
-            if cfg.use_temporal_info:
+            if cfg.use_temporal_info and not cfg.clip_prediction_mdoule:
                 # temporal fusion between multi frames for tracking
                 self.correlation_selected_layer = cfg.correlation_selected_layer
-                if cfg.eval_frames_of_clip > 1:
+                if cfg.eval_clip_frames > 1:
                     self.Track_TF_Clip = Track_TF_Clip()
                 else:
                     self.Track_TF = Track_TF()
@@ -114,22 +127,19 @@ class STMask(nn.Module):
                 # track to segment
                 if cfg.temporal_fusion_module:
                     corr_channels = 2*in_channels + cfg.correlation_patch_size**2
-                    self.TemporalNet = TemporalNet(corr_channels, cfg.mask_dim)
+                    pooling_size = (min(cfg.train_dataset.img_scales[-1])//64, max(cfg.train_dataset.img_scales[-1])//64)
+                    self.TemporalNet = TemporalNet(corr_channels, cfg.mask_dim, pooling_size)
 
             else:
                 # track instance frame-by-frame
                 self.detect = Detect(cfg.num_classes, bkg_label=0, top_k=cfg.nms_top_k, conf_thresh=cfg.nms_conf_thresh,
                                      nms_thresh=cfg.nms_thresh)
-                self.Track = Track()
+                self.Track = Track(self.clip_frames)
 
         if cfg.use_semantic_segmentation_loss:
-            sem_seg_head = [(proto_channles, 3, {'padding': 1})]*2 + [(cfg.num_classes, 1, {})]
-            self.semantic_seg_conv, _ = make_net(proto_channles, sem_seg_head, include_bn=True,
+            sem_seg_head = [(in_channels, 3, {'padding': 1})]*2 + [(cfg.num_classes, 1, {})]
+            self.semantic_seg_conv, _ = make_net(in_channels, sem_seg_head, include_bn=True,
                                                  include_last_relu=False)
-
-        self.candidate_clip = []
-        self.img_meta_clip = []
-        self.imgs_clip = []
 
     def load_weights(self, path):
         """ Loads weights from a compressed save file. """
@@ -169,7 +179,7 @@ class STMask(nn.Module):
                 del state_dict[key]
             elif model_dict[new_key].shape != state_dict[key].shape:
                 del state_dict[key]
-            else:
+            elif new_key != key:
                 state_dict[new_key] = state_dict[key]
                 del state_dict[key]
 
@@ -190,7 +200,7 @@ class STMask(nn.Module):
 
                 nn.init.xavier_uniform_(module.weight.data)
                 if module.bias is not None:
-                    if 'conf_layer' in name:
+                    if cfg.use_focal_loss and 'conf_layer' in name:
                         module.bias.data[0:] = - np.log((1 - cfg.focal_loss_init_pi) / cfg.focal_loss_init_pi)
                     else:
                         module.bias.data.zero_()
@@ -234,7 +244,7 @@ class STMask(nn.Module):
                 nn.init.xavier_uniform_(module.weight.data)
 
                 if module.bias is not None:
-                    if 'conf_layer' in name:
+                    if cfg.use_focal_loss and 'conf_layer' in name:
                         module.bias.data[0:] = - np.log((1 - cfg.focal_loss_init_pi) / cfg.focal_loss_init_pi)
                     else:
                         module.bias.data.zero_()
@@ -242,7 +252,7 @@ class STMask(nn.Module):
     def train(self, mode=True):
         super().train(mode)
 
-    def forward_single(self, x):
+    def forward_single(self, x, img_meta=None):
         """ The input should be of size [batch_size, 3, img_h, img_w] """
 
         with timer.env('backbone'):
@@ -257,55 +267,73 @@ class STMask(nn.Module):
                     fpn_outs = self.bifpn(fpn_outs)
 
         if cfg.eval_mask_branch:
-            with timer.env('proto '):
-                if self.proto_src is None:
-                    proto_x = x
-                else:
-                    if len(self.proto_src) == 1:
-                        proto_x = fpn_outs[self.proto_src[0]]
+            if cfg.train_masks:
+                with timer.env('proto '):
+                    if self.proto_src is None:
+                        proto_x = x
                     else:
-                        for src_i, src in enumerate(self.proto_src):
-                            if src_i == 0:
-                                proto_x = self.mask_refine[src_i](fpn_outs[src])
-                            else:
-                                proto_x_p = self.mask_refine[src_i](fpn_outs[src])
-                                target_h, target_w = proto_x.size()[2:]
-                                h, w = proto_x_p.size()[2:]
-                                assert target_h % h == 0 and target_w % w == 0
-                                factor = target_h // h
-                                proto_x_p = aligned_bilinear(proto_x_p, factor)
-                                proto_x = proto_x + proto_x_p
+                        if len(self.proto_src) == 1:
+                            proto_x = fpn_outs[self.proto_src[0]]
+                        else:
+                            for src_i, src in enumerate(self.proto_src):
+                                if src_i == 0:
+                                    proto_x = self.mask_refine[src_i](fpn_outs[src])
+                                else:
+                                    proto_x_p = self.mask_refine[src_i](fpn_outs[src])
+                                    target_h, target_w = proto_x.size()[2:]
+                                    h, w = proto_x_p.size()[2:]
+                                    assert target_h % h == 0 and target_w % w == 0
+                                    factor = target_h // h
+                                    proto_x_p = aligned_bilinear(proto_x_p, factor)
+                                    proto_x = proto_x + proto_x_p
 
-                proto_out_ori = self.proto_net(proto_x)
-                proto_dict = self.proto_conv(proto_out_ori)
-                if cfg.mask_proto_prototype_activation is not None:
-                    proto_dict = cfg.mask_proto_prototype_activation(proto_dict)
+                    proto_out_ori = self.proto_net(proto_x)
+                    proto_dict = self.proto_conv(proto_out_ori)
+                    if cfg.mask_proto_prototype_activation is not None:
+                        proto_dict = cfg.mask_proto_prototype_activation(proto_dict)
 
-                # Move the features last so the multiplication is easy
-                proto_dict = proto_dict.permute(0, 2, 3, 1).contiguous()
+                    # Move the features last so the multiplication is easy
+                    proto_dict = proto_dict.permute(0, 2, 3, 1).contiguous()
 
         with timer.env('pred_heads'):
-            pred_outs = {'mask_coeff': [], 'priors': [], 'prior_levels': []}
+            pred_outs = {'priors': [], 'prior_levels': []}
+            if cfg.train_masks:
+                pred_outs['mask_coeff'] = []
             if cfg.train_track and not cfg.track_by_Gaussian:
                 pred_outs['track'] = []
-
             if cfg.train_boxes:
                 pred_outs['loc'] = []
-
             if cfg.train_centerness:
                 pred_outs['centerness'] = []
-
             if cfg.train_class:
                 pred_outs['conf'] = []
             else:
                 pred_outs['stuff'] = []
 
             for idx, pred_layer in zip(self.selected_layers, self.prediction_layers):
-                pred_x = fpn_outs[idx]
-
                 # A hack for the way dataparallel works
                 if cfg.share_prediction_module and pred_layer is not self.prediction_layers[0]:
                     pred_layer.parent = [self.prediction_layers[0]]
+
+                if cfg.train_track and cfg.clip_prediction_mdoule:
+                    _, c, h, w = fpn_outs[idx].size()
+                    fpn_outs_clip = fpn_outs[idx].reshape(-1, self.clip_frames, c, h, w)
+                    pred_x = [fpn_outs_clip[:, 0]]
+                    for frame_idx in range(self.clip_frames-1):
+                        if cfg.clip_prediction_with_correlation:
+                            corr = correlate_operator(fpn_outs_clip[:, frame_idx].contiguous(),
+                                                      fpn_outs_clip[:, frame_idx+1].contiguous(),
+                                                      patch_size=cfg.correlation_patch_size,
+                                                      kernel_size=1)
+                            # if idx == 0:
+                            #     x_clip = x.reshape(-1, self.clip_frames, 3, x.size(-2), x.size(-1))
+                            #     display_correlation_map(corr, imgs=x_clip, img_meta=img_meta[-1], idx=idx)
+                            pred_x.append(corr)
+                        pred_x.append(fpn_outs_clip[:, frame_idx+1])
+
+                    pred_x = torch.cat(pred_x, dim=1)
+                else:
+                    pred_x = fpn_outs[idx]
 
                 p = pred_layer(pred_x, idx)
 
@@ -317,54 +345,25 @@ class STMask(nn.Module):
 
         if cfg.train_track and cfg.track_by_Gaussian:
             with timer.env('track_by_Gaussian'):
-                pred_outs['track'] = self.track_conv(proto_x).permute(0, 2, 3, 1).contiguous()
+                pred_outs['track'] = self.track_conv(fpn_outs[0]).permute(0, 2, 3, 1).contiguous()
 
         if cfg.use_semantic_segmentation_loss or not cfg.train_class:
             with timer.env('sem_seg'):
-                pred_outs['sem_seg'] = self.semantic_seg_conv(proto_x).permute(0, 2, 3, 1).contiguous()
+                pred_outs['sem_seg'] = self.semantic_seg_conv(fpn_outs[0]).permute(0, 2, 3, 1).contiguous()
 
-        pred_outs['proto'] = proto_dict
+        if cfg.train_masks:
+            pred_outs['proto'] = proto_dict
 
         return fpn_outs, pred_outs
 
-    def track_clip(self, candidate_clip, img_meta_clip, img_clip=None, first_clip=False, last_clip=False):
-        # n_frame_clip = 2T+1
-        n_frame_clip = cfg.eval_frames_of_clip
-        T = n_frame_clip // 2
-        n_clip, pred_outs_all = 0, []
-        index = torch.zeros(len(candidate_clip))
-        while len(candidate_clip) >= n_frame_clip:
-            pred_outs_cur = self.Track_TF_Clip(self, candidate_clip[:n_frame_clip], img_meta_clip[:n_frame_clip],
-                                               img_clip[:n_frame_clip])
-            if first_clip and n_clip == 0:
-                pred_outs_all += pred_outs_cur
-                index[:n_frame_clip] = 1
-            else:
-                pred_outs_all += pred_outs_cur[T:]
-                min_idx = (n_clip+1)*(n_frame_clip-T)-1
-                max_idx = min_idx + (n_frame_clip-T)
-                index[min_idx:max_idx] = 1
-
-            n_clip += 1
-            candidate_clip = candidate_clip[T+1:]
-            img_meta_clip = img_meta_clip[T+1:]
-
-        if last_clip:
-            if len(candidate_clip) > T:
-                pred_outs_cur = self.Track_TF_Clip(self, candidate_clip, img_meta_clip, img_clip)
-                pred_outs_all += pred_outs_cur[T:]
-                index[T-len(candidate_clip):] = 1
-
-        return index, pred_outs_all
-
     def forward(self, x, img_meta=None):
         batch_size, c, h, w = x.size()
-        fpn_outs, pred_outs = self.forward_single(x)
+        fpn_outs, pred_outs = self.forward_single(x, img_meta)
         # for nn.DataParallel
-        pred_outs['priors'] = pred_outs['priors'].repeat(batch_size, 1, 1)
-        pred_outs['prior_levels'] = pred_outs['prior_levels'].repeat(batch_size, 1)
+        pred_outs['priors'] = pred_outs['priors'].repeat(batch_size//self.clip_frames, 1, 1)
+        pred_outs['prior_levels'] = pred_outs['prior_levels'].repeat(batch_size//self.clip_frames, 1)
 
-        if cfg.train_track and cfg.use_temporal_info:
+        if cfg.train_track and cfg.use_temporal_info and not cfg.clip_prediction_mdoule:
             # calculate correlation map
             pred_outs['fpn_feat'] = fpn_outs[self.correlation_selected_layer]
 
@@ -374,77 +373,30 @@ class STMask(nn.Module):
         else:
 
             if cfg.train_class:
-                pred_outs['conf'] = pred_outs['conf'].sigmoid()
+                if cfg.use_focal_loss:
+                    pred_outs['conf'] = pred_outs['conf'].sigmoid()
+                else:
+                    pred_outs['conf'] = pred_outs['conf'].softmax(dim=-1)
             else:
                 pred_outs['stuff'] = pred_outs['stuff'].sigmoid()
                 pred_outs['sem_seg'] = pred_outs['sem_seg'].sigmoid()
 
-            pred_outs_after_NMS = self.Detect_TF(self, pred_outs)
+            pred_outs_after_NMS = self.Detect(self, pred_outs)
 
             # track instances frame-by-frame
             if cfg.train_track:
-                if cfg.use_temporal_info and cfg.eval_frames_of_clip > 1:
-                    # two-clips
-                    n_frame_eval_clip = cfg.eval_frames_of_clip
-                    T = n_frame_eval_clip // 2
-                    self.imgs_clip += x
-                    self.candidate_clip += pred_outs_after_NMS
-                    self.img_meta_clip += img_meta
-                    n_frames_cur_clip = len(self.candidate_clip)
-                    pred_outs_after_track, out_imgs, out_img_metas = [], [], []
-                    if n_frames_cur_clip >= n_frame_eval_clip:
-                        is_first_idx = [i for i in range(1, n_frames_cur_clip) if self.img_meta_clip[i]['is_first']]
-
-                        if len(is_first_idx) == 0:
-                            # All frames of the clip come from a video
-                            index, pred_outs_after_track = self.track_clip(self.candidate_clip, self.img_meta_clip,
-                                                                           img_clip=self.imgs_clip,
-                                                                           first_clip=self.img_meta_clip[0]['is_first'])
-
-                        elif len(is_first_idx) == 1:
-                            # The frames of the clip consist of two videos, we need to process them one-by-one
-                            index1, pred_outs1 = self.track_clip(self.candidate_clip[:is_first_idx[0]],
-                                                                 self.img_meta_clip[:is_first_idx[0]],
-                                                                 img_clip=self.imgs_clip,
-                                                                 first_clip=False, last_clip=True)
-                            index2, pred_outs2 = self.track_clip(self.candidate_clip[is_first_idx[0]:],
-                                                                 self.img_meta_clip[is_first_idx[0]:],
-                                                                 img_clip=self.imgs_clip,
-                                                                 first_clip=True, last_clip=False)
-                            pred_outs_after_track = pred_outs1 + pred_outs2
-                            index = torch.cat((index1, index2))
-
-                        else:
-                            print('Only support frames that less than 21, please try smaller batch size')
-
-                        # to remove frames that has been processed
-                        # the last T frames will be leaved to guarantee overlapped frames in two adjacent clips
-                        # for tracking between clips
-
-                        keep = index > 0
-                        if keep.sum() > 0:
-                            keep_idx = (torch.arange(n_frames_cur_clip)[keep]).tolist()
-                            out_imgs = self.imgs_clip[min(keep_idx):max(keep_idx)+1]
-                            out_img_metas = self.img_meta_clip[min(keep_idx):max(keep_idx)+1]
-                            self.candidate_clip = self.candidate_clip[max(keep_idx)+1-T:]
-                            self.img_meta_clip = self.img_meta_clip[max(keep_idx)+1-T:]
-                            self.imgs_clip = self.imgs_clip[max(keep_idx)+1-T:]
-                        else:
-                            self.candidate_clip = self.candidate_clip[T:]
-                            self.img_meta_clip = self.img_meta_clip[T:]
-                            self.imgs_clip = self.imgs_clip[T:]
-
-                    return pred_outs_after_track, out_imgs, out_img_metas
+                if cfg.use_temporal_info and cfg.eval_clip_frames > 1:
+                    pred_outs_after_track = self.Track_TF_Clip(self, pred_outs_after_NMS, img_meta, x)
 
                 else:
-                    if cfg.use_temporal_info:
+                    if cfg.use_temporal_info and not cfg.clip_prediction_mdoule:
                         # two-frames
                         pred_outs_after_track = self.Track_TF(self, pred_outs_after_NMS, img_meta, img=x)
 
                     else:
                         pred_outs_after_track = self.Track(pred_outs_after_NMS, img_meta)
 
-                    return pred_outs_after_track, x, img_meta
+                return pred_outs_after_track
 
             else:
                 return pred_outs_after_NMS

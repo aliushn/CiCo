@@ -1,22 +1,19 @@
 # -*- coding: utf-8 -*-
-import torch
 import numpy as np
 import mmcv
 import os
-import pycocotools.mask as mask_util
 from cocoapi.PythonAPI.pycocotools.ytvos import YTVOS
 from cocoapi.PythonAPI.pycocotools.ytvoseval import YTVOSeval
-import matplotlib as plt
-import cv2
+import pycocotools.mask as mask_util
+from matplotlib.patches import Polygon
 
 
-def bbox2result_with_id(preds, img_meta, classes):
+def bbox2result_with_id(preds, img_meta):
     """Convert detection results to a list of numpy arrays.
 
     Args:
         preds (Tensor): shape (n, 5)
         img_meta (Tensor): shape (n, )
-        classes (int): class category, including background class
 
     Returns:
         list(ndarray): bbox results of each class
@@ -38,8 +35,7 @@ def bbox2result_with_id(preds, img_meta, classes):
         if labels is not None:
             for bbox, label, score, segm, obj_id in zip(bboxes, labels, scores, segms, obj_ids):
                 if obj_id >= 0:
-                    results[obj_id] = {'bbox': bbox, 'label': label, 'score': score, 'segm': segm,
-                                       'category': classes[label-1]}
+                    results[obj_id] = {'bbox': bbox, 'label': label, 'score': score, 'segm': segm}
         else:
             for bbox, score, segm, obj_id in zip(bboxes, scores, segms, obj_ids):
                 if obj_id >= 0:
@@ -106,6 +102,58 @@ def results2json_videoseg(results, out_file):
 
     mmcv.dump(json_results, out_file)
     print('Done')
+
+
+def bbox2result_video(results, preds, frame_idx, types=None):
+    """Convert detection results to a list of numpy arrays.
+
+    Args:
+        preds (Tensor): shape (n, 5)
+        classes (list): class category, including background class
+
+    Returns:
+        list(ndarray): bbox results of each class
+    """
+    types = ['segm'] if types is None else types
+
+    if len(results) > 0:
+        for obj_id in results:
+            results[obj_id]['segmentations'] += [None]
+
+    if preds is None or (preds is not None and preds['box'].shape[0] == 0):
+        return results
+    else:
+        bboxes = preds['box'].cpu().numpy()
+        labels = preds['class'].view(-1).cpu().numpy()
+        scores = preds['score'].view(-1).cpu().numpy()
+        segms = preds['mask']
+        obj_ids = preds['box_ids'].view(-1).cpu().numpy()
+        for type in types:
+            if type == 'segm':
+                for label, score, segm, obj_id in zip(labels, scores, segms, obj_ids):
+                    # segm annotation: png2rle
+                    segm = mask_util.encode(np.array(segm.cpu(), order='F', dtype='uint8'))
+                    # .json file can not deal with var with 'bytes'
+                    segm['counts'] = segm['counts'].decode()
+                    if obj_id not in results:
+                        results[obj_id] = {'score': [score], 'category_id': [label],
+                                           'segmentations': [None]*frame_idx + [segm]}
+                    else:
+                        results[obj_id]['score'] += [score]
+                        results[obj_id]['category_id'] += [label]
+                        results[obj_id]['segmentations'][-1] = segm
+
+            elif type == 'bbox':
+                for bbox, label, score, obj_id in zip(bboxes, labels, scores, obj_ids):
+                    if obj_id not in results:
+                        results[obj_id] = {'score': [score], 'category_id': [label],
+                                           'bbox': [None]*frame_idx + [bbox]}
+                    else:
+                        results[obj_id]['score'] += [score]
+                        results[obj_id]['category_id'] += [label]
+                        results[obj_id]['box'][-1] = bbox
+
+        return results
 
 
 def calc_metrics(anno_file, dt_file, output_file=None):

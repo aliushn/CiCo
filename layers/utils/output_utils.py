@@ -3,9 +3,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import cv2
-import pycocotools.mask as mask_util
-from matplotlib.patches import Polygon
 
 from datasets import cfg, MEANS, STD, activation_func
 import os
@@ -83,15 +80,14 @@ def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, interpolation_mode='biline
     return classes, scores, boxes, masks
 
 
-def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
-                       display_mask=False, visualize_lincomb=False, crop_masks=True, score_threshold=0,
-                       img_ids=None, output_file=None):
+def postprocess_ytbvis(dets_output, img_meta, interpolation_mode='bilinear',
+                       visualize_lincomb=False, crop_masks=True, output_file=None):
     """
     Postprocesses the output of Yolact on testing mode into a format that makes sense,
     accounting for all the possible configuration settings.
 
     Args:
-        - det_output: The lost of dicts that Detect outputs.
+        - dets_output: The lost of dicts that Detect outputs.
         - w: The real with of the image.
         - h: The real height of the image.
         - batch_idx: If you have multiple images for this batch, the image's index in the batch.
@@ -103,41 +99,17 @@ def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
         - boxes   [num_det, 4]: The bounding box for each detection in absolute point form.
         - masks   [num_det, h, w]: Full image masks for each detection.
     """
-
-    dets = {}
-    for k, v in detection.items():
+    dets = dict()
+    for k, v in dets_output.items():
         dets[k] = v.clone()
 
     if dets['box'].nelement() == 0:
-        dets['segm'] = torch.Tensor()
         return dets
 
     ori_h, ori_w = img_meta['ori_shape'][:2]
     img_h, img_w = img_meta['img_shape'][:2]
     pad_h, pad_w = img_meta['pad_shape'][:2]
     s_w, s_h = img_w / pad_w, img_h / pad_h
-
-    # double check
-    if score_threshold > 0:
-        keep = dets['score'].view(-1) > score_threshold
-
-        for k, v in dets.items():
-            if k not in {'proto'}:
-                dets[k] = v[keep]
-
-    # Undo the padding introduced with preserve_aspect_ratio
-    if cfg.preserve_aspect_ratio and dets['score'].nelement() != 0:
-        # Get rid of any detections whose centers are outside the image
-        boxes = dets['box']
-        boxes = center_size(boxes)
-        not_outside = ((boxes[:, 0] > s_w) + (boxes[:, 1] > s_h)) < 1  # not (a or b)
-        for k, v in dets.items():
-            if k not in {'proto'}:
-                dets[k] = v[not_outside]
-
-    if dets['score'].nelement() == 0:
-        dets['segm'] = torch.Tensor()
-        return dets
 
     # Actually extract everything from dets now
     boxes = dets['box']
@@ -150,26 +122,20 @@ def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
         masks_non_target = None
 
     if visualize_lincomb:
-        display_lincomb(dets['proto'], masks, mask_coeff, img_ids, output_file, masks_non_target)
+        img_ids = (img_meta['video_id'], img_meta['frame_id'])
+        proto = dets['proto'][:int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
+        display_lincomb(proto, masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))],
+                        mask_coeff, img_ids, output_file, masks_non_target)
 
     # Undo padding for masks
     masks = masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
     # Scale masks up to the full image
+    masks = masks.squeeze(-1) if masks.dim() == 4 else masks
     masks = F.interpolate(masks.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode,
                           align_corners=False).squeeze(0)
     # Binarize the masks
     masks.gt_(0.5)
-
-    if display_mask:
-        dets['segm'] = masks
-    else:
-        # segm annotation: png2rle
-        masks_output_json = []
-        for i in range(masks.size(0)):
-            cur_mask = mask_util.encode(np.array(masks[i].cpu(), order='F', dtype='uint8'))
-            # masks[i, :, :] = torch.from_numpy(mask_util.decode(cur_mask)).cuda()
-            masks_output_json.append(cur_mask)
-        dets['segm'] = masks_output_json
+    dets['mask'] = masks
 
     # Undo padding for bboxes
     boxes[:, 0::2] /= s_w
@@ -178,8 +144,7 @@ def postprocess_ytbvis(detection, img_meta, interpolation_mode='bilinear',
     boxes[:, 0], boxes[:, 2] = sanitize_coordinates(boxes[:, 0], boxes[:, 2], ori_w, cast=False)
     boxes[:, 1], boxes[:, 3] = sanitize_coordinates(boxes[:, 1], boxes[:, 3], ori_h, cast=False)
 
-    boxes = boxes.long()
-    dets['box'] = boxes
+    dets['box'] = boxes.long()
 
     return dets
 
@@ -247,9 +212,9 @@ def display_lincomb(protos_data, out_masks, masks_coeff=None, img_ids=None, outp
                 running_total_nonlin = running_total
                 if cfg.mask_proto_mask_activation == activation_func.sigmoid:
                     running_total_nonlin = (1 / (1 + np.exp(-running_total_nonlin)))
-
+                print(torch.min(proto_data_cur), torch.max(proto_data_cur))
                 arr_img[y * proto_h:(y + 1) * proto_h, x * proto_w:(x + 1) * proto_w] = \
-                    ((proto_data_cur - torch.min(proto_data_cur)) / torch.max(proto_data_cur)).cpu().numpy()   # * coeffs_sort[i]
+                    ((proto_data_cur - torch.min(proto_data_cur)) / torch.max(proto_data_cur)+1e-5).cpu().numpy()   # * coeffs_sort[i]
                 arr_run[y * proto_h:(y + 1) * proto_h, x * proto_w:(x + 1) * proto_w] = (
                             running_total_nonlin > 0.5).astype(np.float)
         plt.imshow(arr_img)

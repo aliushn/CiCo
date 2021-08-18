@@ -25,6 +25,9 @@ class Track_TF(object):
     def __init__(self):
         self.prev_candidate = None
         self.easy_match = False
+        self.img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
+        if cfg.track_by_Gaussian:
+            self.img_level_keys += 'track'
 
     def __call__(self, net, candidates, imgs_meta, img=None):
         """
@@ -44,7 +47,7 @@ class Track_TF(object):
 
             # only support batch_size = 1 for video test
             for batch_idx in range(batch_size):
-                candidates[batch_idx] = self.track(net, candidates[batch_idx], imgs_meta[batch_idx], img=img[batch_idx])
+                self.track(net, candidates[batch_idx], imgs_meta[batch_idx], img=img[batch_idx])
 
         return candidates
 
@@ -55,80 +58,62 @@ class Track_TF(object):
             self.prev_candidate = None
 
         if candidate['box'].nelement() == 0:
-            return {'box': torch.Tensor(), 'box_ids': torch.Tensor(), 'mask_coeff': torch.Tensor(),
-                    'class': torch.Tensor(), 'score': torch.Tensor()}
+            candidate['box_ids'] = torch.Tensor()
+            return candidate
 
         assert candidate['box'].nelement() > 0
         # get bbox and class after NMS
         det_bbox = candidate['box']
         det_score, det_labels = candidate['score'], candidate['class']
-        # get masks
-        det_masks_soft = candidate['mask']
+        det_masks_soft = candidate['mask'] if cfg.train_mask else None
         if cfg.use_semantic_segmentation_loss:
             sem_seg = candidate['sem_seg'].squeeze(0).permute(2, 0, 1).contiguous()
 
-        det_track_embed = candidate['track']
         if cfg.track_by_Gaussian:
-            det_track_mu, det_track_var = generate_track_gaussian(det_track_embed.squeeze(0), det_masks_soft, det_bbox)
-            candidate['track_mu'] = det_track_mu
-            candidate['track_var'] = det_track_var
-        else:
-            candidate['track'] = det_track_embed
+            candidate['track_mu'], candidate['track_var'] = generate_track_gaussian(candidate['track'].squeeze(0),
+                                                                                    det_masks_soft, det_bbox)
 
         n_dets = det_bbox.size(0)
+        candidate['tracked_mask'] = torch.zeros(n_dets)
 
         # compared bboxes in current frame with bboxes in previous frame to achieve tracking
         if is_first or (not is_first and self.prev_candidate is None):
+            det_obj_ids = torch.arange(n_dets)
             # save bbox and features for later matching
             self.prev_candidate = dict()
             for k, v in candidate.items():
                 self.prev_candidate[k] = v.clone()
-            self.prev_candidate['tracked_mask'] = torch.zeros(n_dets)
 
         else:
 
             assert self.prev_candidate is not None
-            if cfg.track_by_Gaussian:
-                img_level_keys = {'proto', 'fpn_feat', 'sem_seg', 'track', 'tracked_mask'}
-            else:
-                img_level_keys = {'proto', 'fpn_feat', 'sem_seg', 'tracked_mask'}
 
             # tracked mask: to track masks from previous frames to current frame
-            prev_candidate_shift = CandidateShift(net, candidate, self.prev_candidate, img=img, img_meta=img_meta,
-                                                  update_track=False)
-
-            for k, v in prev_candidate_shift.items():
-                self.prev_candidate[k] = v.clone()
-            self.prev_candidate['tracked_mask'] += 1
+            CandidateShift(net, candidate, self.prev_candidate, img=img, img_meta=img_meta, update_track=False)
 
             # calculate KL divergence for Gaussian distribution of isntances
             n_prev = self.prev_candidate['box'].size(0)
-            mask_ious = mask_iou(det_masks_soft.gt(0.5).float(),
-                                 self.prev_candidate['mask'].gt(0.5))  # [n_dets, n_prev]
-
-            # translate match_ids to det_obj_ids, assign new id to new objects
-            # update tracking features/bboxes of exisiting object,
-            # add tracking features/bboxes of new object
-            det_obj_ids = torch.ones(n_dets, dtype=torch.int64) * (-1)
-            best_match_scores = torch.ones(n_prev) * (-1)
-            best_match_idx = torch.ones(n_prev, dtype=torch.int64) * (-1)
+            # Calculate BIoU and MIoU between detected masks and tracked masks for assign IDs
+            bbox_ious = compute_DIoU(det_bbox, self.prev_candidate['box'])  # [n_dets, n_prev]
+            label_delta = (self.prev_candidate['class'] == det_labels.view(-1, 1)).float()
+            if cfg.train_mask:
+                mask_ious = mask_iou(det_masks_soft.gt(0.5).float(),
+                                     self.prev_candidate['mask'].gt(0.5))  # [n_dets, n_prev]
+            else:
+                mask_ious = torch.zeros_like(bbox_ious)
 
             if cfg.track_by_Gaussian:
                 kl_divergence = compute_kl_div(self.prev_candidate['track_mu'], self.prev_candidate['track_var'],
-                                               det_track_mu, det_track_var)    # value in [[0, +infinite]]
+                                               candidate['track_mu'], candidate['track_var'])    # value in [[0, +infinite]]
                 sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10.
                 # from [0, +infinite] to [0, 1]: sim = 1/ (exp(0.1*kl_div)), threshold  = 10
                 sim = torch.div(1., torch.exp(0.1 * torch.cat([sim_dummy, kl_divergence], dim=-1)))
                 # from [0, +infinite] to [0, 1]: sim = exp(1-kl_div)), threshold  = 5
                 # sim = torch.exp(1 - torch.cat([sim_dummy, kl_divergence], dim=-1))
             else:
-                cos_sim = det_track_embed @ self.prev_candidate['track'].t()  # [n_dets, n_prev], val in [-1, 1]
+                cos_sim = candidate['track'] @ self.prev_candidate['track'].t()  # [n_dets, n_prev], val in [-1, 1]
                 cos_sim = torch.cat([torch.zeros(n_dets, 1), cos_sim], dim=1)
                 sim = (cos_sim + 1) / 2  # [0, 1]
-
-            # Calculate BIoU and MIoU between detected masks and tracked masks for assign IDs
-            bbox_ious = compute_DIoU(det_bbox, self.prev_candidate['box'])  # [n_dets, n_prev]
-            label_delta = (self.prev_candidate['class'] == det_labels.view(-1, 1)).float()
 
             # compute comprehensive score
             comp_scores = compute_comp_scores(sim,
@@ -141,21 +126,25 @@ class Track_TF(object):
                                               match_coeff=cfg.match_coeff)
             # only need to do that for isntances whose Mask IoU is lower than 0.9
             match_likelihood, match_ids = torch.max(comp_scores, dim=1)
-            idx = 0
+
+            # translate match_ids to det_obj_ids, assign new id to new objects
+            # update tracking features/bboxes of exisiting object,
+            # add tracking features/bboxes of new object
+            det_obj_ids = torch.ones(n_dets, dtype=torch.int64) * (-1)
+            best_match_scores = torch.ones(n_prev) * (-1)
+            best_match_idx = torch.ones(n_prev, dtype=torch.int64) * (-1)
             for match_idx, match_id in enumerate(match_ids):
                 if match_id == 0:
                     det_obj_ids[match_idx] = self.prev_candidate['box'].size(0)
                     for k, v in self.prev_candidate.items():
-                        if k not in img_level_keys:
+                        if k not in self.img_level_keys + ['box_ids']:
                             self.prev_candidate[k] = torch.cat([v, candidate[k][match_idx][None]], dim=0)
-                    self.prev_candidate['tracked_mask'] = torch.cat([self.prev_candidate['tracked_mask'],
-                                                                     torch.zeros(1)], dim=0)
 
                 else:
                     # multiple candidate might match with previous object, here we choose the one with
                     # largest comprehensive score
                     obj_id = match_id - 1
-                    match_score = match_likelihood[idx]
+                    match_score = match_likelihood[match_idx]
                     if match_score > best_match_scores[obj_id]:
                         if best_match_idx[obj_id] != -1:
                             det_obj_ids[int(best_match_idx[obj_id])] = -1
@@ -164,41 +153,34 @@ class Track_TF(object):
                         best_match_idx[obj_id] = match_idx
                         # udpate feature
                         for k, v in self.prev_candidate.items():
-                            if k not in img_level_keys:
+                            if k not in self.img_level_keys + ['box_ids']:
                                 self.prev_candidate[k][obj_id] = candidate[k][match_idx]
-                        self.prev_candidate['tracked_mask'][obj_id] = 0
-                idx += 1
 
-        # whether add some tracked masks
-        cond1 = self.prev_candidate['tracked_mask'] <= 7
-        # whether tracked masks are greater than a small threshold, which removes some false positives
-        cond2 = self.prev_candidate['mask'].gt(0.5).sum([1, 2]) > 0
+        self.prev_candidate['box_ids'] = torch.arange(self.prev_candidate['box'].size(0))
+        candidate['box_ids'] = det_obj_ids
+
+        # Whether add some objects whose masks are tracked form previous frames by Temporal Fusion Module
+        cond1 = (self.prev_candidate['tracked_mask'] > 0) & (self.prev_candidate['tracked_mask'] <= 7)
         # a declining weights (0.8) to remove some false positives that cased by consecutively track to segment
-        cond3 = self.prev_candidate['score'].clone().detach() > cfg.eval_conf_thresh
+        cond2 = self.prev_candidate['score'].clone().detach() > 0.5*cfg.eval_conf_thresh
+        keep_tracked_objs = cond1 & cond2
+        if cfg.train_mask:
+            # whether tracked masks are greater than a small threshold, which removes some false positives
+            cond3 = self.prev_candidate['mask'].gt(0.5).sum([1, 2]) > 0
+            keep_tracked_objs = keep_tracked_objs & cond3
+        # Choose objects detected and segmented by frame-level prediction head
+        keep_detected_objs = det_obj_ids >= 0
 
-        # missed_idx = self.prev_candidate['tracked_mask'] > 0
-        # if area_box / area_mask < 0.2 and score < 0.2, the box is likely to be wrong.
-        # boxes_c = center_size(self.prev_candidate['box'])
-        # area_box = boxes_c[:, 2] * boxes_c[:, 3] * det_masks_soft.size(1) * det_masks_soft.size(2)
-        # area_mask = self.prev_candidate['mask'].gt(0.5).float().sum(dim=(1, 2))
-        # area_rate = area_mask / area_box
-        # cond4 = area_rate > 0.2
-
-        keep = cond1 & cond2 & cond3
-
-        if keep.sum() == 0:
-            detection = {'box': torch.Tensor(), 'box_ids': torch.Tensor(), 'mask_coeff': torch.Tensor(),
-                         'class': torch.Tensor(), 'score': torch.Tensor()}
+        if keep_detected_objs.sum() + keep_tracked_objs.sum() == 0:
+            candidate['box_ids'] = torch.Tensor()
         else:
-            det_obj_ids = torch.arange(self.prev_candidate['box'].size(0))
-            detection = {'box': self.prev_candidate['box'][keep], 'box_ids': det_obj_ids[keep],
-                         'class': self.prev_candidate['class'][keep], 'score': self.prev_candidate['score'][keep],
-                         'mask_coeff': self.prev_candidate['mask_coeff'][keep], 'proto': self.prev_candidate['proto'],
-                         'mask': self.prev_candidate['mask'][keep],
-                         'tracked_mask': self.prev_candidate['tracked_mask'][keep]}
-            if cfg.train_centerness:
-                detection['centerness'] = self.prev_candidate['centerness'][keep]
-            if cfg.mask_proto_coeff_occlusion:
-                detection['mask_non_target'] = self.prev_candidate['mask_non_target'][keep]
+            for k, v in candidate.items():
+                if k not in self.img_level_keys:
+                    if keep_detected_objs.sum() == 0:
+                        candidate[k] = self.prev_candidate[k][keep_tracked_objs]
+                    elif keep_tracked_objs.sum() == 0:
+                        candidate[k] = v[keep_detected_objs]
+                    else:
+                        candidate[k] = torch.cat([v[keep_detected_objs], self.prev_candidate[k][keep_tracked_objs]])
 
-        return detection
+        return candidate

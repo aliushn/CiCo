@@ -113,7 +113,7 @@ def generate_mask(proto_data, mask_coeff, bbox=None, fpn_levels=None):
         pred_masks = generate_single_mask(proto_data, mask_coeff_expand.reshape(n, -1))
         pred_masks = cfg.mask_proto_mask_activation(pred_masks)
         if bbox is not None:
-            _, pred_masks = crop(pred_masks, bbox)
+            pred_masks = crop(pred_masks, bbox)
 
     else:
 
@@ -132,7 +132,7 @@ def generate_mask(proto_data, mask_coeff, bbox=None, fpn_levels=None):
             pred_masks = torch.stack([pred_masks_b, pred_masks_t, pred_masks_o], dim=-2)    # [h, w, 3, n]
         pred_masks = cfg.mask_proto_mask_activation(pred_masks)
         if bbox is not None:
-            _, pred_masks = crop(pred_masks, bbox)                                          # [h, w, n] or [h, w, 3, n]
+            pred_masks = crop(pred_masks, bbox)                                          # [h, w, n] or [h, w, 3, n]
 
     if dim_proto == 3:
         pred_masks = pred_masks.permute(2, 0, 1).contiguous()                               # [n, h, w]

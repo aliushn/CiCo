@@ -21,6 +21,10 @@ def Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
     confidence score and locations, as the predicted masks.
     """
 
+    img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
+    if cfg.track_by_Gaussian:
+        img_level_keys += ['track']
+
     with timer.env('Track_TF'):
         prev_candidate = None
         results = []
@@ -30,60 +34,47 @@ def Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
             img_meta = imgs_meta[batch_idx]
             img = imgs[batch_idx]
 
+            candidate['tracked_mask'] = torch.zeros(candidate['box'].size(0))
+
             # compared bboxes in current frame with bboxes in previous frame to achieve tracking
             if prev_candidate is None:
-                if candidate['box'].nelement() == 0:
-                    candidate['box_ids'] = torch.Tensor()
-                    results.append(candidate)
-                    continue
-                else:
+                if candidate['box'].nelement() > 0:
                     # save bbox and features for later matching
-                    det_track_embed = candidate['track']
                     if cfg.track_by_Gaussian:
-                        det_track_mu, det_track_var = generate_track_gaussian(det_track_embed.squeeze(0),
-                                                                              candidate['mask'],
-                                                                              candidate['box'])
-                        candidate['track_mu'] = det_track_mu
-                        candidate['track_var'] = det_track_var
+                        candidate['track_mu'], candidate['track_var'] = generate_track_gaussian(candidate['track'].squeeze(0),
+                                                                                                candidate['mask'],
+                                                                                                candidate['box'])
 
                     prev_candidate = dict()
                     for k, v in candidate.items():
                         prev_candidate[k] = v.clone()
-                    prev_candidate['tracked_mask'] = torch.zeros(prev_candidate['box'].size(0))
 
             else:
 
-                # tracked mask: to track masks from previous frames to current frame
-                prev_candidate_shift = CandidateShift(net, candidate, prev_candidate, img=img, img_meta=img_meta,
-                                                      update_track=False)
-                for k, v in prev_candidate_shift.items():
-                    prev_candidate[k] = v.clone()
-                prev_candidate['tracked_mask'] = prev_candidate['tracked_mask'] + 1
+                # Temporal Fusion Module: to track masks from previous frames to current frame
+                CandidateShift(net, candidate, prev_candidate, img=img, img_meta=img_meta, update_track=False)
 
                 if candidate['box'].nelement() > 0:
                     # get bbox and class after NMS
                     det_bbox = candidate['box']
                     det_score, det_labels = candidate['score'], candidate['class']
-                    # get masks
                     det_masks_soft = candidate['mask']
                     if cfg.use_semantic_segmentation_loss:
                         sem_seg = candidate['sem_seg'].squeeze(0).permute(2, 0, 1).contiguous()
 
-                    det_track_embed = candidate['track']
                     if cfg.track_by_Gaussian and candidate['box'].nelement() > 0:
-                        det_track_mu, det_track_var = generate_track_gaussian(det_track_embed.squeeze(0),
-                                                                              det_masks_soft,
-                                                                              det_bbox)
-                        candidate['track_mu'] = det_track_mu
-                        candidate['track_var'] = det_track_var
+                        candidate['track_mu'], candidate['track_var'] = generate_track_gaussian(candidate['track'].squeeze(0),
+                                                                                                det_masks_soft,
+                                                                                                det_bbox)
 
-                    # calculate KL divergence for Gaussian distribution of isntances
+                    # Compute KL divergence for Gaussian distribution of isntances
                     n_dets = det_bbox.size(0)
                     n_prev = prev_candidate['box'].size(0)
 
                     if cfg.track_by_Gaussian:
+                        # value in [[0, +infinite]]
                         kl_divergence = compute_kl_div(prev_candidate['track_mu'], prev_candidate['track_var'],
-                                                       det_track_mu, det_track_var)    # value in [[0, +infinite]]
+                                                       candidate['track_mu'], candidate['track_var'])
                         sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10.
                         # from [0, +infinite] to [0, 1]: sim = 1/ (exp(0.1*kl_div)), threshold=10
                         sim = torch.div(1., torch.exp(0.1 * torch.cat([sim_dummy, kl_divergence], dim=-1)))
@@ -91,13 +82,13 @@ def Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
                         # sim = torch.exp(1 - torch.cat([sim_dummy, kl_divergence], dim=-1))
 
                     else:
-                        cos_sim = det_track_embed @ prev_candidate['track'].t()  # [n_dets, n_prev], val in [-1, 1]
+                        cos_sim = candidate['track'] @ prev_candidate['track'].t()  # [n_dets, n_prev], val in [-1, 1]
                         cos_sim = torch.cat([torch.zeros(n_dets, 1), cos_sim], dim=1)
                         sim = (cos_sim + 1) / 2  # [0, 1]
 
                     # Calculate BIoU and MIoU between detected masks and tracked masks for assign IDs
-                    bbox_ious = compute_DIoU(det_bbox, prev_candidate['box'])  # [n_dets, n_prev]
-                    mask_ious = mask_iou(det_masks_soft.gt(0.5).float(), prev_candidate['mask'].gt(0.5))  # [n_dets, n_prev]
+                    bbox_ious = compute_DIoU(det_bbox, prev_candidate['box'])                       # [n_dets, n_prev]
+                    mask_ious = mask_iou(det_masks_soft.gt(0.5).float(), prev_candidate['mask'].gt(0.5))
                     label_delta = (prev_candidate['class'] == det_labels.view(-1, 1)).float()
 
                     # compute comprehensive score
@@ -108,8 +99,7 @@ def Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
                                                       label_delta,
                                                       add_bbox_dummy=True,
                                                       bbox_dummy_iou=0.3,
-                                                      match_coeff=cfg.match_coeff,
-                                                      use_FEELVOS=cfg.use_FEELVOS)
+                                                      match_coeff=cfg.match_coeff)
 
                     match_likelihood, match_ids = torch.max(comp_scores, dim=1)
                     # translate match_ids to det_obj_ids, assign new id to new objects
@@ -122,10 +112,8 @@ def Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
                         if match_id == 0:
                             det_obj_ids[idx] = prev_candidate['box'].size(0)
                             for k, v in prev_candidate.items():
-                                if k not in {'proto', 'fpn_feat', 'track', 'sem_seg', 'tracked_mask'}:
+                                if k not in img_level_keys:
                                     prev_candidate[k] = torch.cat([v, candidate[k][idx][None]], dim=0)
-                            prev_candidate['tracked_mask'] = torch.cat([prev_candidate['tracked_mask'],
-                                                                        torch.zeros(1)], dim=0)
 
                         else:
                             # multiple candidate might match with previous object, here we choose the one with
@@ -140,16 +128,14 @@ def Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
                                 best_match_idx[obj_id] = idx
                                 # udpate feature
                                 for k, v in prev_candidate.items():
-                                    if k not in {'proto', 'fpn_feat', 'track', 'sem_seg', 'tracked_mask'}:
+                                    if k not in img_level_keys:
                                         prev_candidate[k][obj_id] = candidate[k][idx]
-                                prev_candidate['tracked_mask'][obj_id] = 0
 
-            result = dict()
-            for k, v in prev_candidate.items():
-                result[k] = v.clone()
+                for k, v in prev_candidate.items():
+                    candidate[k] = v.clone()
 
-            result['box_ids'] = torch.arange(prev_candidate['box'].size(0))
-            results.append(result)
+            candidate['box_ids'] = torch.arange(candidate['box'].size(0))
+            results.append(candidate)
 
         return results
 
@@ -168,12 +154,17 @@ def Backward_Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
         Note that the outputs are sorted only if cross_class_nms is False
     """
 
+    img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
+    if cfg.track_by_Gaussian:
+        img_level_keys += ['track']
+
     with timer.env('Track_TF'):
         prev_candidate = None
-        results = []
+        n_frames = len(candidates)
 
         # only support batch_size = 1 for video test
-        for batch_idx, candidate in enumerate(candidates):
+        for batch_idx in range(n_frames-1, -1, -1):
+            candidate = candidates[batch_idx]
             img_meta = imgs_meta[batch_idx]
             img = imgs[batch_idx]
 
@@ -193,28 +184,20 @@ def Backward_Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
                 else:
 
                     # tracked mask: to track masks from previous frames to current frame
-                    prev_candidate_shift = CandidateShift(net, candidate, prev_candidate,
-                                                          img=img, img_meta=img_meta, update_track=False)
-                    for k, v in prev_candidate_shift.items():
-                        prev_candidate[k] = v.clone()
-                    prev_candidate['tracked_mask'] += 1
+                    CandidateShift(net, candidate, prev_candidate, img=img, img_meta=img_meta, update_track=False)
 
                     for idx_prev, box_id in enumerate(prev_candidate['box_ids']):
                         if box_id in candidate['box_ids']:
                             idx_det = candidate['box_ids'].tolist().index(box_id.item())
-                            # estimated masks from closer frames will be given a priority
+                            #  Masks estimated from closer frames will be given a priority
                             if candidate['tracked_mask'][idx_det] < prev_candidate['tracked_mask'][idx_prev]:
                                 for k, v in candidate.items():
-                                    if k not in {'proto', 'fpn_feat', 'track', 'sem_seg'}:
+                                    if k not in img_level_keys:
                                         prev_candidate[k][idx_prev] = v[idx_det].clone()
 
-            result = dict()
-            for k, v in prev_candidate.items():
-                if k not in {'proto', 'fpn_feat', 'track', 'sem_seg'}:
-                    result[k] = v.clone()
+                    for k, v in prev_candidate.items():
+                        if k not in img_level_keys:
+                            candidate[k] = v.clone()
 
-            result['proto'] = candidate['proto']
-            results.append(result)
-
-        return results[::-1]
+        return candidates
 

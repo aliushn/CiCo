@@ -7,14 +7,12 @@ from STMask import STMask
 import os
 import time
 import torch
-from datasets import prepare_data_vis, prepare_data_coco
 import torch.optim as optim
 import torch.utils.data as data
 import argparse
 import datetime
 
 import torch.distributed as dist
-from layers.utils.eval_utils import calc_metrics
 
 # Oof
 import eval as eval_script
@@ -87,8 +85,8 @@ def replace(name):
     if getattr(args, name) == None: setattr(args, name, getattr(cfg, name))
 
 
-loss_types = ['B', 'BIoU', 'center', 'Rep', 'C', 'stuff', 'M_bce', 'M_dice', 'M_coeff',  'T', 'B_shift', 'BIoU_shift', 'M_shift',
-              'P', 'D', 'S', 'I']
+loss_types = ['B', 'BIoU', 'center', 'Rep', 'C', 'C_focal', 'stuff', 'M_bce', 'M_dice', 'M_coeff',
+              'T', 'B_shift', 'BIoU_shift', 'M_shift', 'P', 'D', 'S', 'I']
 
 
 def train():
@@ -222,7 +220,7 @@ def train():
 
                 else:
                     losses = netloss(data_batch)
-                    losses = {k: (v).mean() for k, v in losses.items()}  # Mean here because Dataparallel
+                    losses = {k: v.mean() for k, v in losses.items()}  # Mean here because Dataparallel
 
                 loss = sum([losses[k] for k in losses])  # same weights in three sub-losses
                 loss.backward()  # Do this to free up vram even if loss is not finite
@@ -257,9 +255,7 @@ def train():
                     log.log('train', loss=loss_info, epoch=epoch, iter=iteration,
                             lr=round(cur_lr, 10), elapsed=elapsed)
 
-                # if args.save_interval > 0:
-                #     if epoch % args.save_interval == 0 and args.local_rank == 0:
-                if iteration % args.save_interval == 0 and iteration > 1 and args.local_rank == 0:
+                if iteration % args.save_interval == 0 and epoch > 0 and args.local_rank == 0:
                     if args.keep_latest:
                         latest = SavePath.get_latest(args.save_folder, cfg.name)
 
@@ -271,27 +267,19 @@ def train():
                             print('Deleting old save...')
                             os.remove(latest)
 
-                    # This is done per epoch
-                    save_path_valid_metrics = save_path(epoch, iteration).replace('.pth', '.json')
-
                     if args.save_interval > 0:
                         if cfg.data_type == 'vis':
-                            setup_eval()
+                            print('None Inference!')
+                            # setup_eval()
                             # valid_sub, the last one ten of training data
-                            cfg.valid_sub_dataset.has_gt = False
-                            valid_sub_dataset = get_dataset('vis', cfg.valid_sub_dataset, cfg.backbone.transform)
-
-                            compute_validation_map(net, valid_sub_dataset,
-                                                   output_metrics_file=save_path_valid_metrics)
-                            print('calculate evaluation metrics for valid_sub data (divided from traning data) ...')
-                            ann_file = cfg.valid_sub_dataset.ann_file
-                            dt_file = save_path_valid_metrics
-                            calc_metrics(ann_file, dt_file, output_file=save_path_valid_metrics.replace('.json', '.txt'))
+                            # cfg.valid_sub_dataset.has_gt = False
+                            # valid_sub_dataset = get_dataset(cfg.data_type, cfg.valid_sub_dataset, cfg.backbone.transform)
+                            # valid_sub_ann_file = cfg.valid_sub_dataset.ann_file
+                            # compute_validation_map(net, valid_sub_dataset, ann_file=valid_sub_ann_file, epoch=epoch)
 
                             # valid datasets
-                            # valid_dataset = get_dataset(cfg.valid_dataset, cfg.backbone.transform)
-                            # compute_validation_map(net, valid_dataset,
-                            #                        output_metrics_file=save_path_valid_metrics)
+                            # valid_dataset = get_dataset(cfg.data_type, cfg.valid_dataset, cfg.backbone.transform)
+                            # compute_validation_map(net, valid_dataset, epoch=epoch)
                         else:
                             setup_eval_coco()
                             compute_validation_map_coco(epoch, iteration, net, cfg.valid_dataset, log if args.log else None)
@@ -382,12 +370,15 @@ def compute_validation_loss(net, data_loader, dataset_size):
     return loss_labels
 
 
-def compute_validation_map(net, dataset, output_metrics_file=None):
+def compute_validation_map(net, dataset, ann_file=None, epoch=-1):
     with torch.no_grad():
         net.eval()
         print()
         print("Computing validation mAP (this may take a while)...", flush=True)
-        eval_script.validation(net, dataset, output_metrics_file=output_metrics_file)
+        if cfg.clip_prediction_mdoule:
+            eval_script.evaluate_clip(net, dataset, ann_file=ann_file, epoch=epoch)
+        else:
+            eval_script.evaluate(net, dataset, ann_file=ann_file, epoch=epoch)
 
         net.train()
 
@@ -409,11 +400,10 @@ def compute_validation_map_coco(epoch, iteration, net, dataset_config, log: Log 
 
 
 def setup_eval():
-    eval_script.parse_args(['--no_bar',
-                            '--batch_size=' + str(args.eval_batch_size),
-                            '--output_json',
+    eval_script.parse_args(['--batch_size=' + str(args.eval_batch_size),
                             '--score_threshold=' + str(cfg.eval_conf_thresh),
-                            '--mask_det_file='+args.save_folder+'eval_mask_det.json'])
+                            '--save_folder=' + args.save_folder,
+                            ])
 
 
 def setup_eval_coco():

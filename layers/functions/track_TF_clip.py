@@ -29,7 +29,7 @@ class Track_TF_Clip(object):
         # used for two clips, so the threshold should be small
         self.bbox_dummy_iou = 0.1
 
-    def __call__(self, net, candidates, img_metas, img=None):
+    def __call__(self, net, candidates, img_metas, imgs=None):
         """
         Args:
              loc_data: (tensor) Loc preds from loc layers
@@ -58,40 +58,40 @@ class Track_TF_Clip(object):
 
             else:
                 # first tracking within a clip and then tracking within clips
-                results = self.track_clips(net, candidates, is_first, img_metas=img_metas, img=img)
+                results = self.track_clips(net, candidates, is_first, img_metas=img_metas, imgs=imgs)
 
         return results
 
-    def track_clips(self, net, candidates, is_first, img_metas=None, img=None):
+    def track_clips(self, net, candidates, is_first, img_metas=None, imgs=None):
         n_frames = len(candidates)
 
-        # forward_tracking: assign instances IDs for each frame
-        results = Track_TF_within_clip(net, candidates, img_metas, img)
+        # Forward_tracking: assign instances IDs for each frame
+        candidates = Track_TF_within_clip(net, candidates, img_metas, imgs)
 
-        # backward shift for adding missed objects
-        results = Backward_Track_TF_within_clip(net, results[::-1], img_metas[::-1], img[::-1])
-        results_clip = Fold_candidates_by_order(results, img_metas)
-        # divide result_clip into results [result1, ..., result_T]
+        # Backward shift for adding missed objects
+        candidates = Backward_Track_TF_within_clip(net, candidates, img_metas, imgs)
+        candidates_clip = Fold_candidates_by_order(candidates, cfg.track_by_Gaussian, img_metas)
         remove_blank = True
         if remove_blank:
             threshold = min(1, n_frames//4)
-            # the instance need to be detected  at least 1 frame
-            cond1 = (results_clip['tracked_mask'][n_frames//2:] == 0).sum(dim=0) > threshold
             # whether tracked masks are greater than a small threshold, which removes some false positives
-            cond2 = (results_clip['mask'][n_frames//2:].gt(0.5).sum(dim=(2, 3)) > 2).sum(dim=0) > threshold
+            cond1 = (candidates_clip['mask'].gt(0.5).sum(dim=(2, 3)) > 2).sum(dim=0) > threshold
             # a declining weights (0.8) to remove some false positives that cased by consecutively track to segment
-            cond3 = (results_clip['score'][n_frames//2:] > 0.05).sum(dim=0) > threshold
-            keep_clip = cond1 & cond2 & cond3
-            for k, v in results_clip.items():
-                results_clip[k] = v[:, keep_clip]
+            cond2 = (candidates_clip['score'] > 0.05).sum(dim=0) > threshold
+            keep_clip = cond1 & cond2
+            for k, v in candidates_clip.items():
+                candidates_clip[k] = v[:, keep_clip]
 
-        distinct_track = select_distinct_track(results_clip)
-        n_frames, n_dets = results_clip['box'].size()[:2]
+        n_frames, n_dets = candidates_clip['box'].size()[:2]
+        if n_dets == 0:
+            return [None]*n_frames
+
+        distinct_track = select_distinct_track(candidates_clip)
 
         # compared bboxes in current frame with bboxes in previous frame to achieve tracking
         if is_first or (not is_first and self.last_clip_result is None):
             # the parameters of Gaussian in last frame as the keyframe
-            results_clip['box_ids'] = torch.arange(n_dets).view(1, -1, 1).repeat(n_frames, 1, 1)
+            candidates_clip['box_ids'] = torch.arange(n_dets).view(1, -1, 1).repeat(n_frames, 1, 1)
             self.prev_track = dict()
             for k, v in distinct_track.items():
                 self.prev_track[k] = v.clone()
@@ -100,15 +100,13 @@ class Track_TF_Clip(object):
         else:
 
             assert self.last_clip_result is not None
-            n_prev = self.prev_track['track_mu'].size(0)
-            n_cur = distinct_track['track_mu'].size(0)
-
-            cur_scores = torch.mean(results_clip['score'], dim=0).view(-1, 1)
+            n_prev = self.prev_track['box'].size(0)
+            cur_scores = torch.mean(candidates_clip['score'], dim=0).view(-1, 1)
 
             # translate match_ids to det_obj_ids, assign new id to new objects
             # update tracking features/bboxes of exisiting object,
             # add tracking features/bboxes of new object
-            det_obj_ids = torch.ones(n_cur, dtype=torch.int64) * (-1)
+            det_obj_ids = torch.ones(n_dets, dtype=torch.int64) * (-1)
             best_match_scores = torch.ones(n_prev) * (-1)
             best_match_idx = torch.ones(n_prev, dtype=torch.int64) * (-1)
 
@@ -120,7 +118,7 @@ class Track_TF_Clip(object):
             #         [3, 1],
             #         [4, 2]])
             last_clip_frame_ids = self.last_clip_result['frame_id'][:, 0]
-            cur_clip_frame_ids = results_clip['frame_id'][:, 0]
+            cur_clip_frame_ids = candidates_clip['frame_id'][:, 0]
             frame_ids_overlapped_idx = (last_clip_frame_ids.unsqueeze(1) == cur_clip_frame_ids).nonzero(as_tuple=False)
             last_overlapped_idx = frame_ids_overlapped_idx[:, 0]
             cur_overlapped_idx = frame_ids_overlapped_idx[:, 1]
@@ -128,33 +126,39 @@ class Track_TF_Clip(object):
             if last_overlapped_idx.nelement() > 0:
                 # whether the tracker only use the detected objects to assign ID on overlapped frames, like KL, MkIoU
                 keep_detected = (self.last_clip_result['tracked_mask'][last_overlapped_idx].unsqueeze(1) == 0) * \
-                                (results_clip['tracked_mask'][cur_overlapped_idx].unsqueeze(-1) == 0)
+                                (candidates_clip['tracked_mask'][cur_overlapped_idx].unsqueeze(-1) == 0)
                 num_detected = torch.clamp((keep_detected.sum(dim=0)), min=1)
 
-                # calculate KL divergence for Gaussian distribution of isntances
-                last_clip_track_mu = self.last_clip_result['track_mu'][last_overlapped_idx]
-                last_clip_track_var = self.last_clip_result['track_var'][last_overlapped_idx]
-                cur_track_mu_over = results_clip['track_mu'][cur_overlapped_idx]
-                cur_track_var_over = results_clip['track_var'][cur_overlapped_idx]
-                kl_divergence_over = compute_kl_div(last_clip_track_mu, last_clip_track_var,
-                                                    cur_track_mu_over, cur_track_var_over)
-                kl_divergence_over[~keep_detected] = 0
-                kl_divergence_over = kl_divergence_over.sum(dim=0) / num_detected
-                kl_divergence_over[keep_detected.sum(dim=0) == 0] = 100
+                if cfg.track_by_Gaussian:
+                    # calculate KL divergence for Gaussian distribution of isntances
+                    last_clip_track_mu = self.last_clip_result['track_mu'][last_overlapped_idx]
+                    last_clip_track_var = self.last_clip_result['track_var'][last_overlapped_idx]
+                    cur_track_mu_over = candidates_clip['track_mu'][cur_overlapped_idx]
+                    cur_track_var_over = candidates_clip['track_var'][cur_overlapped_idx]
+                    kl_divergence_over = compute_kl_div(last_clip_track_mu, last_clip_track_var,
+                                                        cur_track_mu_over, cur_track_var_over)
+                    kl_divergence_over[~keep_detected] = 0
+                    kl_divergence_over = kl_divergence_over.sum(dim=0) / num_detected
+                    kl_divergence_over[keep_detected.sum(dim=0) == 0] = 100
 
-                # from [0, +infinite] to [0, 1]: sim = 1/ (exp(0.1*kl_div)), threshold=10
-                sim_over = torch.div(1., torch.exp(0.1 * kl_divergence_over))
-                # from [0, +infinite] to [0, 1]: sim = exp(1-kl_div)), threshold  = 5
-                # sim = torch.exp(1 - kl_divergence_over)
+                    # from [0, +infinite] to [0, 1]: sim = 1/ (exp(0.1*kl_div)), threshold=10
+                    sim_over = torch.div(1., torch.exp(0.1 * kl_divergence_over))
+                    # from [0, +infinite] to [0, 1]: sim = exp(1-kl_div)), threshold  = 5
+                    # sim = torch.exp(1 - kl_divergence_over)
+                else:
+                    last_clip_track_over = self.last_clip_result['track'][last_overlapped_idx]
+                    cur_track_over = candidates_clip['track'][cur_overlapped_idx]
+                    cos_sim = (cur_track_over.unsqueeze(-2) * last_clip_track_over.unsqueeze(-3)).sum(-1)  # [n_dets, n_prev]
+                    sim_over = (cos_sim.mean(dim=0) + 1) / 2  # [0, 1]
 
                 # compute clip-level BIoU and MIoU for objects in two clips to assign IDs
                 last_bbox = self.last_clip_result['box'][last_overlapped_idx]  # [T_over, N_prev, 4]
-                cur_bbox = results_clip['box'][cur_overlapped_idx]  # [T_over, N_cur, 4]
+                cur_bbox = candidates_clip['box'][cur_overlapped_idx]  # [T_over, N_cur, 4]
                 bbox_ious_over = jaccard(cur_bbox, last_bbox)
                 bbox_ious_over[~keep_detected] = 0
                 bbox_ious_over = bbox_ious_over.sum(dim=0) / num_detected  # [N_cur,  N_prev]
                 last_masks_soft = self.last_clip_result['mask'][last_overlapped_idx]  # [T_over, N_prev, d]
-                cur_masks_soft = results_clip['mask'][cur_overlapped_idx]  # [T_over, N_cur,  d]
+                cur_masks_soft = candidates_clip['mask'][cur_overlapped_idx]  # [T_over, N_cur,  d]
                 mask_ious_over = mask_iou(cur_masks_soft.gt(0.5), last_masks_soft.gt(0.5))
                 mask_ious_over[~keep_detected] = 0
                 mask_ious_over = mask_ious_over.sum(dim=0) / num_detected
@@ -183,16 +187,21 @@ class Track_TF_Clip(object):
 
             if new_obj_last.sum() > 0:
 
-                # calculate KL divergence of Gaussian distribution between instances of the current clip
-                # and all instances of previous instances
-                kl_divergence = compute_kl_div(self.prev_track['track_mu'], self.prev_track['track_var'],
-                                               distinct_track['track_mu'], distinct_track['track_var'])
-                sim_dummy = torch.ones(n_dets, 1) * 20.
-                sim = torch.div(1., torch.exp(0.1 * torch.cat([sim_dummy, kl_divergence], dim=-1)))
+                if cfg.track_by_Gaussian:
+                    # calculate KL divergence of Gaussian distribution between instances of the current clip
+                    # and all instances of previous instances
+                    kl_divergence = compute_kl_div(self.prev_track['track_mu'], self.prev_track['track_var'],
+                                                   distinct_track['track_mu'], distinct_track['track_var'])
+                    sim_dummy = torch.ones(n_dets, 1) * 20.
+                    sim = torch.div(1., torch.exp(0.1 * torch.cat([sim_dummy, kl_divergence], dim=-1)))
+                else:
+                    cos_sim = (distinct_track['track'].unsqueeze(-2) * self.prev_track['track'].unsqueeze(-3)).sum(-1)
+                    cos_sim = torch.cat([torch.zeros(n_dets, 1), cos_sim], dim=1)
+                    sim = (cos_sim + 1) / 2  # [0, 1]
 
                 bbox_ious = jaccard(distinct_track['box'], self.prev_track['box'])
                 mask_ious = mask_iou(distinct_track['mask'].gt(0.5), self.prev_track['mask'].gt(0.5))
-                # compute clip-level lables and scores
+                # Compute clip-level lables and scores
                 label_delta = (distinct_track['class'].view(-1, 1) == self.prev_track['class'].view(1, -1)).float()
 
                 # compute comprehensive score
@@ -203,8 +212,7 @@ class Track_TF_Clip(object):
                                                   label_delta[new_obj_last],
                                                   add_bbox_dummy=True,
                                                   bbox_dummy_iou=self.bbox_dummy_iou,
-                                                  match_coeff=cfg.match_coeff,
-                                                  use_FEELVOS=cfg.use_FEELVOS)
+                                                  match_coeff=cfg.match_coeff)
 
                 new_obj_match_likelihood, new_obj_match_ids = torch.max(comp_scores, dim=1)
                 new_obj_last_idx = torch.arange(n_dets)[new_obj_last]
@@ -214,7 +222,7 @@ class Track_TF_Clip(object):
                         match_id = 0
 
                     if match_id == 0:
-                        det_obj_ids[idx] = self.prev_track['track_mu'].size(0)
+                        det_obj_ids[idx] = self.prev_track['box'].size(0)
                         for k, v in self.prev_track.items():
                             self.prev_track[k] = torch.cat([v, distinct_track[k][idx][None]], dim=0)
 
@@ -232,11 +240,11 @@ class Track_TF_Clip(object):
                             for k, v in self.prev_track.items():
                                 self.prev_track[k][obj_id] = distinct_track[k][idx]
 
-            results_clip['box_ids'] = det_obj_ids.view(1, -1, 1).repeat(n_frames, 1, 1)
+            candidates_clip['box_ids'] = det_obj_ids.view(1, -1, 1).repeat(n_frames, 1, 1)
 
-        results_output = UnFold_candidate_clip(results_clip, remove_blank=True)
+        candidates_output = UnFold_candidate_clip(candidates_clip, remove_blank=False)
 
-        for k, v in results_clip.items():
+        for k, v in candidates_clip.items():
             self.last_clip_result[k] = v.clone()
 
-        return results_output
+        return candidates_output

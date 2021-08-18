@@ -6,7 +6,6 @@ from dcn_v2 import DCN
 import pickle
 
 
-
 class Bottleneck(nn.Module):
     """ Adapted from torchvision.models.resnet """
     expansion = 4

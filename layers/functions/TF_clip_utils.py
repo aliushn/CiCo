@@ -71,7 +71,7 @@ def Fold_candidates(candidates, img_metas=None):
     return candidate_clip
 
 
-def Fold_candidates_by_order(candidates, img_metas=None):
+def Fold_candidates_by_order(candidates, track_by_Gaussian=False, img_metas=None):
     '''
     Fold candidates of multi-frames to a clip candidate.
     For example, the size of 'box' in the candidates are [n1, 4], ..., [n_k, 4],
@@ -82,10 +82,13 @@ def Fold_candidates_by_order(candidates, img_metas=None):
     '''
 
     n_dets = candidates[0]['box'].size(0)
+    img_level_keys = {'proto', 'fpn_feat', 'sem_seg'}
+    if track_by_Gaussian:
+        img_level_keys += ['track']
 
     candidate_clip = dict()
     for k in candidates[0].keys():
-        if k in {'fpn_feat', 'proto', 'track', 'sem_seg'}:
+        if k in img_level_keys:
             # [T, n_dets, h, w, -1]
             candidate_clip[k] = torch.stack([candidate[k] for candidate in candidates], dim=0).repeat(1, n_dets, 1, 1, 1)
         else:
@@ -104,19 +107,19 @@ def select_distinct_track(candidate_clip):
         distinct_track[k] = []
 
     n_frames, n_dets = candidate_clip['box'].size()[:2]
-    for i_obj in range(n_dets):
-        _, sorted_idx = candidate_clip['score'][:, i_obj].sort(0, descending=True)
-        distinct_idx = sorted_idx[0]
-        for k, v in candidate_clip.items():
-            if k not in {'track_mu', 'track_var'}:
-                distinct_track[k].append(v[distinct_idx, i_obj])
-            else:
-                if k == 'track_mu':
-                    distinct_track[k].append(v[:, i_obj].sum(dim=0) / n_frames)
+    if n_dets > 0:
+        for i_obj in range(n_dets):
+            _, sorted_idx = candidate_clip['score'][:, i_obj].sort(0, descending=True)
+            for k, v in candidate_clip.items():
+                if k not in {'track_mu', 'track_var'}:
+                    distinct_track[k].append(v[sorted_idx[0], i_obj])
                 else:
-                    distinct_track[k].append(v[:, i_obj].sum(dim=0) / (n_frames**2))
+                    if k == 'track_mu':
+                        distinct_track[k].append(v[:, i_obj].sum(dim=0) / n_frames)
+                    else:
+                        distinct_track[k].append(v[:, i_obj].sum(dim=0) / (n_frames**2))
 
-    for k, v in distinct_track.items():
-        distinct_track[k] = torch.stack(v, dim=0)
+        for k, v in distinct_track.items():
+            distinct_track[k] = torch.stack(v, dim=0)
 
     return distinct_track

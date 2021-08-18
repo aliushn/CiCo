@@ -8,6 +8,7 @@ from math import sqrt
 import matplotlib.pyplot as plt
 import mmcv
 import torch.nn.functional as F
+from matplotlib.colors import hsv_to_rgb
 
 
 # Quick and dirty lambda for selecting the color for a particular index
@@ -186,37 +187,137 @@ def display_feature_align_dcn(detection, offset, loc_data, img_gpu=None, img_met
     cv2.imwrite(path, image)
 
 
-def display_correlation_map(x_corr, img_meta=None):
+def display_correlation_map_patch(x_corr, img_meta=None):
     if img_meta is not None:
         video_id, frame_id = img_meta['video_id'], img_meta['frame_id']
     else:
         video_id, frame_id = 0, 0
 
-    save_dir = 'weights/OVIS/weights_r152_m32_yolact_dice_DIoU_012_768_960_randomclip_c5/box_shift/'
+    save_dir = 'weights/OVIS/weights_r152_plus_m32_yolact_bce_012_960_clip_track_loss/box_shift/'
     save_dir = os.path.join(save_dir, str(video_id))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
-    # x_corr = x_corr[0, :, :18, :]**2
     bs, ch, h, w = x_corr.size()
-    # x_corr = F.normalize(x_corr, dim=1)
+
     r = int(sqrt(ch))
     for i in range(bs):
         x_corr_cur = x_corr[i]
+        x_corr_cur = (x_corr_cur - x_corr_cur.min()) / x_corr_cur.max()
         x_show = x_corr_cur.view(r, r, h, w)
 
         x_show = x_show.permute(0, 2, 1, 3).contiguous().view(h*r, r*w)
         x_numpy = x_show.detach().cpu().numpy()
 
-        path_max = ''.join([save_dir, '/', str(frame_id), '_', str(i), '_max_corr_patch.png'])
-        max_corr = x_corr_cur.max(dim=0)[0].detach().cpu().numpy()
-        plt.imshow(max_corr)
-        plt.savefig(path_max)
+        #         path_max = ''.join([save_dir, '/', str(frame_id), '_', str(i), '_max_corr_patch.png'])
+        #         max_corr = x_corr_cur.max(dim=0)[0].detach().cpu().numpy()
+        #         plt.imshow(max_corr)
+        #         plt.savefig(path_max)
 
         path = ''.join([save_dir, '/', str(frame_id), '_', str(i), '_corr_patch.png'])
+        plt.imshow(x_numpy)
         plt.axis('off')
-        plt.pcolormesh(x_numpy)
         plt.savefig(path)
         plt.clf()
+
+
+def display_correlation_map(x_corr, imgs=None, img_meta=None, idx=0):
+    '''
+    :param x_corr: [bs, patch-h*patch_w, h, w]
+    :param imgs: [bs, frames, 3, h, w]
+    :param img_meta:
+    :param idx:
+    :return:
+    '''
+    if img_meta is not None:
+        video_id, frame_id = img_meta['video_id'], img_meta['frame_id']
+        s_h, s_w = img_meta['img_shape'][0] / float(img_meta['pad_shape'][0]), img_meta['img_shape'][1] / float(img_meta['pad_shape'][1])
+    else:
+        video_id, frame_id = 0, 0
+        s_h, s_w = 1, 1
+
+    save_dir = 'weights/OVIS/weights_plus_r50_m32_yolact_clip_prediction_w_corr_a6_768_ext_box_focal/out/'
+    save_dir = os.path.join(save_dir, str(video_id))
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    bs, ch, h, w = x_corr.size()
+    crop_h, crop_w = int(h*s_h), int(w*s_w)
+    x_corr = x_corr[:, :, :crop_h, :crop_w]
+    x_corr /= torch.max(x_corr, dim=1)[0].unsqueeze(1)
+
+    # Create some random colors
+    color = np.random.randint(0, 255, (100, 3))
+    display_sparse_flow = False
+    display_dense_flow = False
+    from .utils import undo_image_transformation
+
+    r = int(sqrt(ch))
+    for i in range(bs):
+        # display correlation map
+        x_show = x_corr[i].view(r, r, crop_h, crop_w)
+        x_show = x_show.permute(0, 2, 1, 3).contiguous().view(crop_h*r, r*crop_w)
+        x_numpy = x_show.detach().cpu().numpy()
+
+        path = ''.join([save_dir, '/', str(frame_id), '_', str(i), '_corr', str(idx), '.png'])
+        plt.imshow(x_numpy)
+        plt.axis('off')
+        plt.savefig(path)
+        plt.clf()
+
+        if display_sparse_flow or display_dense_flow:
+            max_corr_val, max_corr_idx = x_corr[i].max(0)
+            flow_x = max_corr_idx // r - 5
+            flow_y = max_corr_idx % r - 5
+            x = torch.tensor(range(crop_w))
+            y = torch.tensor(range(crop_h))
+            grid_y, grid_x = torch.meshgrid(y, x)
+            grid_y, grid_x = grid_y.reshape(-1).tolist(), grid_x.reshape(-1).tolist()
+            img = []
+            for cdx in range(imgs.size(1)):
+                img.append(undo_image_transformation(imgs[i, cdx], h, w, img_h=None, img_w=None,
+                                                     interpolation_mode='bilinear'))
+            # img = F.interpolate(imgs[i], (h, w))
+            img = np.stack(img, axis=0).transpose((0, 2, 1, 3))
+            img = img[:, :crop_h, :crop_w]
+
+            if display_sparse_flow:
+                # display sparse optical flow map: draw the tracks
+                flow_x, flow_y = flow_x.reshape(-1).tolist(), flow_y.reshape(-1).tolist()
+                temp = (img[0]*255).astype('uint8')
+                for j in range(crop_h*crop_w):
+                    if flow_x[j] > 2 or flow_y[j] > 2:
+                        j_temp = j % 100
+                        cv2.arrowedLine(temp, (grid_x[j], grid_y[j]),
+                                        (max(grid_x[j]+flow_x[j], 0), max(grid_y[j]+flow_y[j], 0)),
+                                        [255, 255, 255], 2)
+                path = ''.join([save_dir, '/', str(frame_id), '_', str(i), '_corr', str(idx), '_sparse_flow.png'])
+                plt.imshow(temp)
+                plt.axis('off')
+                plt.savefig(path)
+                plt.clf()
+
+            if display_dense_flow:
+                # display dense optical flow map
+                hsv = np.zeros_like(img[0])
+                hsv[..., 1] = 255
+                flow_x = flow_x.cpu().numpy().astype(np.float32)
+                flow_y = flow_y.cpu().numpy().astype(np.float32)
+                mag, ang = cv2.cartToPolar(flow_x, flow_y)
+                # prvs = cv2.cvtColor(img[0].cpu().numpy(), cv2.COLOR_BGR2GRAY)
+                # next = cv2.cvtColor(img[1].cpu().numpy(), cv2.COLOR_BGR2GRAY)
+                # flow = cv2.calcOpticalFlowFarneback(prvs, next, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+                # mag, ang = cv2.cartToPolar(flow[...,0], flow[...,1])
+
+                hsv[..., 0] = ang * 180 / np.pi / 2
+                hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+                rgb_show = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+                # cv2.imshow('dense_flow', rgb_show)
+                path = ''.join([save_dir, '/', str(frame_id), '_', str(i), '_corr', str(idx), '_dense_flow.png'])
+                cv2.imwrite(path, rgb_show)
+                # plt.imshow(rgb_show)
+                # plt.axis('off')
+                # plt.savefig(path)
+                # plt.clf()
 
 
 def display_embedding_map(matching_map_all, idx, img_meta=None):
@@ -224,7 +325,7 @@ def display_embedding_map(matching_map_all, idx, img_meta=None):
         path = ''.join(['results/results_1227_1/embedding_map/', str(img_meta['video_id']), '_',
                         str(img_meta['frame_id']), '_', str(idx), '.png'])
         path2 = ''.join(['results/results_1227_1/embedding_map/', str(img_meta['video_id']), '_',
-                        str(img_meta['frame_id']), '_', str(idx), '_m.png'])
+                         str(img_meta['frame_id']), '_', str(idx), '_m.png'])
 
     else:
         path = 'results/results_1227_1/embedding_map/0.png'

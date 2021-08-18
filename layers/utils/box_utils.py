@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import torch
 from datasets import STD, MEANS, cfg
-from ..visualization import display_pos_smaples
+from ..visualization_temporal import display_pos_smaples
 
 @torch.jit.script
 def point_form(boxes):
@@ -109,17 +109,17 @@ def change(gt, priors):
     return -torch.sqrt((diff ** 2).sum(dim=2) )
 
 
-def match_clip(bbox_clip, labels_clip, obj_ids_clip, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t, obj_ids_t, idx,
-               pos_thresh=0.5, neg_thresh=0.3, img_gpu=None):
+def match_clip(bbox_list, labels_list, obj_ids_list, priors, loc_data, loc_t, conf_t, idx_t, obj_ids_t, idx,
+               pos_thresh=0.5, neg_thresh=0.3):
     """Match each prior box with the ground truth box of the highest jaccard
     overlap, encode the bounding boxes, then return the matched indices
     corresponding to both confidence and location preds.
     Args:
         pos_thresh: (float) IoU > pos_thresh ==> positive.
         neg_thresh: (float) IoU < neg_thresh ==> negative.
-        bbox_clip: (tensor) Ground truth boxes, Shape: [num_obj, 4].  [x1, y1, x2, y2]
-        labels_clip: (tensor) All the class labels for the image, Shape: [num_obj].
-        obj_ids_clip: (tensor) the instance ids of each gt bbox
+        bbox_list: (tensor) Ground truth boxes, Shape: [num_obj, 4].  [x1, y1, x2, y2]
+        labels_list: (tensor) All the class labels for the image, Shape: [num_obj].
+        obj_ids_list: (tensor) the instance ids of each gt bbox
         priors: (tensor) Prior boxes from priorbox layers, Shape: [n_priors,4]. [cx,cy,w,h]
         loc_data: (tensor) The predicted bbox regression coordinates for this batch. [\delta x, \delta y,  \delta w,  \delta h]
         loc_t: (tensor) Tensor to be filled w/ endcoded location targets.
@@ -130,100 +130,149 @@ def match_clip(bbox_clip, labels_clip, obj_ids_clip, crowd_boxes, priors, loc_da
     Return:
         The matched indices corresponding to 1)location and 2)confidence preds.
     """
-    # some error annotations with width = 0 or height = 0
-    n_clip = len(bbox_clip)
-    for cdx in range(n_clip):
-        bbox_c = center_size(bbox_clip[cdx])
-        bbox_c[:, 2:] = torch.clamp(bbox_c[:, 2:], min=1e-7)
-        bbox_clip[cdx] = point_form(bbox_c)
 
     # decoded_priors [cx, cy, w, h] => [x1, y1, x2, y2]
     decoded_priors = point_form(priors)
 
-    # ids
-    obj_ids_unique = torch.cat(obj_ids_clip).unique()
+    # Unique object ids in the clip
+    obj_ids_unique = torch.cat(obj_ids_list).unique()
+    n_clip_frames, n_objs, n_anchors = len(bbox_list), len(obj_ids_unique), loc_data.size(-2)
 
+    # Merge boxes with same object id in the clip
+    obj_ids_list2clip_idx = []
+    objs_clip_flag = loc_data.new_zeros(n_clip_frames, n_objs).long()
+    bbox_clip = loc_data.new_zeros(n_clip_frames, n_objs, 4)
+    labels_clip = loc_data.new_ones(n_objs).long() * -1
+    for cdx in range(n_clip_frames):
+        obj_ids_cdx = [obj_ids_unique.tolist().index(id) for id in obj_ids_list[cdx]]
+        obj_ids_list2clip_idx.append(obj_ids_cdx)
+        # Due to occlusion or other cases, an object may disappear in some frames of the clip, we need a flag
+        objs_clip_flag[cdx, obj_ids_cdx] = 1
+        bbox_clip[cdx, obj_ids_cdx] = bbox_list[cdx]
+        labels_clip[obj_ids_cdx] = labels_list[cdx]
 
-    # Size [num_objects, num_priors]
-    overlaps_clip = []
-    for cdx in range(n_clip):
-        if cfg.use_DIoU:
-            overlaps = compute_DIoU(bbox_clip[cdx], decoded_priors) if not cfg.use_change_matching else change(bbox_clip[cdx], decoded_priors)
-            pos_thresh, neg_thresh = 0.85 * pos_thresh, 0.85 * neg_thresh
-        else:
-            overlaps = jaccard(bbox_clip[cdx], decoded_priors) if not cfg.use_change_matching else change(bbox_clip[cdx], decoded_priors)
+    # Remove error annotations with width = 0 or height = 0
+    bbox_clip_c = center_size(bbox_clip.reshape(-1, 4))
+    bbox_clip_c[:, 2:] = torch.clamp(bbox_clip_c[:, 2:], min=1e-7)
+    bbox_clip = point_form(bbox_clip_c).reshape(n_clip_frames, n_objs, 4)
 
-        # Size [num_priors] best ground truth for each prior
-        best_truth_overlap, best_truth_idx = overlaps.max(0)
+    assert cfg.clip_prediction_with_individual_box or cfg.clip_prediction_with_external_box
+    if cfg.clip_prediction_with_external_box:
+        # ------- Introducing external boxes of multiple boxes in the clip to define postive and negative samples
+        bbox_clip_unfold = bbox_clip.permute(1, 0, 2).contiguous().reshape(n_objs, -1)
+        external_box = torch.stack([bbox_clip_unfold[:, ::2].min(-1)[0], bbox_clip_unfold[:, 1::2].min(-1)[0],
+                                    bbox_clip_unfold[:, ::2].max(-1)[0], bbox_clip_unfold[:, 1::2].max(-1)[0]], dim=-1)
+        # if the object only occurs once in the clip, the external rectangle is himself
+        single_object_idx = objs_clip_flag.sum(dim=0) == 1
+        if single_object_idx.sum() > 0:
+            external_box[single_object_idx] = bbox_clip[:, single_object_idx].reshape(-1, 4)[objs_clip_flag[:, single_object_idx].reshape(-1) == 1]
+        overlaps_clip_ext = jaccard(external_box, decoded_priors)
+        best_truth_overlap_ext, best_truth_idx_ext = overlaps_clip_ext.max(dim=0)
+        # Define positive sample,  negative samples and neutral
+        keep_pos_ext = best_truth_overlap_ext > pos_thresh
+        keep_neg_ext = best_truth_overlap_ext < neg_thresh
+        # print('pos_ext:', torch.nonzero(keep_pos_ext).reshape(1, -1))
+        # print('pos_ext:', best_truth_idx_ext[keep_pos_ext].reshape(1, -1))
 
-    # if a bbox is matched with two or more groundtruth boxes, this bbox will be assigned as -1
-    thresh = 0.5 * (pos_thresh + neg_thresh)
-    multiple_bbox = (overlaps > pos_thresh).sum(dim=0) > 1
-    # print((best_truth_overlap > pos_thresh).sum(), 'multi:', multiple_bbox.sum(), 'gt:', bbox.size(0))
-    best_truth_overlap[multiple_bbox] = thresh
-    # temp = (best_truth_overlap > pos_thresh).reshape(-1)
-    # print(temp.sum(), bbox.size(0))
-    # print(best_truth_overlap[temp])
+    if cfg.clip_prediction_with_individual_box:
 
-    # We want to ensure that each gt gets used at least once so that we don't
-    # waste any training data. In order to do that, find the max overlap anchor
-    # with each gt, and force that anchor to use that gt.
-    for _ in range(overlaps.size(0)):
-        # Find j, the gt with the highest overlap with a prior
-        # In effect, this will loop through overlaps.size(0) in a "smart" order,
-        # always choosing the highest overlap first.
-        best_prior_overlap, best_prior_idx = overlaps.max(1)
-        j = best_prior_overlap.max(0)[1]
+        # ------ Mean of multiple boxes in the clip
+        # Size [num_objects, num_priors]
+        overlaps_frames = torch.zeros(n_clip_frames, n_objs, n_anchors)
+        for cdx in range(n_clip_frames):
+            flag = objs_clip_flag[cdx] == 1
+            if cfg.use_DIoU:
+                overlaps = compute_DIoU(bbox_clip[cdx][flag], decoded_priors) if not cfg.use_change_matching else change(bbox_clip[cdx][flag], decoded_priors)
+                pos_thresh, neg_thresh = 0.85 * pos_thresh, 0.85 * neg_thresh
 
-        # Find i, the highest overlap anchor with this gt
-        i = best_prior_idx[j]
+            else:
+                overlaps = jaccard(bbox_clip[cdx][flag], decoded_priors) if not cfg.use_change_matching else change(bbox_clip[cdx][flag], decoded_priors)
+            overlaps_frames[cdx, obj_ids_list2clip_idx[cdx]] = overlaps
 
-        # Set all other overlaps with i to be -1 so that no other gt uses it
-        overlaps[:, i] = -1
-        # Set all other overlaps with j to be -1 so that this loop never uses j again
-        overlaps[j, :] = -1
+        # if 1) the clip average of overlaps on an anchor is greater than pos_thresh,
+        #    2) each iou of anchor and boxes on frames of the clip is greater than 0.5 * pos,
+        # we assume the instance moves slowly between adjacent frames,
+        # which only needs an anchor to predict the regression of bounding boxes.
+        overlaps_clip_ave = overlaps_frames.sum(dim=0) / objs_clip_flag.sum(dim=0).view(-1, 1)
+        best_truth_overlap_ave, best_truth_idx_ave = overlaps_clip_ave.max(0)
+        best_truth_overlap_ind = overlaps_frames[:, best_truth_idx_ave, range(n_anchors)]
+        keep_half_pos_ind = (best_truth_overlap_ind > (0.5 * pos_thresh)).sum(dim=0) >= objs_clip_flag.sum(dim=0)[best_truth_idx_ave]
 
-        # Overwrite i's score to be 2 so it doesn't get thresholded ever
-        best_truth_overlap[i] = 2
-        # Set the gt to be used for i to be j, overwriting whatever was there
-        best_truth_idx[i] = j
+        # We want to ensure that each gt gets used at least once so that we don't
+        # waste any training data. In order to do that, find the max overlap anchor
+        # with each gt, and force that anchor to use that gt.
+        for _ in range(n_objs):
+            # Find j, the gt with the highest overlap with a prior
+            # In effect, this will loop through overlaps.size(0) in a "smart" order,
+            # always choosing the highest overlap first.
+            best_prior_overlap, best_prior_idx = overlaps_clip_ave.max(1)
+            j = best_prior_overlap.max(0)[1]
 
-    matches = bbox_clip[best_truth_idx]  # Shape: [num_priors,4]  [x1, y1, x2, y2]
-    conf = labels_clip[best_truth_idx]  # Shape: [num_priors]
-    conf[best_truth_overlap < pos_thresh] = -1  # label as neutral
-    conf[best_truth_overlap < neg_thresh] = 0  # label as background
+            # Find i, the highest overlap anchor with this gt
+            i = best_prior_idx[j]
 
-    if img_gpu is not None:
-        pos = conf > 0
-        display_pos_smaples(pos, img_gpu, decoded_priors, bbox_clip)
+            # Set all other overlaps with i to be -1 so that no other gt uses it
+            overlaps_clip_ave[:, i] = -1
+            # Set all other overlaps with j to be -1 so that this loop never uses j again
+            overlaps_clip_ave[j, :] = -1
 
-    # Deal with crowd annotations for COCO
-    if crowd_boxes is not None and cfg.crowd_iou_threshold < 1:
-        # Size [num_priors, num_crowds]
-        crowd_overlaps = jaccard(decoded_priors, crowd_boxes, iscrowd=True)
-        # Size [num_priors]
-        best_crowd_overlap, best_crowd_idx = crowd_overlaps.max(1)
-        # Set non-positives with crowd iou of over the threshold to be neutral.
-        conf[(conf <= 0) & (best_crowd_overlap > cfg.crowd_iou_threshold)] = -1
+            # Set each box is greater than the half of pos threshold
+            keep_half_pos_ind[i] = 1
 
-    loc = encode(matches, priors, cfg.use_yolo_regressors)  # [cx, cy, w, h]
+            # Overwrite i's score to be 2 so it doesn't get thresholded ever
+            best_truth_overlap_ave[i] = 2
+            # Set the gt to be used for i to be j, overwriting whatever was there
+            best_truth_idx_ave[i] = j
+
+        keep_pos_ave = (best_truth_overlap_ave > pos_thresh) & keep_half_pos_ind
+        keep_neg_ind = (best_truth_overlap_ind < neg_thresh).sum(dim=0) >= objs_clip_flag.sum(dim=0)[best_truth_idx_ave]
+        keep_neg_ave = (best_truth_overlap_ave < neg_thresh) & keep_neg_ind[best_truth_idx_ave]
+
+        # print('pos_ind:', torch.nonzero(keep_pos_ave).reshape(1, -1))
+        # print('pos_ind:', best_truth_idx_ave[keep_pos_ave].reshape(1, -1))
+
+    if cfg.clip_prediction_with_individual_box and cfg.clip_prediction_with_external_box:
+        best_truth_idx = best_truth_idx_ave
+        best_truth_idx[keep_pos_ext] = best_truth_idx_ext[keep_pos_ext]
+        keep_pos = keep_pos_ext | keep_pos_ave
+        keep_neg = keep_neg_ext & keep_neg_ave
+        # print(keep_pos_ave.sum(), keep_pos.sum())
+    elif cfg.clip_prediction_with_individual_box:
+        best_truth_idx = best_truth_idx_ave
+        keep_pos = keep_pos_ave
+        keep_neg = keep_neg_ave
+    else:
+        best_truth_idx = best_truth_idx_ext
+        keep_pos = keep_pos_ext
+        keep_neg = keep_neg_ext
+
+    matches = bbox_clip[:, best_truth_idx]                            # [n_clip, num_priors, 4], [x1, y1, x2, y2]
+    loc = encode(matches.reshape(-1, 4), priors.repeat(n_clip_frames, 1), cfg.use_yolo_regressors).reshape(-1, n_anchors, 4)
+    loc = loc.permute(1, 0, 2).contiguous().reshape(n_anchors, -1)    # [n_anchors, 4*n_clip_frames]
+    conf = loc_data.new_ones(n_anchors).long() * -1                   # label as neutral
+    conf[keep_pos] = labels_clip[best_truth_idx[keep_pos]]            # label as positive samples
+    conf[keep_neg] = 0                                                # label as background
+
+    # triple check to avoid Nan and Inf
     keep = (torch.isinf(loc).sum(-1) + torch.isnan(loc).sum(-1)) > 0
     if keep.sum() > 0:
         print('Inf or Nan occur in loc_t:', loc[keep])
         conf[keep] = -1
     # filter out those predicted boxes with inf or nan
     keep = (torch.isinf(loc_data).sum(-1) + torch.isnan(loc_data).sum(-1)) > 0
-    if len(torch.nonzero(keep)) > 0:
+    if keep.sum() > 0:
         print('Num of Inf or Nan', len(torch.nonzero(keep)))
         conf[keep] = -1
 
-    loc_t[idx] = loc  # [num_priors,4] encoded offsets to learn
-    conf_t[idx] = conf  # [num_priors] top class label for each prior
-    idx_t[idx] = best_truth_idx  # [num_priors] indices for lookup
-    if obj_ids_clip is not None:
-        id_cur = obj_ids_clip[best_truth_idx]
-        id_cur[best_truth_overlap < pos_thresh] = 0  # Only remain positive boxes for tracking
-        obj_ids_clip[idx] = id_cur
+    loc_t[idx] = loc                                                 # [num_priors, 4*clip_frames] encoded offsets to learn
+    conf_t[idx] = conf                                               # [num_priors] top class label for each prior
+    for cdx in range(n_clip_frames):
+        obj_ids_clip2list = [obj_ids_list[cdx].tolist().index(id) if id in obj_ids_list[cdx] else -1 for id in obj_ids_unique.tolist()]
+        idx_t[idx, keep_pos, cdx] = torch.tensor(obj_ids_clip2list)[best_truth_idx[keep_pos]]    # [num_priors] indices for lookup
+    if obj_ids_list is not None:
+        id_cur = loc_data.new_ones(n_anchors).long() * -1
+        id_cur[keep_pos] = obj_ids_unique[best_truth_idx[keep_pos]]  # Only remain positive boxes for tracking
+        obj_ids_t[idx] = id_cur
 
 
 def match(bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t, ids_t, idx,
@@ -297,10 +346,13 @@ def match(bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t
         # Set the gt to be used for i to be j, overwriting whatever was there
         best_truth_idx[i] = j
 
+    keep_pos = best_truth_overlap > pos_thresh
+    keep_neg = best_truth_overlap < neg_thresh
+
     matches = bbox[best_truth_idx]            # Shape: [num_priors,4]  [x1, y1, x2, y2]
-    conf = labels[best_truth_idx]               # Shape: [num_priors]
-    conf[best_truth_overlap < pos_thresh] = -1  # label as neutral
-    conf[best_truth_overlap < neg_thresh] = 0   # label as background
+    conf = labels[best_truth_idx]             # Shape: [num_priors]
+    conf[~keep_pos] = -1                      # label as neutral
+    conf[keep_neg] = 0                        # label as background
 
     if img_gpu is not None:
         pos = conf > 0
@@ -326,13 +378,11 @@ def match(bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t
         print('Num of Inf or Nan', len(torch.nonzero(keep)))
         conf[keep] = -1
 
-    loc_t[idx]  = loc    # [num_priors,4] encoded offsets to learn
-    conf_t[idx] = conf   # [num_priors] top class label for each prior
-    idx_t[idx]  = best_truth_idx  # [num_priors] indices for lookup
+    loc_t[idx]  = loc                                            # [num_priors,4] encoded offsets to learn
+    conf_t[idx] = conf                                           # [num_priors] top class label for each prior
+    idx_t[idx, keep_pos] = best_truth_idx[keep_pos].view(-1, 1)  # [num_priors] indices for lookup
     if ids is not None:
-        id_cur = ids[best_truth_idx]
-        id_cur[best_truth_overlap < pos_thresh] = 0  # Only remain positive boxes for tracking
-        ids_t[idx] = id_cur
+        ids_t[idx, keep_pos] = ids[best_truth_idx[keep_pos]]
 
 @torch.jit.script
 def encode(matched, priors, use_yolo_regressors:bool=False):
@@ -476,8 +526,8 @@ def sanitize_coordinates_hw(box, h, w):
     return box_wo_norm if use_batch else box_wo_norm.squeeze(0)
 
 
-@torch.jit.script
-def crop(masks, boxes, padding:int=1):
+# @torch.jit.script
+def crop(masks, boxes, padding:int=1, return_mask=False):
     """
     "Crop" predicted masks by zeroing out everything not in the predicted bbox.
     Vectorized by Chong (thanks Chong).
@@ -503,12 +553,12 @@ def crop(masks, boxes, padding:int=1):
     masks_down  = cols <  y2.view(1, 1, 1, -1)
     
     crop_mask = (masks_left * masks_right * masks_up * masks_down).float()
-    cropped_mask = masks * crop_mask
+    cropped_masks = crop_mask * masks
     if d_masks == 3:
         crop_mask = crop_mask.squeeze(2)
-        cropped_mask = cropped_mask.squeeze(2)
-    
-    return crop_mask, cropped_mask
+        cropped_masks = cropped_masks.squeeze(2)
+
+    return (crop_mask, cropped_masks) if return_mask else cropped_masks
 
 
 def crop_sipmask(masks00, masks01, masks10, masks11, boxes, padding:int=1):

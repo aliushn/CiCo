@@ -3,7 +3,7 @@ from STMask import STMask
 from utils.functions import MovingAverage, ProgressBar, SavePath
 from layers.utils import jaccard, center_size, mask_iou, postprocess, undo_image_transformation
 from utils import timer
-from layers.visualization import get_color
+from layers.visualization_temporal import get_color
 import pycocotools
 import torch.nn.functional as F
 import torch.utils.data as data

@@ -71,10 +71,7 @@ class YTVOSDataset(data.Dataset):
         return len(self.img_ids)
     
     def __getitem__(self, idx):
-        if self.has_gt:
-            return self.prepare_train_img(self.img_ids[idx])
-        else:
-            return self.prepare_test_img(self.img_ids[idx])
+        return self.pull_item(self.img_ids[idx])
 
     def load_annotations(self, ann_file):
         self.ytvos = YTVOS(ann_file)
@@ -136,11 +133,8 @@ class YTVOSDataset(data.Dataset):
     def sample_ref(self, idx):
         # sample another frame in the same sequence as reference
         vid, frame_id = idx
-        vid_idx = self.vid_ids.index(vid)
-        vid_info = self.vid_infos[vid_idx]
-        sample_range = range(len(vid_info['filenames']))
         valid_samples = []
-        for i in range(-2*self.clip_frames, 2*self.clip_frames+1):
+        for i in range(-self.clip_frames+1, self.clip_frames):
             # check if the frame id is valid
             ref_idx = (vid, i+frame_id)
             if i != 0 and ref_idx in self.img_ids:
@@ -148,103 +142,130 @@ class YTVOSDataset(data.Dataset):
         if len(valid_samples) == 0:
             ref_frames = [frame_id]
         else:
-            ref_frames = random.sample(valid_samples, 1)
+            ref_frames = random.sample(valid_samples, self.clip_frames-1)
         return ref_frames
 
-    def prepare_train_img(self, idx):
+    def pull_item(self, idx):
         # prepare a pair of image in a sequence
         vid,  frame_id = idx
         vid_idx = self.vid_ids.index(vid)
         vid_info = self.vid_infos[vid_idx]
-        basename = osp.basename(vid_info['filenames'][frame_id])
-        ref_frame_ids = self.sample_ref(idx)
-        clip_frame_ids = ref_frame_ids + [frame_id]
+        if self.has_gt and self.clip_frames > 1:
+            ref_frame_ids = self.sample_ref(idx)
+            clip_frame_ids = ref_frame_ids + [frame_id]
+            clip_frame_ids.sort()
+        else:
+            clip_frame_ids = [frame_id]
         imgs = [mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][id])) for id in clip_frame_ids]
         height, width, depth = imgs[0].shape
         ori_shape = (height, width, depth)
 
         # load annotation of ref_frames
-        masks, bboxes, labels, obj_ids, bboxes_ignore, img_meta = [], [], [], [], [], []
-        for id in clip_frame_ids:
-            ann = self.get_ann_info(vid, id)
-            bboxes.append(ann['bboxes'])
-            labels.append(ann['labels'])
-            # obj ids attribute does not exist in current annotation
-            # need to add it
-            obj_ids.append(np.array(ann['obj_ids']))
-            if self.with_mask:
-                masks.append(np.stack(ann['masks'], axis=0))
-            # compute matching of reference frame with current frame
-            # 0 denote there is no matching
-            # gt_pids = [ref_ids.index(i)+1 if i in ref_ids else 0 for i in gt_ids]
-            if self.with_crowd:
-                bboxes_ignore.append(ann['bboxes_ignore'])
+        if self.has_gt:
+            masks, bboxes, labels, obj_ids, bboxes_ignore = [], [], [], [], []
+            for id in clip_frame_ids:
+                ann = self.get_ann_info(vid, id)
+                bboxes.append(ann['bboxes'])
+                labels.append(ann['labels'])
+                # obj ids attribute does not exist in current annotation
+                # need to add it
+                obj_ids.append(np.array(ann['obj_ids']))
+                if self.with_mask:
+                    masks.append(np.stack(ann['masks'], axis=0))
+                # compute matching of reference frame with current frame
+                # 0 denote there is no matching
+                # gt_pids = [ref_ids.index(i)+1 if i in ref_ids else 0 for i in gt_ids]
+                if self.with_crowd:
+                    bboxes_ignore.append(ann['bboxes_ignore'])
 
-            img_meta.append(dict(
-                ori_shape=ori_shape,
-                video_id=vid,
-                frame_id=id,
-                is_first=(id == 0)))
+        else:
+            masks, bboxes, labels, obj_ids = None, None, None, None
 
         # apply transforms
         imgs, masks, bboxes, labels = self.transform(imgs, masks, bboxes, labels)
 
+        img_meta = []
         for i, img in enumerate(imgs):
-            ori_h, ori_w = img_meta[i]['ori_shape'][:2]
             pad_h, pad_w = img.shape[:2]
 
             if self.preserve_aspect_ratio:
                 # resize long edges
-                if (ori_h/float(ori_w)) < (pad_h/float(pad_w)):
-                    img_w, img_h = pad_w, int(ori_h * (pad_w / ori_w))
+                if (height/float(width)) < (pad_h/float(pad_w)):
+                    img_w, img_h = pad_w, int(height * (pad_w / width))
                 else:
-                    img_w, img_h = int(ori_w * (pad_h / ori_h)), pad_h
+                    img_w, img_h = int(width * (pad_h / height)), pad_h
             else:
                 img_w, img_h = pad_w, pad_h
 
-            img_meta[i]['img_shape'] = (img_h, img_w, 3)
-            img_meta[i]['pad_shape'] = (pad_h, pad_w, 3)
+            img_meta.append(dict(
+                ori_shape=ori_shape,
+                img_shape=(img_h, img_w, 3),
+                pad_shape=(pad_h, pad_w, 3),
+                video_id=vid,
+                frame_id=clip_frame_ids[i],
+                is_first=(clip_frame_ids[i] == 0)))
 
-        # TODO: how to deal wit
+        # TODO: how to deal with crowded bounding boxes
         # if self.with_crowd:
         #     for i in range(len(clip_frame_ids)):
         #         bboxes_ignore[i] = self.transform(bboxes_ignore[i], img_shape, pad_shape, scale_factor, flip)
 
         return imgs, img_meta, (masks, bboxes, labels, obj_ids)
 
-    def prepare_test_img(self, idx):
-        """Prepare an image for testing (multi-scale and flipping)"""
-        vid, frame_id = idx
+    def pull_clip_from_video(self, vid, clip_frame_ids):
+        # prepare a sequence from a video
         vid_idx = self.vid_ids.index(vid)
         vid_info = self.vid_infos[vid_idx]
-        img = [mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][frame_id]))]
-        ori_h, ori_w, depth = img[0].shape
-        ori_shape = (ori_h, ori_w, depth)
-        # apply transforms
-        img, _, _, _ = self.transform(img)
-        pad_h, pad_w = img[0].shape[:2]
+        imgs = [mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][id])) for id in clip_frame_ids]
+        height, width, depth = imgs[0].shape
+        ori_shape = (height, width, depth)
 
-        if self.preserve_aspect_ratio:
-            # resize long edges
-            if (ori_h / float(ori_w)) < (pad_h / float(pad_w)):
-                img_w, img_h = pad_w, int(ori_h * (pad_w / ori_w))
-            else:
-                img_w, img_h = int(ori_w * (pad_h / ori_h)), pad_h
+        # load annotation of ref_frames
+        if self.has_gt:
+            masks, bboxes, labels, obj_ids, bboxes_ignore = [], [], [], [], []
+            for id in clip_frame_ids:
+                ann = self.get_ann_info(vid, id)
+                bboxes.append(ann['bboxes'])
+                labels.append(ann['labels'])
+                # obj ids attribute does not exist in current annotation
+                # need to add it
+                obj_ids.append(np.array(ann['obj_ids']))
+                if self.with_mask:
+                    masks.append(np.stack(ann['masks'], axis=0))
+                # compute matching of reference frame with current frame
+                # 0 denote there is no matching
+                # gt_pids = [ref_ids.index(i)+1 if i in ref_ids else 0 for i in gt_ids]
+                if self.with_crowd:
+                    bboxes_ignore.append(ann['bboxes_ignore'])
+
         else:
-            img_w, img_h = pad_w, pad_h
+            masks, bboxes, labels, obj_ids = None, None, None, None
 
-        img_shape = (img_h, img_w, 3)
-        pad_shape = (pad_h, pad_w, 3)
+        # apply transforms
+        imgs, masks, bboxes, labels = self.transform(imgs, masks, bboxes, labels)
 
-        img_meta = [dict(
-            ori_shape=ori_shape,
-            img_shape=img_shape,
-            pad_shape=pad_shape,
-            video_id=vid,
-            frame_id=frame_id,
-            is_first=(frame_id == 0))]
+        img_meta = []
+        for i, img in enumerate(imgs):
+            pad_h, pad_w = img.shape[:2]
 
-        return img, img_meta, None
+            if self.preserve_aspect_ratio:
+                # resize long edges
+                if (height/float(width)) < (pad_h/float(pad_w)):
+                    img_w, img_h = pad_w, int(height * (pad_w / width))
+                else:
+                    img_w, img_h = int(width * (pad_h / height)), pad_h
+            else:
+                img_w, img_h = pad_w, pad_h
+
+            img_meta.append(dict(
+                ori_shape=ori_shape,
+                img_shape=(img_h, img_w, 3),
+                pad_shape=(pad_h, pad_w, 3),
+                video_id=vid,
+                frame_id=clip_frame_ids[i],
+                is_first=(clip_frame_ids[i] == 0)))
+
+        return imgs, img_meta, (masks, bboxes, labels, obj_ids)
 
     def _parse_ann_info(self, ann_info, frame_id, with_mask=True):
         """Parse bbox and mask annotation.
@@ -355,7 +376,7 @@ def detection_collate_vis(batch):
     for sample in batch:
         imgs += [torch.from_numpy(img).permute(2, 0, 1) for img in sample[0]]
         img_metas += sample[1]
-        if sample[2] is not None:
+        if sample[2][0] is not None:
             masks += [torch.from_numpy(mask) for mask in sample[2][0]]
             bboxes += [torch.from_numpy(box) for box in sample[2][1]]
             labels += [torch.from_numpy(label) for label in sample[2][2]]

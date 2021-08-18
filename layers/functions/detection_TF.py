@@ -5,7 +5,7 @@ from datasets import cfg
 import torch.nn.functional as F
 
 
-class Detect_TF(object):
+class Detect(object):
     """At test time, Detect is the final layer of SSD.  Decode location preds,
     apply non-maximum suppression to location predictions based on conf
     scores and threshold to a top_k number of output predictions for both

@@ -114,6 +114,8 @@ def get_dataset(data_type, dataset, backbone_transform, inference=False):
     if data_type == 'vis':
         dataset = YTVOSDataset(ann_file=dataset.ann_file,
                                img_prefix=dataset.img_prefix,
+                               has_gt=dataset.has_gt,
+                               clip_frames=dataset.clip_frames,
                                transform=BaseTransform_vis(
                                     img_scales=dataset.img_scales,
                                     Flip=flip,
@@ -121,8 +123,7 @@ def get_dataset(data_type, dataset, backbone_transform, inference=False):
                                     preserve_aspect_ratio=dataset.preserve_aspect_ratio,
                                     backbone_transform=backbone_transform,
                                     resize_gt=resize_gt,
-                                    pad_gt=pad_gt),
-                               has_gt=dataset.has_gt)
+                                    pad_gt=pad_gt))
     elif data_type == 'coco':
         dataset = COCODetection(image_path=dataset.img_prefix,
                                 info_file=dataset.ann_file,

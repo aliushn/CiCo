@@ -2,11 +2,9 @@ import torch
 import torch.nn as nn
 
 from datasets.config import cfg
-from .make_net import make_net
 from .Featurealign import FeatureAlign
 from utils import timer
 from itertools import product
-from mmcv.ops import DeformConv2d
 import torch.nn.functional as F
 
 
@@ -35,12 +33,15 @@ class PredictionModule_FC(nn.Module):
                          from parent instead of from this module.
     """
 
-    def __init__(self, in_channels, out_channels=1024, deform_groups=1,
+    def __init__(self, in_channels, deform_groups=1,
                  pred_aspect_ratios=None, pred_scales=None, parent=None):
         super().__init__()
 
-        self.out_channels = out_channels
-        self.num_classes = cfg.num_classes
+        self.in_channels = in_channels
+        if cfg.use_focal_loss:
+            self.num_classes = cfg.num_classes
+        else:
+            self.num_classes = cfg.num_classes + 1
         self.mask_dim = cfg.mask_dim
         self.track_dim = cfg.track_dim
         self.num_priors = len(pred_scales)
@@ -60,6 +61,11 @@ class PredictionModule_FC(nn.Module):
                 self.mask_dim += cfg.mask_dim
         elif cfg.mask_proto_with_levels:
             self.mask_dim = self.mask_dim * 2
+
+        if cfg.train_track and cfg.clip_prediction_mdoule:
+            self.clip_frames = cfg.train_dataset.clip_frames
+        else:
+            self.clip_frames = 1
 
         if parent is None:
 
@@ -83,43 +89,44 @@ class PredictionModule_FC(nn.Module):
 
                 if cfg.train_centerness:
                     # self.DIoU_layer.append(nn.Conv2d(self.out_channels, self.num_priors, **cfg.head_layer_params[k]))
-                    self.centerness_layer.append(nn.Conv2d(self.out_channels, self.num_priors,
+                    self.centerness_layer.append(nn.Conv2d(self.in_channels, self.num_priors*self.clip_frames,
                                                            kernel_size=kernel_size, padding=padding))
 
                 if cfg.train_boxes:
-                    self.bbox_layer.append(nn.Conv2d(self.out_channels, self.num_priors*4,
+                    self.bbox_layer.append(nn.Conv2d(self.in_channels, self.num_priors*4*self.clip_frames,
                                                      kernel_size=kernel_size, padding=padding))
 
                 if cfg.train_class:
                     if cfg.use_dcn_class:
-                        self.conf_layer.append(FeatureAlign(self.out_channels,
+                        self.conf_layer.append(FeatureAlign(self.in_channels,
                                                             self.num_priors * self.num_classes,
                                                             kernel_size=kernel_size,
                                                             deformable_groups=self.deform_groups,
                                                             use_pred_offset=cfg.use_pred_offset,
                                                             use_random_offset=cfg.use_random_offset))
                     else:
-                        self.conf_layer.append(nn.Conv2d(self.out_channels, self.num_priors * self.num_classes,
+                        self.conf_layer.append(nn.Conv2d(self.in_channels, self.num_priors * self.num_classes,
                                                          kernel_size=kernel_size, padding=padding))
                 else:
-                    self.stuff_layer.append(nn.Conv2d(self.out_channels, self.num_priors,
+                    self.stuff_layer.append(nn.Conv2d(self.in_channels, self.num_priors,
                                                       kernel_size=kernel_size, padding=padding))
 
-                if cfg.use_dcn_mask:
-                    self.mask_layer.append(FeatureAlign(self.out_channels,
-                                                        self.num_priors * self.mask_dim,
-                                                        kernel_size=kernel_size,
-                                                        deformable_groups=self.deform_groups,
-                                                        use_pred_offset=cfg.use_pred_offset,
-                                                        use_random_offset=cfg.use_random_offset
-                                                        ))
-                else:
-                    self.mask_layer.append(nn.Conv2d(self.out_channels, self.num_priors*self.mask_dim,
-                                                     kernel_size=kernel_size, padding=padding))
+                if cfg.train_masks:
+                    if cfg.use_dcn_mask:
+                        self.mask_layer.append(FeatureAlign(self.in_channels,
+                                                            self.num_priors * self.mask_dim,
+                                                            kernel_size=kernel_size,
+                                                            deformable_groups=self.deform_groups,
+                                                            use_pred_offset=cfg.use_pred_offset,
+                                                            use_random_offset=cfg.use_random_offset
+                                                            ))
+                    else:
+                        self.mask_layer.append(nn.Conv2d(self.in_channels, self.num_priors*self.mask_dim,
+                                                         kernel_size=kernel_size, padding=padding))
 
                 if cfg.train_track and not cfg.track_by_Gaussian:
                     if cfg.use_dcn_track:
-                        self.track_layer.append(FeatureAlign(self.out_channels,
+                        self.track_layer.append(FeatureAlign(self.in_channels,
                                                              self.num_priors * self.track_dim,
                                                              kernel_size=kernel_size,
                                                              deformable_groups=self.deform_groups,
@@ -127,29 +134,30 @@ class PredictionModule_FC(nn.Module):
                                                              use_random_offset=cfg.use_random_offset
                                                              ))
                     else:
-                        self.track_layer.append(nn.Conv2d(self.out_channels,
+                        self.track_layer.append(nn.Conv2d(self.in_channels,
                                                           self.num_priors * self.track_dim,
                                                           kernel_size=kernel_size, padding=padding))
 
             # What is this ugly lambda doing in the middle of all this clean prediction module code?
-            def make_extra(num_layers, out_channels):
+            def make_extra(num_layers, in_channels):
                 if num_layers == 0:
                     return lambda x: x
                 else:
                     # Looks more complicated than it is. This just creates an array of num_layers alternating conv-relu
                     return nn.Sequential(*sum([[
-                        nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-                        nn.GroupNorm(32, out_channels),
+                        nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+                        # nn.GroupNorm(32, in_channels),
+                        nn.BatchNorm2d(in_channels),
                         nn.ReLU(inplace=True)
                     ] for _ in range(num_layers)], []))
 
             if cfg.train_class:
-                self.conf_extra = make_extra(cfg.extra_layers[0], self.out_channels)
+                self.conf_extra = make_extra(cfg.extra_layers[0], self.in_channels)
             else:
-                self.stuff_extra = make_extra(cfg.extra_layers[0], self.out_channels)
-            self.bbox_extra = make_extra(cfg.extra_layers[1], self.out_channels)
+                self.stuff_extra = make_extra(cfg.extra_layers[0], self.in_channels)
+            self.bbox_extra = make_extra(cfg.extra_layers[1], self.in_channels)
             if cfg.train_track and not cfg.track_by_Gaussian:
-                self.track_extra = make_extra(cfg.extra_layers[-1], self.out_channels)
+                self.track_extra = make_extra(cfg.extra_layers[-1], self.in_channels)
 
     def forward(self, x, idx):
         """
@@ -198,11 +206,12 @@ class PredictionModule_FC(nn.Module):
                 stuff_cur = src.stuff_layer[k](stuff_x)
                 stuff.append(stuff_cur.permute(0, 2, 3, 1).contiguous())
 
-            if cfg.use_dcn_mask:
-                mask_cur = src.mask_layer[k](bbox_x, bbox_cur.detach())
-            else:
-                mask_cur = src.mask_layer[k](bbox_x)
-            mask.append(mask_cur.permute(0, 2, 3, 1).contiguous())
+            if cfg.train_masks:
+                if cfg.use_dcn_mask:
+                    mask_cur = src.mask_layer[k](bbox_x, bbox_cur.detach())
+                else:
+                    mask_cur = src.mask_layer[k](bbox_x)
+                mask.append(mask_cur.permute(0, 2, 3, 1).contiguous())
 
             if cfg.train_track and not cfg.track_by_Gaussian:
                 if cfg.use_dcn_track:
@@ -211,45 +220,30 @@ class PredictionModule_FC(nn.Module):
                     track_cur = src.track_layer[k](track_x)
                 track.append(track_cur.permute(0, 2, 3, 1).contiguous())
 
+        priors, prior_levels = self.make_priors(idx, x.size(2), x.size(3), x.device)  #[1, h*w*num_priors*num_ratios, 4]
+        preds = {'priors': priors, 'prior_levels': prior_levels}
+
         # cat for all anchors
         if cfg.train_boxes:
-            bbox = torch.cat(bbox, dim=-1).view(x.size(0), -1, 4)
+            bbox = torch.cat(bbox, dim=-1).view(x.size(0), -1, 4*self.clip_frames)
+            if cfg.use_yolo_regressors:
+                bbox[:, :, :2] = torch.sigmoid(bbox[:, :, :2]) - 0.5
+                bbox[:, :, 0] /= conv_w
+                bbox[:, :, 1] /= conv_h
+            preds['loc'] = bbox
         if cfg.train_centerness:
-            centerness_data = torch.cat(centerness_data, dim=1).view(x.size(0), -1, 1)
-            centerness_data = torch.sigmoid(centerness_data)
+            centerness_data = torch.cat(centerness_data, dim=1).view(x.size(0), -1, self.clip_frames)
+            preds['centerness'] = torch.sigmoid(centerness_data)
         if cfg.train_class:
-            conf = torch.cat(conf, dim=-1).view(x.size(0), -1, src.num_classes)
+            preds['conf'] = torch.cat(conf, dim=-1).view(x.size(0), -1, src.num_classes)
         else:
-            stuff = torch.cat(stuff, dim=-1).view(x.size(0), -1, 1)
+            preds['stuff'] = torch.cat(stuff, dim=-1).view(x.size(0), -1, 1)
 
-        mask = torch.cat(mask, dim=-1).view(x.size(0), -1, src.mask_dim)
+        if cfg.train_masks:
+            preds['mask_coeff'] = torch.cat(mask, dim=-1).view(x.size(0), -1, src.mask_dim)
         if cfg.train_track and not cfg.track_by_Gaussian:
             track = torch.cat(track, dim=-1).view(x.size(0), -1, src.track_dim)
-            track = F.normalize(track, dim=-1)
-
-        # See box_utils.decode for an explanation of this
-        if cfg.use_yolo_regressors:
-            bbox[:, :, :2] = torch.sigmoid(bbox[:, :, :2]) - 0.5
-            bbox[:, :, 0] /= conv_w
-            bbox[:, :, 1] /= conv_h
-
-        priors, prior_levels = self.make_priors(idx, x.size(2), x.size(3), x.device)  #[1, h*w*num_priors*num_ratios, 4]
-
-        preds = {'mask_coeff': mask, 'priors': priors, 'prior_levels': prior_levels}
-
-        if cfg.train_boxes:
-            preds['loc'] = bbox
-
-        if cfg.train_centerness:
-            preds['centerness'] = centerness_data
-
-        if cfg.train_class:
-            preds['conf'] = conf
-        else:
-            preds['stuff'] = stuff
-
-        if cfg.train_track and not cfg.track_by_Gaussian:
-            preds['track'] = track
+            preds['track'] = F.normalize(track, dim=-1)
 
         return preds
 
@@ -269,16 +263,16 @@ class PredictionModule_FC(nn.Module):
                         for scale in self.pred_scales:
                             # [h, w]: [3, 3], [3, 5], [5, 3]
                             arh, arw = ar
-                            ratio = scale / self.pred_scales[0]
+                            ratio = scale / self.pred_scales[-1]
                             w = ratio * arw / conv_w
                             h = ratio * arh / conv_h
                             prior_data += [x, y, w, h]
                             prior_levels += [idx]
 
-            priors = torch.Tensor(prior_data, device=device).view(1, -1, 4).detach()
+            priors = torch.clamp(torch.Tensor(prior_data, device=device), min=0, max=1).view(1, -1, 4).detach()
             priors.requires_grad = False
 
-            prior_levels = torch.Tensor(prior_levels, device=device).view(1, -1).detach()
+            prior_levels = torch.clamp(torch.Tensor(prior_levels, device=device), min=0, max=1).view(1, -1).detach()
             prior_levels.requires_grad = False
 
         return priors, prior_levels
