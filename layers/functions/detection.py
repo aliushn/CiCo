@@ -61,8 +61,8 @@ class Detect(object):
                     scores = predictions['stuff'][i].view(-1)
 
                 keep = scores > cfg.eval_conf_thresh
-                print(cfg.eval_conf_thresh, keep.sum())
-                print(scores_idx[keep].unique())
+                # print(cfg.eval_conf_thresh, keep.sum())
+                # print(scores_idx[keep].unique())
                 for k, v in predictions.items():
                     if k in self.img_level_keys:
                         candidate_cur[k] = v[i*clip_frames:(i+1)*clip_frames]
@@ -84,7 +84,7 @@ class Detect(object):
         clip_frames = candidate['loc'].size(-1) // 4
         boxes = decode(candidate['loc'].reshape(-1, 4), candidate['priors'].repeat(1, clip_frames).reshape(-1, 4))
         boxes = boxes.reshape(-1, 4*clip_frames)
-        mask_coeff = candidate['mask_coeff'] if cfg.train_mask else None
+        mask_coeff = candidate['mask_coeff'] if cfg.train_masks else None
         proto_data = candidate['proto']
         sem_data = candidate['sem_seg'] if cfg.use_semantic_segmentation_loss else None  # [h, w, num_class]
         centerness_scores = candidate['centerness'] if cfg.train_centerness else None
@@ -142,7 +142,7 @@ class Detect(object):
             # Remove bounding boxes whose center beyond images or mask = 0
             boxes_c = center_size(boxes.reshape(-1, 4))
             keep = ((boxes_c[:, :2] > 0) & ((boxes_c[:, :2] < 1))).reshape(-1, 2*clip_frames).sum(dim=-1) == 2*clip_frames
-            if cfg.train_mask:
+            if cfg.train_masks:
                 non_empty_mask = (det_masks_soft.gt(0.5).sum(dim=[1, 2]) > 5).sum(dim=-1) == clip_frames
                 keep = keep & non_empty_mask
             boxes = boxes[keep]
@@ -195,7 +195,7 @@ class Detect(object):
             idx_out = idx[iou_max <= iou_threshold]
 
             boxes = boxes[idx_out]
-            if cfg.train_mask:
+            if cfg.train_masks:
                 masks_coeff = masks_coeff[idx_out]
                 det_masks_soft = det_masks_soft[idx_out] if det_masks_soft.size(-1) > 1 else det_masks_soft[idx_out].squeeze(-1)
                 det_masks = det_masks_soft.gt(0.5).float()
@@ -215,7 +215,7 @@ class Detect(object):
                 scores = max_miou.view(-1)
 
             out_after_NMS = {'box': boxes, 'class': classes, 'score': scores}
-            if cfg.train_mask:
+            if cfg.train_masks:
                 out_after_NMS['mask_coeff'] = masks_coeff
                 out_after_NMS['mask'] = det_masks_soft
             if track_data is not None:

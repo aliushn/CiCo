@@ -62,8 +62,8 @@ class Track(object):
         det_bbox = detection['box']
         det_labels = detection['class']  # class
         det_score = detection['score']
-        det_masks_soft = detection['mask'] if cfg.train_mask else None
-        det_masks = det_masks_soft.gt(0.5).float() if cfg.train_mask else None
+        det_masks_soft = detection['mask'] if cfg.train_masks else None
+        det_masks = det_masks_soft.gt(0.5).float() if cfg.train_masks else None
 
         if cfg.track_by_Gaussian:
             detection['track_mu'], detection['track_var'] = generate_track_gaussian(detection['track'].squeeze(0),
@@ -98,7 +98,7 @@ class Track(object):
 
             label_delta = (self.prev_detection['class'] == det_labels.view(-1, 1)).float()
             bbox_ious = jaccard(det_bbox[:, :4], self.prev_detection['box'][:, -4:])
-            if cfg.train_mask:
+            if cfg.train_masks:
                 if self.clip_frames > 1:
                     mask_ious = mask_iou(det_masks[..., 0], self.prev_detection['mask'].gt(0.5).float()[..., -1])
                 else:

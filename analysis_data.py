@@ -5,6 +5,8 @@ import torch.utils.data as data
 from layers.utils import center_size
 from utils.functions import ProgressBar
 import matplotlib as plt
+import json
+import os
 
 
 def main(config, data_type='vis'):
@@ -46,6 +48,31 @@ def main(config, data_type='vis'):
 	print('Done!')
 
 
+def split_valid_from_train(ann_file):
+	json_path = os.path.split(ann_file)[0] + '/valid_sub_150.json'
+	dataset = json.load(open(ann_file, 'r'))
+	valid_dataset = {'info': dataset['info'], 'licenses': dataset['licenses'], 'categories': dataset['categories']}
+	len_vid = len(dataset['videos'])
+	len_valid_vid = int(0.05 * len_vid)
+	valid_vid_id = range(1, len_vid+1)[-len_valid_vid:]
+	valid_dataset['videos'] = dataset['videos'][-len_valid_vid:]
+	valid_ann = []
+	for ann in dataset['annotations']:
+		if ann['video_id'] in valid_vid_id:
+			valid_ann.append(ann)
+	valid_dataset['annotations'] = valid_ann
+
+	with open(json_path, 'w', encoding='utf-8') as f:
+		json.dump(valid_dataset, f)
+	print('Done')
+
+
 if __name__ == '__main__':
-	config = 'STMask_plus_resnet50_OVIS_config'
-	main(config)
+	type = 2
+	if type == 1:
+		config = 'STMask_plus_resnet50_OVIS_config'
+		main(config)
+	else:
+		ann_file = '../datasets/YouTube_VOS2021/train/instances.json'
+		split_valid_from_train(ann_file)
+

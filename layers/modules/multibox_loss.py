@@ -45,7 +45,7 @@ class MultiBoxLoss(nn.Module):
 
         self.pos_threshold = pos_threshold
         self.neg_threshold = neg_threshold
-        if cfg.train_track and cfg.clip_prediction_mdoule:
+        if cfg.train_track and cfg.clip_prediction_module:
             self.clip_frames = cfg.train_dataset.clip_frames
         else:
             self.clip_frames = 1
@@ -107,7 +107,7 @@ class MultiBoxLoss(nn.Module):
                 losses_clip = self.track_loss(track_data, pos_clip, ids_t)
             losses.update(losses_clip)
 
-            if cfg.temporal_fusion_module and not cfg.clip_prediction_mdoule:
+            if cfg.temporal_fusion_module and not cfg.clip_prediction_module:
                 # Complie temporal fusion module of STMask in CVPR2021  https://github.com/MinghanLi/STMask
                 gt_bboxes_ref, gt_bboxes_next = gt_bboxes[::2], gt_bboxes[1::2]
                 gt_ids_ref, gt_ids_next = gt_ids[::2], gt_ids[1::2]
@@ -203,7 +203,7 @@ class MultiBoxLoss(nn.Module):
                     _, gt_labels[idx] = split(gt_labels[idx])
                     _, gt_masks[idx] = split(gt_masks[idx])
 
-            if cfg.train_track and cfg.clip_prediction_mdoule:
+            if cfg.train_track and cfg.clip_prediction_module:
                 match_clip(gt_bboxes[idx*self.clip_frames:(idx+1)*self.clip_frames],
                            gt_labels[idx*self.clip_frames:(idx+1)*self.clip_frames],
                            gt_ids[idx*self.clip_frames:(idx+1)*self.clip_frames],
@@ -557,7 +557,7 @@ class MultiBoxLoss(nn.Module):
 
     def track_loss(self, track_data, pos, ids_t=None):
         bs = pos.size(0)
-        if cfg.clip_prediction_mdoule:
+        if cfg.clip_prediction_module:
             clip_frames = 1
         else:
             clip_frames = 2

@@ -33,34 +33,34 @@ class STMask(nn.Module):
 
         self.backbone = construct_backbone(cfg.backbone)
         src_channels = self.backbone.channels
-        if cfg.train_track and cfg.clip_prediction_mdoule:
+        if cfg.train_track and cfg.clip_prediction_module:
             self.clip_frames = cfg.train_dataset.clip_frames
         else:
             self.clip_frames = 1
 
-        if cfg.fpn is not None:
-            # Some hacky rewiring to accomodate the FPN
-            self.fpn = FPN([src_channels[i] for i in cfg.backbone.selected_layers])
-            self.selected_layers = list(range(len(cfg.backbone.selected_layers) + cfg.fpn.num_downsample))
-            if cfg.train_track and cfg.clip_prediction_mdoule:
-                if cfg.clip_prediction_with_correlation:
-                    src_channels = [self.clip_frames*cfg.fpn.num_features+cfg.correlation_patch_size**2] * len(self.selected_layers)
-                else:
-                    src_channels = [self.clip_frames * cfg.fpn.num_features] * len(self.selected_layers)
+        # Some hacky rewiring to accomodate the FPN
+        self.fpn = FPN([src_channels[i] for i in cfg.backbone.selected_layers])
+        self.selected_layers = list(range(len(cfg.backbone.selected_layers) + cfg.fpn.num_downsample))
+        self.fpn_num_features = cfg.fpn.num_features
+        self.correlation_selected_layer = cfg.correlation_selected_layer
+        self.correlation_patch_size = cfg.correlation_patch_size
+        if cfg.train_track and cfg.clip_prediction_module:
+            if cfg.clip_prediction_with_correlation:
+                src_channels = [self.clip_frames*self.fpn_num_features+self.correlation_patch_size**2] * len(self.selected_layers)
             else:
-                src_channels = [cfg.fpn.num_features] * len(self.selected_layers)
-            if cfg.use_bifpn:
-                self.bifpn = nn.Sequential(*[BiFPN(cfg.fpn.num_features)
+                src_channels = [self.clip_frames*self.fpn_num_features] * len(self.selected_layers)
+        else:
+            src_channels = [self.fpn_num_features] * len(self.selected_layers)
+        if cfg.use_bifpn:
+            self.bifpn = nn.Sequential(*[BiFPN(self.fpn_num_features)
                                              for _ in range(cfg.num_bifpn)])
 
         # ------------ build ProtoNet ------------
         self.proto_src = cfg.mask_proto_src
         if self.proto_src is None:
             in_channels = 3
-        elif cfg.fpn is not None:
-            in_channels = cfg.fpn.num_features
         else:
-            in_channels = self.backbone.channels[self.proto_src[0]]
+            in_channels = self.fpn_num_features
 
         if self.proto_src is not None and len(self.proto_src) > 1:
             self.mask_refine = nn.ModuleList([nn.Sequential(*[
@@ -116,9 +116,8 @@ class STMask(nn.Module):
                 track_arch = [(in_channels, 3, {'padding': 1})] * 2 + [(cfg.track_dim, 1, {})]
                 self.track_conv, _ = make_net(in_channels, track_arch, include_bn=True, include_last_relu=False)
 
-            if cfg.use_temporal_info and not cfg.clip_prediction_mdoule:
+            if cfg.use_temporal_info and not cfg.clip_prediction_module:
                 # temporal fusion between multi frames for tracking
-                self.correlation_selected_layer = cfg.correlation_selected_layer
                 if cfg.eval_clip_frames > 1:
                     self.Track_TF_Clip = Track_TF_Clip()
                 else:
@@ -126,7 +125,7 @@ class STMask(nn.Module):
 
                 # track to segment
                 if cfg.temporal_fusion_module:
-                    corr_channels = 2*in_channels + cfg.correlation_patch_size**2
+                    corr_channels = 2*in_channels + self.correlation_patch_size**2
                     pooling_size = (min(cfg.train_dataset.img_scales[-1])//64, max(cfg.train_dataset.img_scales[-1])//64)
                     self.TemporalNet = TemporalNet(corr_channels, cfg.mask_dim, pooling_size)
 
@@ -170,40 +169,59 @@ class STMask(nn.Module):
     def init_weights_coco(self, backbone_path, local_rank=1):
         """ Initialize weights for training. """
         state_dict = torch.load(backbone_path, map_location=torch.device('cpu'))
+        # In case of save models from distributed training
+        for key in list(state_dict.keys()):
+            if key.startswith('module'):
+                state_dict[key[7:]] = state_dict.pop(key)
+
         model_dict = self.state_dict()
 
-        # only remain same modules and layers between pre-trained model and our model
-        for key in list(state_dict.keys()):
-            new_key = key[7:] if key.startswith('module') else key
-            if new_key not in model_dict.keys():
-                del state_dict[key]
-            elif model_dict[new_key].shape != state_dict[key].shape:
-                del state_dict[key]
-            elif new_key != key:
-                state_dict[new_key] = state_dict[key]
-                del state_dict[key]
-
-        state_dict = {k: v for k, v in state_dict.items() if k in model_dict}
-        if local_rank == 0:
-            for k in model_dict.keys():
-                if k not in state_dict:
-                    print('parameters without load weights from pre-trained models:', k)
-
-        model_dict.update(state_dict)
-        self.load_state_dict(model_dict, strict=True)
-
         # Initialize the rest of the conv layers with xavier
+        print('init all weights by Xavier:')
         for name, module in self.named_modules():
-            if isinstance(module, nn.Conv2d) and name+'.weight' not in state_dict:
-                if local_rank == 0:
-                    print('init weights by Xavier:', name)
-
+            if isinstance(module, nn.Conv2d):
                 nn.init.xavier_uniform_(module.weight.data)
                 if module.bias is not None:
                     if cfg.use_focal_loss and 'conf_layer' in name:
                         module.bias.data[0:] = - np.log((1 - cfg.focal_loss_init_pi) / cfg.focal_loss_init_pi)
                     else:
                         module.bias.data.zero_()
+
+                if name+'.weight' not in state_dict.keys():
+                    print('parameters in current model but not in pre-trained model:', name)
+
+        # If use correlation to encode temporal information, we only inflated weights from 2D to 3D in some channels
+        if cfg.clip_prediction_module and cfg.clip_prediction_with_correlation:
+            idx = []
+            idx += range(self.fpn_num_features)
+            for c in range(1, self.clip_frames):
+                left = c*(self.fpn_num_features+self.correlation_patch_size**2)
+                idx += range(left, left+self.fpn_num_features)
+
+        # only update same modules and layers between pre-trained model and our model
+        for key in list(state_dict.keys()):
+            if key in model_dict.keys():
+                if model_dict[key].shape == state_dict[key].shape:
+                    model_dict[key] = state_dict[key]
+                elif cfg.clip_prediction_module and key.startswith('prediction_layers') and 'conf_layer':
+                    # inflated weights from 2D to 3D
+                    print('load parameters with inflated operation from pre-trained models:', key)
+                    inflated_weights = state_dict[key].repeat(self.clip_frames, self.clip_frames, 1, 1) \
+                                        if state_dict[key].dim() == 4 else state_dict[key].repeat(self.clip_frames)
+                    inflated_weights = (inflated_weights / float(self.clip_frames)).to(model_dict[key].device)
+                    if not cfg.clip_prediction_with_correlation:
+                        model_dict[key] = inflated_weights
+                    else:
+                        if state_dict[key].dim() == 4:
+                            model_dict[key][idx][:, idx] = inflated_weights
+                        else:
+                            model_dict[key][idx] = inflated_weights
+                else:
+                    print('parameters in pre-trained model but not in current model:', key)
+            else:
+                print('parameters in pre-trained model but not in current model:', key)
+
+        self.load_state_dict(model_dict, strict=True)
 
     def init_weights(self, backbone_path, local_rank=1):
         """ Initialize weights for training. """
@@ -315,7 +333,7 @@ class STMask(nn.Module):
                 if cfg.share_prediction_module and pred_layer is not self.prediction_layers[0]:
                     pred_layer.parent = [self.prediction_layers[0]]
 
-                if cfg.train_track and cfg.clip_prediction_mdoule:
+                if cfg.train_track and cfg.clip_prediction_module:
                     _, c, h, w = fpn_outs[idx].size()
                     fpn_outs_clip = fpn_outs[idx].reshape(-1, self.clip_frames, c, h, w)
                     pred_x = [fpn_outs_clip[:, 0]]
@@ -323,7 +341,7 @@ class STMask(nn.Module):
                         if cfg.clip_prediction_with_correlation:
                             corr = correlate_operator(fpn_outs_clip[:, frame_idx].contiguous(),
                                                       fpn_outs_clip[:, frame_idx+1].contiguous(),
-                                                      patch_size=cfg.correlation_patch_size,
+                                                      patch_size=self.correlation_patch_size,
                                                       kernel_size=1)
                             # if idx == 0:
                             #     x_clip = x.reshape(-1, self.clip_frames, 3, x.size(-2), x.size(-1))
@@ -363,7 +381,7 @@ class STMask(nn.Module):
         pred_outs['priors'] = pred_outs['priors'].repeat(batch_size//self.clip_frames, 1, 1)
         pred_outs['prior_levels'] = pred_outs['prior_levels'].repeat(batch_size//self.clip_frames, 1)
 
-        if cfg.train_track and cfg.use_temporal_info and not cfg.clip_prediction_mdoule:
+        if cfg.train_track and cfg.use_temporal_info and not cfg.clip_prediction_module:
             # calculate correlation map
             pred_outs['fpn_feat'] = fpn_outs[self.correlation_selected_layer]
 
@@ -389,7 +407,7 @@ class STMask(nn.Module):
                     pred_outs_after_track = self.Track_TF_Clip(self, pred_outs_after_NMS, img_meta, x)
 
                 else:
-                    if cfg.use_temporal_info and not cfg.clip_prediction_mdoule:
+                    if cfg.use_temporal_info and not cfg.clip_prediction_module:
                         # two-frames
                         pred_outs_after_track = self.Track_TF(self, pred_outs_after_NMS, img_meta, img=x)
 

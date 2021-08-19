@@ -201,7 +201,7 @@ dataset_base_vis = Config({
     # images and annotations path
     'ann_file': 'path_to_annotation_file',
     'img_prefix': 'path_to_images_file',
-    # 'img_scales': [(640, 384), (800, 480), (960, 576), (1280, 768)],
+    # 'img_scales': [(640, 384), (800, 480), (960, 576), (1280, 768), (768, 512)],
     'img_scales': [(768, 512)],
     'MS_train': True,
     'preserve_aspect_ratio': True,
@@ -245,13 +245,13 @@ test_YouTube_VOS_dataset = dataset_base_vis.copy({
 
 train_YouTube_VOS2021_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/YouTube_VOS2021/train/JPEGImages',
-    'ann_file': '../datasets/YouTube_VOS2021/train/instances.json',
+    'ann_file': '../datasets/YouTube_VOS2021/train/valid_sub_150.json',
     'has_gt': True,
 })
 
 valid_sub_YouTube_VOS2021_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/YouTube_VOS2021/train/JPEGImages',
-    'ann_file': '../datasets/YouTube_VOS2021/train/instances.json',
+    'ann_file': '../datasets/YouTube_VOS2021/train/valid_sub_150.json',
     'has_gt': True,
 })
 
@@ -276,6 +276,7 @@ train_OVIS_dataset = dataset_base_vis.copy({
 
 valid_sub_OVIS_dataset = dataset_base_vis.copy({
     'img_prefix': '../datasets/OVIS/train',
+    # the last one of ten videos is splited from train data as valid sub data
     'ann_file': '../datasets/OVIS/annotations_valid_sub.json',
     'has_gt': False,
 })
@@ -664,7 +665,7 @@ STMask_base_config = base_config.copy({
 
     # FCA and prediction module settings
     'share_prediction_module': True,
-    'clip_prediction_mdoule': True,
+    'clip_prediction_module': True,
     'clip_prediction_with_correlation': False,
     'clip_prediction_with_external_box': True,
     'clip_prediction_with_individual_box': True,
@@ -672,7 +673,7 @@ STMask_base_config = base_config.copy({
     'pred_conv_kernels': [[3,3], [3,3], [3,3]],
 
     # Mask Settings
-    'train_masks': False,
+    'train_masks': True,
     'mask_alpha': 6.125,
     'mask_proto_src': [0, 1, 2],
     'mask_proto_crop': True,
@@ -752,10 +753,6 @@ STMask_base_config = base_config.copy({
     'nms_with_biou': True,
     'nms_with_miou': True,
     'add_missed_masks': False,
-    'use_train_sub': False,
-    'use_valid_sub': True,
-    'use_test': False,
-    'only_calc_metrics': False,
     'only_count_classes': False,
     'display_corr': False,
     'eval_single_im': False,
@@ -1027,8 +1024,9 @@ STMask_plus_resnet50_YTVIS2021_config = STMask_plus_resnet50_config.copy({
     'classes': YouTube_VOS2021_CLASSES,
 
     'backbone': STMask_plus_resnet50_config.backbone.copy({
-        'path': 'STMask_plus_resnet50_coco_23.pth',  # input size between 640 and 800
+        'path': 'STMask_plus_resnet50_coco_960_53_260000.pth',
     }),
+
 })
 
 STMask_plus_resnet50_ada_YTVIS2021_config = STMask_plus_resnet50_ada_config.copy({

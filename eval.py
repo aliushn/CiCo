@@ -35,11 +35,14 @@ def str2bool(v):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='YOLACT COCO Evaluation')
+    parser.add_argument('--epoch', default=0, type=int)
     parser.add_argument('--batch_size', default=1, type=int,
                         help='Batch size for training')
     parser.add_argument('--trained_model',
                         default='weights/ssd300_mAP_77.43_v2.pth', type=str,
                         help='Trained state_dict file path to open. If "interrupt", this will open the interrupt file.')
+    parser.add_argument('--eval_data', default='valid', type=str, help='data type')
+    parser.add_argument('--overlap_frames', default=0, type=int, help='the overlapped frames between two video clips')
     parser.add_argument('--top_k', default=100, type=int,
                         help='Further restrict the number of predictions to parse')
     parser.add_argument('--cuda', default=True, type=str2bool,
@@ -321,10 +324,12 @@ def prep_display_single(dets_out, img, img_meta=None, undo_transform=True, mask_
             if display_mode is not None:
                 score = scores[j]
 
+            font_thickness = 0.5*max(min(ori_h, ori_w)//360, 1)
+
             if args.display_bboxes:
                 cv2.rectangle(img_numpy, (x[0], y[0]), (x[1], y[1]), color, 1)
                 if j < dets_out['priors'].size(0):
-                    cv2.rectangle(img_numpy, (px1, py1), (px2, py2), pcolor, 2, lineType=8)
+                    cv2.rectangle(img_numpy, (px1, py1), (px2, py2), pcolor, font_thickness, lineType=8)
                 # cv2.rectangle(img_numpy, (x[4], y[4]), (x[5], y[5]), fcolor, 2)
 
             if args.display_text:
@@ -349,7 +354,6 @@ def prep_display_single(dets_out, img, img_meta=None, undo_transform=True, mask_
 
                 font_face = cv2.FONT_HERSHEY_DUPLEX
                 font_scale = 0.5
-                font_thickness = 1
 
                 text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
 
@@ -364,7 +368,7 @@ def prep_display_single(dets_out, img, img_meta=None, undo_transform=True, mask_
 
 def evaluate(net: STMask, dataset, ann_file=None, epoch=-1):
     eval_clip_frames = cfg.eval_clip_frames
-    n_overlapped_frames = eval_clip_frames // 2
+    n_overlapped_frames = args.overlap_frames
     n_newly_frames = eval_clip_frames - n_overlapped_frames
 
     dataset_size = len(dataset.vid_ids)
@@ -469,8 +473,7 @@ def evaluate(net: STMask, dataset, ann_file=None, epoch=-1):
 
 def evaluate_clip(net: STMask, dataset, ann_file=None, epoch=-1):
     clip_frames = cfg.train_dataset.clip_frames
-    overlap_frames = 1
-    n_newly_frames = clip_frames - overlap_frames
+    n_newly_frames = clip_frames - args.overlap_frames
     dataset_size = len(dataset.vid_ids)
     # progress_bar = ProgressBar(dataset_size, dataset_size)
 
@@ -549,10 +552,7 @@ def evaluate_clip(net: STMask, dataset, ann_file=None, epoch=-1):
                 json_results.append(vid_obj)
 
     if not args.display:
-        if epoch >= 0:
-            json_path = os.path.join(args.save_folder, 'results_'+str(epoch)+'.json')
-        else:
-            json_path = os.path.join(args.save_folder, 'results.json')
+        json_path = os.path.join(args.save_folder, 'results_'+str(epoch)+'.json')
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(json_results, f)
         if ann_file is not None:
@@ -647,22 +647,22 @@ if __name__ == '__main__':
         if args.eval_dataset is not None:
             set_dataset(args.eval_dataset, 'eval')
 
-        if cfg.use_train_sub:
+        if args.eval_data == 'train':
             print('load train_sub dataset')
             cfg.train_dataset.has_gt = False
             val_dataset = get_dataset('vis', cfg.train_dataset, cfg.backbone.transform)
             ann_file = cfg.train_dataset.ann_file
-        elif cfg.use_valid_sub:
+        elif args.eval_data == 'valid_sub':
             print('load valid_sub dataset')
             cfg.valid_sub_dataset.has_gt = False
             val_dataset = get_dataset('vis', cfg.valid_sub_dataset, cfg.backbone.transform)
             ann_file = cfg.valid_sub_dataset.ann_file
 
-        elif cfg.use_test:
+        elif args.eval_data == 'test':
             print('load test dataset')
             cfg.test_dataset.has_gt = False
             val_dataset = get_dataset('vis', cfg.test_dataset, cfg.backbone.transform)
-        else:
+        elif args.eval_data == 'valid':
             print('load valid dataset')
             val_dataset = get_dataset('vis', cfg.valid_dataset, cfg.backbone.transform)
     else:
@@ -708,7 +708,7 @@ if __name__ == '__main__':
                 evalvideo(net, args.video)
 
         else:
-            if cfg.only_calc_metrics:
+            if args.eval_data == 'metric':
                 print('calculate evaluation metrics ...')
                 ann_file = cfg.valid_sub_dataset.ann_file
                 dt_file = args.save_folder + 'results.json'
@@ -721,9 +721,9 @@ if __name__ == '__main__':
                 for i_m in range(len(metrics_name)):
                     writer.add_scalar('valid_metrics/' + metrics_name[i_m], metrics[i_m], 1)
             else:
-                if cfg.train_track and cfg.clip_prediction_mdoule:
-                    evaluate_clip(net, val_dataset, ann_file=ann_file)
+                if cfg.train_track and cfg.clip_prediction_module:
+                    evaluate_clip(net, val_dataset, ann_file=ann_file, epoch=args.epoch)
                 else:
-                    evaluate(net, val_dataset, ann_file=ann_file)
+                    evaluate(net, val_dataset, ann_file=ann_file, epoch=args.epoch)
 
 

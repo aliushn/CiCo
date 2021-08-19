@@ -62,7 +62,7 @@ class PredictionModule_FC(nn.Module):
         elif cfg.mask_proto_with_levels:
             self.mask_dim = self.mask_dim * 2
 
-        if cfg.train_track and cfg.clip_prediction_mdoule:
+        if cfg.train_track and cfg.clip_prediction_module:
             self.clip_frames = cfg.train_dataset.clip_frames
         else:
             self.clip_frames = 1
@@ -147,7 +147,7 @@ class PredictionModule_FC(nn.Module):
                     return nn.Sequential(*sum([[
                         nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
                         # nn.GroupNorm(32, in_channels),
-                        nn.BatchNorm2d(in_channels),
+                        # nn.BatchNorm2d(in_channels),
                         nn.ReLU(inplace=True)
                     ] for _ in range(num_layers)], []))
 

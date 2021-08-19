@@ -270,16 +270,16 @@ def train():
                     if args.save_interval > 0:
                         if cfg.data_type == 'vis':
                             print('None Inference!')
-                            # setup_eval()
+                            setup_eval()
                             # valid_sub, the last one ten of training data
-                            # cfg.valid_sub_dataset.has_gt = False
-                            # valid_sub_dataset = get_dataset(cfg.data_type, cfg.valid_sub_dataset, cfg.backbone.transform)
-                            # valid_sub_ann_file = cfg.valid_sub_dataset.ann_file
-                            # compute_validation_map(net, valid_sub_dataset, ann_file=valid_sub_ann_file, epoch=epoch)
+                            cfg.valid_sub_dataset.has_gt = False
+                            valid_sub_dataset = get_dataset(cfg.data_type, cfg.valid_sub_dataset, cfg.backbone.transform)
+                            valid_sub_ann_file = cfg.valid_sub_dataset.ann_file
+                            compute_validation_map(net, valid_sub_dataset, ann_file=valid_sub_ann_file, epoch=epoch)
 
                             # valid datasets
-                            # valid_dataset = get_dataset(cfg.data_type, cfg.valid_dataset, cfg.backbone.transform)
-                            # compute_validation_map(net, valid_dataset, epoch=epoch)
+                            valid_dataset = get_dataset(cfg.data_type, cfg.valid_dataset, cfg.backbone.transform)
+                            compute_validation_map(net, valid_dataset, epoch=epoch)
                         else:
                             setup_eval_coco()
                             compute_validation_map_coco(epoch, iteration, net, cfg.valid_dataset, log if args.log else None)
