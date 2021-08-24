@@ -700,11 +700,11 @@ STMask_base_config = base_config.copy({
 
     # FCA and prediction module settings
     'share_prediction_module': True,
-    'clip_prediction_module': False,
-    'clip_prediction_with_correlation': False,
-    'clip_prediction_with_external_box': False,
-    'clip_prediction_with_individual_box': False,
-    'cubic_prediction_with_reduced_channels': False,
+    'clip_prediction_module': True,
+    'clip_prediction_with_correlation': True,
+    'clip_prediction_with_external_box': True,
+    'clip_prediction_with_individual_box': True,
+    'cubic_prediction_with_reduced_channels': True,
     'extra_layers': (4, 4, 4),   # class, box, track
     'pred_conv_kernels': [[3,3], [3,3], [3,3]],
 
@@ -719,7 +719,7 @@ STMask_base_config = base_config.copy({
     'mask_proto_coeff_diversity_loss': False,
     'mask_proto_crop_with_pred_box': False,
     'mask_proto_coeff_occlusion': False,
-    'mask_dice_coefficient': True,
+    'mask_dice_coefficient': False,
     'mask_loss_with_ori_size': False,
 
     # Dynamic Mask Settings
@@ -730,7 +730,7 @@ STMask_base_config = base_config.copy({
     # SipMask uses multi heads for obtaining better mask segmentation
     'use_sipmask': False,
     'sipmask_head': 4,
-    'use_semantic_segmentation_loss': True,
+    'use_semantic_segmentation_loss': False,
     'semantic_segmentation_alpha': 1,
 
     # train boxes

@@ -81,7 +81,7 @@ class STMask(nn.Module):
         # ------- Build multi-scales prediction head  ------------
         self.pred_scales = cfg.backbone.pred_scales
         self.pred_aspect_ratios = cfg.backbone.pred_aspect_ratios
-        self.num_priors = len(self.pred_scales[0])
+        self.num_priors = len(self.pred_scales[0]) * len(self.pred_aspect_ratios[0][0])
         #
         if cfg.cubic_prediction_with_reduced_channels:
             self.fpn_reduced_channels = nn.Sequential(*[
@@ -208,26 +208,50 @@ class STMask(nn.Module):
             if key in model_dict.keys():
                 if model_dict[key].shape == state_dict[key].shape:
                     model_dict[key] = state_dict[key]
-                elif cfg.clip_prediction_module and key.startswith('prediction_layers') and 'conf_layer':
-                    if cfg.cubic_prediction_with_reduced_channels and cfg.clip_prediction_with_correlation:
+                elif cfg.clip_prediction_module and key.startswith('prediction_layers'):
+                    if 'conf_layer' in key:
+                        continue
+
+                    # # inflated or reduced weights from 2D (single frame) to 3D (multi-frames)
+                    if cfg.cubic_prediction_with_reduced_channels:
                         print('load parameters with reduced channels operation from pre-trained models:', key)
-                        if state_dict[key].dim() == 4:
-                            model_dict[key][idx][:, idx] = state_dict[key].to(model_dict[key].device)
+                        if key.split('.')[-2] in {'bbox_layer', 'centerness_layer'}:
+                            if state_dict[key].dim() == 4:
+                                _, c_in, kh, kw = state_dict[key].shape
+                                init_weights = state_dict[key].reshape(self.num_priors, -1, c_in, kh, kw).repeat(1, self.clip_frames, 1, 1, 1).reshape(-1, c_in, kh, kw)
+                            else:
+                                init_weights = state_dict[key].reshape(self.num_priors, -1).repeat(1, self.clip_frames).reshape(-1)
                         else:
-                            model_dict[key][idx] = state_dict[key].to(model_dict[key].device)
+                            init_weights = state_dict[key]
+
                     else:
-                        # inflated weights from 2D to 3D
                         print('load parameters with inflated operation from pre-trained models:', key)
-                        inflated_weights = state_dict[key].repeat(self.clip_frames, self.clip_frames, 1, 1) \
+                        if key.split('.')[-2] in {'bbox_layer', 'centerness_layer'}:
+                            if state_dict[key].dim() == 4:
+                                _, c_in, kh, kw = state_dict[key].shape
+                                init_weights = state_dict[key].reshape(self.num_priors, -1, c_in, kh, kw).repeat(1, self.clip_frames, self.clip_frames, 1, 1).reshape(-1, self.clip_frames*c_in, kh, kw)
+                            else:
+                                init_weights = state_dict[key].reshape(self.num_priors, -1).repeat(1, self.clip_frames).reshape(-1)
+                        elif key.split('.')[-2] in {'mask_layer'}:
+                            init_weights = state_dict[key].repeat(1, self.clip_frames, 1, 1)
+                        else:
+                            init_weights = state_dict[key].repeat(self.clip_frames, self.clip_frames, 1, 1) \
                                         if state_dict[key].dim() == 4 else state_dict[key].repeat(self.clip_frames)
-                        inflated_weights = (inflated_weights / float(self.clip_frames)).to(model_dict[key].device)
-                        if not cfg.clip_prediction_with_correlation:
-                            model_dict[key] = inflated_weights
+                        init_weights = (init_weights / float(self.clip_frames))
+
+                    if not cfg.clip_prediction_with_correlation:
+                        model_dict[key] = init_weights.to(model_dict[key].device)
+                    else:
+                        if 'extra' in key:
+                            if state_dict[key].dim() == 4:
+                                model_dict[key][idx][:, idx] = init_weights.to(model_dict[key].device)
+                            else:
+                                model_dict[key][idx] = init_weights.to(model_dict[key].device)
                         else:
                             if state_dict[key].dim() == 4:
-                                model_dict[key][idx][:, idx] = inflated_weights
+                                model_dict[key][:, idx] = init_weights.to(model_dict[key].device)
                             else:
-                                model_dict[key][idx] = inflated_weights
+                                model_dict[key] = init_weights.to(model_dict[key].device)
                 else:
                     print('parameters in pre-trained model but not in current model:', key)
             else:
