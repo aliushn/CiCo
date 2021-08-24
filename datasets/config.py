@@ -149,7 +149,7 @@ dataset_base_coco = Config({
 
     # Whether or not to load GT. If this is False, eval.py quantitative evaluation won't work.
     'has_gt': True,
-    'img_scales': [640, 672, 704, 736, 768, 800],
+    'img_scales': [640, 704, 768, 832, 896, 960],
     'MS_train': True,
     'preserve_aspect_ratio': True,
 
@@ -719,7 +719,7 @@ STMask_base_config = base_config.copy({
     'mask_proto_coeff_diversity_loss': False,
     'mask_proto_crop_with_pred_box': False,
     'mask_proto_coeff_occlusion': False,
-    'mask_dice_coefficient': False,
+    'mask_dice_coefficient': True,
     'mask_loss_with_ori_size': False,
 
     # Dynamic Mask Settings
@@ -787,7 +787,7 @@ STMask_base_config = base_config.copy({
     'nms_thresh': 0.5,
     'eval_conf_thresh': 0.1,
     'nms_with_biou': True,
-    'nms_with_miou': True,
+    'nms_with_miou': False,
     'add_missed_masks': False,
     'only_count_classes': False,
     'display_corr': False,
@@ -841,7 +841,7 @@ STMask_plus_base_config = STMask_base_config.copy({
 STMask_plus_base_fc_ada_config = STMask_plus_base_config.copy({
     'name': 'STMask_plus_base_fc_ada',
 
-    'backbone': STMask_plus_base_config.copy({
+    'backbone': STMask_plus_base_config.backbone.copy({
         'pred_aspect_ratios':  [[[ [3, 3], [3, 5],  [5, 3] ]]] * 5,
     }),
 
@@ -1140,8 +1140,8 @@ STMask_base_coco_config = STMask_base_config.copy({
 
 })
 
-STMask_base_coco_fc_ada_config = STMask_base_coco_config.copy({
-    'name': 'STMask_base_coco_fc_ada',
+STMask_base_fc_ada_coco_config = STMask_base_coco_config.copy({
+    'name': 'STMask_base_fc_ada_coco',
 
     'backbone': STMask_base_fc_ada_config.backbone.copy({
         'path': 'resnet101_reducedfc.pth',
@@ -1167,7 +1167,7 @@ STMask_plus_base_coco_config = STMask_base_coco_config.copy({
 
 })
 
-STMask_plus_base_coco_fc_ada_config = STMask_base_coco_fc_ada_config.copy({
+STMask_plus_base_fc_ada_coco_config = STMask_base_fc_ada_coco_config.copy({
     'name': 'STMask_plus_base_fc_ada_coco',
 
     'backbone': STMask_plus_base_fc_ada_config.backbone.copy({
@@ -1184,7 +1184,7 @@ STMask_resnet50_coco_config = STMask_base_coco_config.copy({
     }),
 })
 
-STMask_resnet50_coco_fc_ada_config = STMask_base_coco_fc_ada_config.copy({
+STMask_resnet50_fc_ada_coco_config = STMask_base_fc_ada_coco_config.copy({
     'name': 'STMask_resnet50_fc_ada_coco',
 
     'backbone': STMask_resnet50_fc_ada_config.backbone.copy({
@@ -1200,7 +1200,7 @@ STMask_plus_resnet50_coco_config = STMask_resnet50_coco_config.copy({
     }),
 })
 
-STMask_plus_resnet50_coco_fc_ada_config = STMask_plus_base_coco_fc_ada_config.copy({
+STMask_plus_resnet50_fc_ada_coco_config = STMask_plus_base_fc_ada_coco_config.copy({
     'name': 'STMask_plus_resnet50_fc_ada_coco',
 
     'backbone': STMask_plus_resnet50_fc_ada_config.backbone.copy({

@@ -255,7 +255,7 @@ def train():
                     log.log('train', loss=loss_info, epoch=epoch, iter=iteration,
                             lr=round(cur_lr, 10), elapsed=elapsed)
 
-                if iteration % args.save_interval == 0 and epoch > 0 and args.local_rank == 0:
+                if iteration % args.save_interval == 0 and iteration > 0 and args.local_rank == 0:
                     if args.keep_latest:
                         latest = SavePath.get_latest(args.save_folder, cfg.name)
 
