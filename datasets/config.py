@@ -295,6 +295,40 @@ test_OVIS_dataset = dataset_base_vis.copy({
     'has_gt': False,
 })
 
+# ------------------------ ImageNet VID -------------------- #
+dataset_base_vid = Config({
+    'type': 'VIDDataset',
+
+    # images and annotations path
+    'img_prefix': 'path_to_images_file',
+    'ann_file': 'path_to_annotation_file',
+    'img_index': 'path_to_images_index',
+    # 'img_scales': [(640, 384), (800, 480), (960, 576), (1280, 768), (768, 512)],
+    'img_scales': [(768, 512)],
+    'MS_train': True,
+    'preserve_aspect_ratio': True,
+    'tranform': None,
+    'size_divisor': 32,
+    'with_mask': False,
+    'with_crowd': True,
+    'with_label': True,
+    'with_track': True,
+    'clip_frames': 2,
+    'has_gt': True,
+
+})
+
+train_VID_dataset = dataset_base_vid.copy({
+    'img_prefix': '../datasets/ILSVRC2015/Data/VID',
+    'ann_file': '../datasets/ILSVRC2015/Annotations/VID',
+    'img_index': '../datasets/ILSVRC2015/ImageSets/VID_train_every10frames.txt'
+})
+
+valid_VID_dataset = dataset_base_vid.copy({
+    'img_prefix': '../datasets/ILSVRC2015/Data/VID',
+    'ann_file': '../datasets/ILSVRC2015/Annotations/VID',
+    'img_index': '../datasets/ILSVRC2015/ImageSets/VID_val_videos.txt'
+})
 
 # ----------------------- TRANSFORMS ----------------------- #
 
@@ -387,7 +421,8 @@ resnet50_backbone = resnet101_backbone.copy({
 
 resnet50_dcn_inter2_backbone = resnet50_backbone.copy({
     'name': 'ResNet50_DCN_Interval3',
-    'path': 'yolact_plus_resnet50_54.pth',
+    # 'path': 'yolact_plus_resnet50_54.pth',
+    'path': 'STMask_plus_resnet50_coco_960_53_260000.pth',
     'args': ([3, 4, 6, 3], [0, 4, 6, 3], 2),
 })
 
@@ -559,7 +594,7 @@ base_config = Config({
     'use_change_matching': False,
 
     # What params should the final head layers have (the ones that predict box, confidence, and mask coeffs)
-    'pred_conv_kernels':[[3,3], [3,5], [5,3]],
+    'pred_conv_kernels': [[3,3], [3,5], [5,3]],
 
     # Add extra layers between the backbone and the network heads
     # The order is (conf, bbox, track, mask)
@@ -633,8 +668,8 @@ STMask_base_config = base_config.copy({
     'classes': YouTube_VOS_CLASSES,
 
     # Training params
-    'lr_steps': (16, 24, 30),
-    'max_epoch': 36,
+    'lr_steps': (12, 18, 22),
+    'max_epoch': 24,
 
     # Loss params
     'conf_alpha': 5,
@@ -665,10 +700,11 @@ STMask_base_config = base_config.copy({
 
     # FCA and prediction module settings
     'share_prediction_module': True,
-    'clip_prediction_module': True,
+    'clip_prediction_module': False,
     'clip_prediction_with_correlation': False,
-    'clip_prediction_with_external_box': True,
-    'clip_prediction_with_individual_box': True,
+    'clip_prediction_with_external_box': False,
+    'clip_prediction_with_individual_box': False,
+    'cubic_prediction_with_reduced_channels': False,
     'extra_layers': (4, 4, 4),   # class, box, track
     'pred_conv_kernels': [[3,3], [3,3], [3,3]],
 
@@ -694,7 +730,7 @@ STMask_base_config = base_config.copy({
     # SipMask uses multi heads for obtaining better mask segmentation
     'use_sipmask': False,
     'sipmask_head': 4,
-    'use_semantic_segmentation_loss': False,
+    'use_semantic_segmentation_loss': True,
     'semantic_segmentation_alpha': 1,
 
     # train boxes
@@ -723,7 +759,7 @@ STMask_base_config = base_config.copy({
     # temporal fusion module settings
     'temporal_fusion_module': True,
     't2s_with_roialign': False,
-    'correlation_patch_size': 11,
+    'correlation_patch_size': 5,
     'correlation_selected_layer': 1,
     'boxshift_with_pred_box': False,
     'maskshift_alpha': 6.125,
@@ -760,38 +796,29 @@ STMask_base_config = base_config.copy({
 
 
 # ----------------------- STMask-plus CONFIGS ----------------------- #
-STMask_resnet152_ori_config = STMask_base_config.copy({
-    'name': 'STMask_resnet152_base',
+STMask_resnet152_config = STMask_base_config.copy({
+    'name': 'STMask_resnet152',
 
     'backbone': resnet152_backbone.copy({
         'path': 'STMask_resnet152_coco_ori_19.pth',
         'selected_layers': list(range(1, 4)),
-        'pred_aspect_ratios': STMask_base_config.backbone.pred_aspect_ratios,   # FCA
+        'pred_aspect_ratios': STMask_base_config.backbone.pred_aspect_ratios,
         'pred_scales': STMask_base_config.backbone.pred_scales,
     }),
 
 })
 
 # only turn on feature calibration for anchors (FCA) and temporal fusion module (TF)
-STMask_plus_base_config = STMask_base_config.copy({
-    'name': 'STMask_plus_base',
+STMask_base_fc_ada_config = STMask_base_config.copy({
+    'name': 'STMask_base_fc_ada',
 
-    'backbone': resnet101_dcn_inter3_backbone.copy({
-        'selected_layers': list(range(1, 4)),
-        'pred_aspect_ratios': [[[ [3, 3], [3, 5],  [5, 3] ]]] * 5,   # FCA
-        'pred_scales': STMask_base_config.backbone.pred_scales,
+    'backbone': STMask_base_config.copy({
+        'pred_aspect_ratios':  [[[ [3, 3], [3, 5],  [5, 3] ]]] * 5,
     }),
 
+    # Feature calibration
     'use_feature_calibration': True,
     'pred_conv_kernels': [[3,3], [3,5], [5,3]],
-
-})
-
-STMask_plus_base_ada_config = STMask_plus_base_config.copy({
-    'name': 'STMask_plus_base_ada',
-
-    # FCB settings
-    'use_feature_calibration': True,
     'use_pred_offset': True,
     'use_dcn_class': True,
     'use_dcn_track': False,
@@ -799,16 +826,40 @@ STMask_plus_base_ada_config = STMask_plus_base_config.copy({
 
 })
 
-STMask_plus_base_ali_config = STMask_plus_base_config.copy({
-    'name': 'STMask_plus_base_ali',
+STMask_plus_base_config = STMask_base_config.copy({
+    'name': 'STMask_plus_base',
 
-    # FCB settings
+    'backbone': resnet101_dcn_inter3_backbone.copy({
+        'selected_layers': list(range(1, 4)),
+        'pred_aspect_ratios': STMask_base_config.backbone.pred_aspect_ratios,
+        'pred_scales': STMask_base_config.backbone.pred_scales,
+    }),
+
+})
+
+# only turn on feature calibration for anchors (FCA) and temporal fusion module (TF)
+STMask_plus_base_fc_ada_config = STMask_plus_base_config.copy({
+    'name': 'STMask_plus_base_fc_ada',
+
+    'backbone': STMask_plus_base_config.copy({
+        'pred_aspect_ratios':  [[[ [3, 3], [3, 5],  [5, 3] ]]] * 5,
+    }),
+
+    # Feature calibration
     'use_feature_calibration': True,
-    'use_pred_offset': False,
+    'pred_conv_kernels': [[3,3], [3,5], [5,3]],
+    'use_pred_offset': True,
     'use_dcn_class': True,
     'use_dcn_track': False,
     'use_dcn_mask': False,
 
+})
+
+STMask_plus_base_fc_ali_config = STMask_plus_base_fc_ada_config.copy({
+    'name': 'STMask_plus_base_fc_ali',
+
+    # FCB settings
+    'use_pred_offset': False,
 })
 
 # ----------------------- STMask-resnet50 CONFIGS ----------------------- #
@@ -821,40 +872,40 @@ STMask_resnet50_config = STMask_base_config.copy({
     }),
 })
 
-STMask_plus_resnet50_config = STMask_plus_base_config.copy({
-    'name': 'STMask_plus_resnet50',
-    'backbone': resnet50_dcn_inter2_backbone.copy({
-        'path': 'STMask_plus_resnet50_coco_960_53_260000.pth',
-        'selected_layers': list(range(1, 4)),
+STMask_resnet50_fc_ada_config = STMask_base_fc_ada_config.copy({
+    'name': 'STMask_plus_resnet50_fc_ada',
 
-        'pred_scales': STMask_plus_base_config.backbone.pred_scales,
-        'pred_aspect_ratios': STMask_plus_base_config.backbone.pred_aspect_ratios,
+    'backbone': STMask_resnet50_config.backbone.copy({
+        'pred_aspect_ratios': [[[ [3, 3], [3, 5],  [5, 3] ]]] * 5,
     }),
 
 })
 
-STMask_plus_resnet50_ada_config = STMask_plus_resnet50_config.copy({
-    'name': 'STMask_plus_resnet50_ada',
+STMask_plus_resnet50_config = STMask_plus_base_config.copy({
+    'name': 'STMask_plus_resnet50',
 
-    # FCB settings
-    'use_feature_calibration': True,
-    'use_pred_offset': True,
-    'use_dcn_class': True,
-    'use_dcn_track': False,
-    'use_dcn_mask': False,
+    'backbone': resnet50_dcn_inter2_backbone.copy({
+        'selected_layers': list(range(1, 4)),
+        'pred_scales': STMask_base_config.backbone.pred_scales,
+        'pred_aspect_ratios': STMask_base_config.backbone.pred_aspect_ratios,
+    }),
 
 })
 
-STMask_plus_resnet50_ali_config = STMask_plus_resnet50_config.copy({
-    'name': 'STMask_plus_resnet50_ali',
+STMask_plus_resnet50_fc_ada_config = STMask_plus_base_fc_ada_config.copy({
+    'name': 'STMask_plus_resnet50_fc_ada',
+
+    'backbone': STMask_plus_resnet50_config.backbone.copy({
+        'pred_aspect_ratios': [[[ [3, 3], [3, 5],  [5, 3] ]]] * 5,
+    }),
+
+})
+
+STMask_plus_resnet50_fc_ali_config = STMask_plus_resnet50_fc_ada_config.copy({
+    'name': 'STMask_plus_resnet50_fc_ali',
 
     # FCB settings
-    'use_feature_calibration': True,
     'use_pred_offset': False,
-    'use_dcn_class': True,
-    'use_dcn_track': False,
-    'use_dcn_mask': False,
-
 })
 
 
@@ -895,8 +946,8 @@ STMask_plus_base_OVIS_config = STMask_plus_base_config.copy({
     'classes': OVIS_CLASSES,
 })
 
-STMask_plus_base_ada_OVIS_config = STMask_plus_base_ada_config.copy({
-    'name': 'STMask_plus_base_ada_OVIS',
+STMask_plus_base_fc_ada_OVIS_config = STMask_plus_base_fc_ada_config.copy({
+    'name': 'STMask_plus_base_fc_ada_OVIS',
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
@@ -907,7 +958,7 @@ STMask_plus_base_ada_OVIS_config = STMask_plus_base_ada_config.copy({
     'classes': OVIS_CLASSES,
 })
 
-STMask_plus_base_ali_OVIS_config = STMask_plus_base_ali_config.copy({
+STMask_plus_base_fc_ali_OVIS_config = STMask_plus_base_fc_ali_config.copy({
     'name': 'STMask_plus_base_ada_OVIS',
 
     # Dataset stuff
@@ -930,14 +981,10 @@ STMask_plus_resnet50_OVIS_config = STMask_plus_resnet50_config.copy({
     'num_classes': 25,  # This should not include the background class
     'classes': OVIS_CLASSES,
 
-    'backbone': STMask_plus_resnet50_config.backbone.copy({
-        'path': 'STMask_plus_resnet50_coco_960_53_260000.pth',  # input size between 640 and 800
-    }),
-
 })
 
-STMask_plus_resnet50_ada_OVIS_config = STMask_plus_resnet50_ada_config.copy({
-    'name': 'STMask_plus_resnet50_ada_OVIS',
+STMask_plus_resnet50_fc_ada_OVIS_config = STMask_plus_resnet50_fc_ada_config.copy({
+    'name': 'STMask_plus_resnet50_fc_ada_OVIS',
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
@@ -948,8 +995,8 @@ STMask_plus_resnet50_ada_OVIS_config = STMask_plus_resnet50_ada_config.copy({
     'classes': OVIS_CLASSES,
 })
 
-STMask_plus_resnet50_ali_OVIS_config = STMask_plus_resnet50_ali_config.copy({
-    'name': 'STMask_plus_resnet50_ada_OVIS',
+STMask_plus_resnet50_fc_ali_OVIS_config = STMask_plus_resnet50_fc_ali_config.copy({
+    'name': 'STMask_plus_resnet50_fc_ali_OVIS',
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
@@ -960,8 +1007,8 @@ STMask_plus_resnet50_ali_OVIS_config = STMask_plus_resnet50_ali_config.copy({
     'classes': OVIS_CLASSES,
 })
 
-STMask_resnet152_OVIS_ori_config = STMask_resnet152_ori_config.copy({
-    'name': 'STMask_resnet152_OVIS_ori',
+STMask_resnet152_OVIS_config = STMask_resnet152_config.copy({
+    'name': 'STMask_resnet152_OVIS',
 
     # Dataset stuff
     'train_dataset': train_OVIS_dataset,
@@ -974,7 +1021,7 @@ STMask_resnet152_OVIS_ori_config = STMask_resnet152_ori_config.copy({
 })
 
 
-STMask_plus_resnet152_OVIS_config = STMask_base_OVIS_config.copy({
+STMask_plus_resnet152_OVIS_config = STMask_plus_base_OVIS_config.copy({
     'name': 'STMask_plus_resnet152_OVIS',
     'backbone': resnet152_dcn_inter3_backbone.copy({
         'path': 'STMask_plus_resnet152_coco_20.pth',
@@ -982,8 +1029,6 @@ STMask_plus_resnet152_OVIS_config = STMask_base_OVIS_config.copy({
         'pred_scales': STMask_base_config.backbone.pred_scales,
         'pred_aspect_ratios': STMask_base_config.backbone.pred_aspect_ratios,
     }),
-    'use_feature_calibration': False,
-    'pred_conv_kernels': [[3,3], [3,3], [3,3]],
 
 })
 
@@ -1000,7 +1045,7 @@ STMask_plus_base_YTVIS2021_config = STMask_plus_base_config.copy({
     'classes': YouTube_VOS2021_CLASSES,
 })
 
-STMask_plus_base_ada_YTVIS2021_config = STMask_plus_base_ada_config.copy({
+STMask_plus_base_fc_ada_YTVIS2021_config = STMask_plus_base_fc_ada_config.copy({
     'name': 'STMask_plus_base_ada_YTVIS2021',
 
     # Dataset stuff
@@ -1023,14 +1068,10 @@ STMask_plus_resnet50_YTVIS2021_config = STMask_plus_resnet50_config.copy({
     'num_classes': 40,  # This should not include the background class
     'classes': YouTube_VOS2021_CLASSES,
 
-    'backbone': STMask_plus_resnet50_config.backbone.copy({
-        'path': 'STMask_plus_resnet50_coco_960_53_260000.pth',
-    }),
-
 })
 
-STMask_plus_resnet50_ada_YTVIS2021_config = STMask_plus_resnet50_ada_config.copy({
-    'name': 'STMask_plus_resnet50_ada_YTVIS2021',
+STMask_plus_resnet50_fc_ada_YTVIS2021_config = STMask_plus_resnet50_fc_ada_config.copy({
+    'name': 'STMask_plus_resnet50_fc_ada_YTVIS2021',
 
     # Dataset stuff
     'train_dataset': train_YouTube_VOS2021_dataset,
@@ -1041,10 +1082,45 @@ STMask_plus_resnet50_ada_YTVIS2021_config = STMask_plus_resnet50_ada_config.copy
     'classes': YouTube_VOS2021_CLASSES,
 })
 
+# ----------------------- VID configs------------------------------------------ #
+STMask_base_VID_config = STMask_base_config.copy({
+    'name': 'STMask_base_VID',
+
+    # Dataset stuff
+    'train_dataset': train_VID_dataset,
+    'valid_dataset': valid_VID_dataset,
+    'test_dataset': train_VID_dataset,
+    'num_classes': 30,
+
+    'train_masks': False,
+
+})
+
+STMask_resnet50_VID_config = STMask_base_VID_config.copy({
+    'name': 'STMask_resnet50_VID',
+
+    'backbone': STMask_resnet50_config.backbone,
+    'train_masks': False,
+
+})
+
+STMask_plus_resnet50_VID_config = STMask_plus_resnet50_config.copy({
+    'name': 'STMask_plus_resnet50_VID',
+
+    # Dataset stuff
+    'train_dataset': train_VID_dataset,
+    'valid_dataset': valid_VID_dataset,
+    'test_dataset': train_VID_dataset,
+    'num_classes': 30,
+
+    'train_masks': False,
+
+})
+
 # ----------------------- COCO_YOLACT++ CONFIGS ----------------------- #
 
-STMask_base_coco_ori_config = STMask_base_config.copy({
-    'name': 'STMask_base_coco_ori',
+STMask_base_coco_config = STMask_base_config.copy({
+    'name': 'STMask_base_coco',
 
     # Dataset stuff
     'train_dataset': coco2017_train_dataset,
@@ -1064,17 +1140,21 @@ STMask_base_coco_ori_config = STMask_base_config.copy({
 
 })
 
-STMask_base_coco_config = STMask_base_coco_ori_config.copy({
-    'name': 'STMask_base_coco',
+STMask_base_coco_fc_ada_config = STMask_base_coco_config.copy({
+    'name': 'STMask_base_coco_fc_ada',
 
-    'backbone': STMask_base_config.backbone.copy({
+    'backbone': STMask_base_fc_ada_config.backbone.copy({
         'path': 'resnet101_reducedfc.pth',
-        'pred_aspect_ratios': STMask_plus_base_config.backbone.pred_aspect_ratios,   # FCA
-        'pred_scales': STMask_plus_base_config.backbone.pred_scales,
     }),
 
     'use_feature_calibration': True,
     'pred_conv_kernels': [[3,3], [3,5], [5,3]],
+
+    # FCB settings
+    'use_pred_offset': True,
+    'use_dcn_class': True,
+    'use_dcn_track': False,
+    'use_dcn_mask': False,
 
 })
 
@@ -1087,33 +1167,49 @@ STMask_plus_base_coco_config = STMask_base_coco_config.copy({
 
 })
 
-STMask_resnet50_coco_ori_config = STMask_base_coco_ori_config.copy({
-    'name': 'STMask_resnet50_coco_ori',
+STMask_plus_base_coco_fc_ada_config = STMask_base_coco_fc_ada_config.copy({
+    'name': 'STMask_plus_base_fc_ada_coco',
+
+    'backbone': STMask_plus_base_fc_ada_config.backbone.copy({
+        'path': 'resnet101_reducedfc.pth',
+    }),
+
+})
+
+STMask_resnet50_coco_config = STMask_base_coco_config.copy({
+    'name': 'STMask_resnet50_coco',
 
     'backbone': STMask_resnet50_config.backbone.copy({
         'path': 'resnet50-19c8e357.pth',
-        'selected_layers': list(range(1, 4)),
-
-        'pred_aspect_ratios': STMask_base_config.backbone.pred_aspect_ratios,
-        'pred_scales': STMask_base_config.backbone.pred_scales,
-
     }),
 })
 
-STMask_plus_resnet50_coco_config = STMask_resnet50_coco_ori_config.copy({
+STMask_resnet50_coco_fc_ada_config = STMask_base_coco_fc_ada_config.copy({
+    'name': 'STMask_resnet50_fc_ada_coco',
+
+    'backbone': STMask_resnet50_fc_ada_config.backbone.copy({
+        'path': 'resnet50-19c8e357.pth',
+    }),
+})
+
+STMask_plus_resnet50_coco_config = STMask_resnet50_coco_config.copy({
     'name': 'STMask_plus_resnet50_coco',
 
     'backbone': STMask_plus_resnet50_config.backbone.copy({
         'path': 'resnet50-19c8e357.pth',
-
     }),
-
-    'use_feature_calibration': True,
-    'pred_conv_kernels': [[3,3], [3,5], [5,3]],
 })
 
-STMask_resnet152_coco_ori_config = STMask_base_coco_ori_config.copy({
-    'name': 'STMask_resnet152_coco_ori',
+STMask_plus_resnet50_coco_fc_ada_config = STMask_plus_base_coco_fc_ada_config.copy({
+    'name': 'STMask_plus_resnet50_fc_ada_coco',
+
+    'backbone': STMask_plus_resnet50_fc_ada_config.backbone.copy({
+        'path': 'resnet50-19c8e357.pth',
+    }),
+})
+
+STMask_resnet152_coco_config = STMask_base_coco_config.copy({
+    'name': 'STMask_resnet152_coco',
     'backbone': resnet152_backbone.copy({
         'selected_layers': list(range(1, 4)),
         'pred_scales': STMask_base_config.backbone.pred_scales,

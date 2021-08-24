@@ -375,7 +375,7 @@ def compute_validation_map(net, dataset, ann_file=None, epoch=-1):
         net.eval()
         print()
         print("Computing validation mAP (this may take a while)...", flush=True)
-        if cfg.clip_prediction_mdoule:
+        if cfg.clip_prediction_module:
             eval_script.evaluate_clip(net, dataset, ann_file=ann_file, epoch=epoch)
         else:
             eval_script.evaluate(net, dataset, ann_file=ann_file, epoch=epoch)
@@ -426,6 +426,8 @@ if __name__ == '__main__':
         set_cfg(args.config)
         if 'coco' in args.config:
             cfg.data_type = 'coco'
+        elif 'VID' in args.config:
+            cfg.data_type = 'vid'
 
     # This is managed by set_lr
     cur_lr = args.lr

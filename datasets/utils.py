@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from .augmentations_vis import BaseTransform_vis
 from .augmentations_coco import BaseTransform_coco
+from .augmentations_vid import BaseTransform_vid
 import torch.nn.functional as F
 
 
@@ -110,6 +111,7 @@ def get_dataset(data_type, dataset, backbone_transform, inference=False):
 
     from .ytvos import YTVOSDataset
     from .coco import COCODetection
+    from .VID import VIDDataset
 
     if data_type == 'vis':
         dataset = YTVOSDataset(ann_file=dataset.ann_file,
@@ -124,6 +126,21 @@ def get_dataset(data_type, dataset, backbone_transform, inference=False):
                                     backbone_transform=backbone_transform,
                                     resize_gt=resize_gt,
                                     pad_gt=pad_gt))
+    elif data_type == 'vid':
+        dataset = VIDDataset(ann_file=dataset.ann_file,
+                             img_prefix=dataset.img_prefix,
+                             img_index=dataset.img_index,
+                             has_gt=dataset.has_gt,
+                             clip_frames=dataset.clip_frames,
+                             transform=BaseTransform_vid(
+                                   img_scales=dataset.img_scales,
+                                   Flip=flip,
+                                   MS_train=MS_train,
+                                   preserve_aspect_ratio=dataset.preserve_aspect_ratio,
+                                   backbone_transform=backbone_transform,
+                                   resize_gt=resize_gt,
+                                   pad_gt=pad_gt))
+
     elif data_type == 'coco':
         dataset = COCODetection(image_path=dataset.img_prefix,
                                 info_file=dataset.ann_file,

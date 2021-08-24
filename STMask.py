@@ -33,15 +33,14 @@ class STMask(nn.Module):
 
         self.backbone = construct_backbone(cfg.backbone)
         src_channels = self.backbone.channels
-        if cfg.train_track and cfg.clip_prediction_module:
-            self.clip_frames = cfg.train_dataset.clip_frames
-        else:
-            self.clip_frames = 1
+        self.clip_frames = cfg.train_dataset.clip_frames if cfg.train_track and cfg.clip_prediction_module else 1
 
         # Some hacky rewiring to accomodate the FPN
         self.fpn = FPN([src_channels[i] for i in cfg.backbone.selected_layers])
         self.selected_layers = list(range(len(cfg.backbone.selected_layers) + cfg.fpn.num_downsample))
-        self.fpn_num_features = cfg.fpn.num_features
+        self.fpn_num_features = cfg.fpn.num_features // self.clip_frames \
+            if cfg.clip_prediction_module and cfg.cubic_prediction_with_reduced_channels else cfg.fpn.num_features
+
         self.correlation_selected_layer = cfg.correlation_selected_layer
         self.correlation_patch_size = cfg.correlation_patch_size
         if cfg.train_track and cfg.clip_prediction_module:
@@ -60,7 +59,7 @@ class STMask(nn.Module):
         if self.proto_src is None:
             in_channels = 3
         else:
-            in_channels = self.fpn_num_features
+            in_channels = cfg.fpn.num_features
 
         if self.proto_src is not None and len(self.proto_src) > 1:
             self.mask_refine = nn.ModuleList([nn.Sequential(*[
@@ -83,6 +82,12 @@ class STMask(nn.Module):
         self.pred_scales = cfg.backbone.pred_scales
         self.pred_aspect_ratios = cfg.backbone.pred_aspect_ratios
         self.num_priors = len(self.pred_scales[0])
+        #
+        if cfg.cubic_prediction_with_reduced_channels:
+            self.fpn_reduced_channels = nn.Sequential(*[
+                nn.Conv2d(in_channels, in_channels//self.clip_frames, kernel_size=1, padding=0),
+                nn.ReLU(inplace=True)
+            ])
         # prediction layers for loc, conf, mask, track
         self.prediction_layers = nn.ModuleList()
         for idx, layer_idx in enumerate(self.selected_layers):
@@ -204,18 +209,25 @@ class STMask(nn.Module):
                 if model_dict[key].shape == state_dict[key].shape:
                     model_dict[key] = state_dict[key]
                 elif cfg.clip_prediction_module and key.startswith('prediction_layers') and 'conf_layer':
-                    # inflated weights from 2D to 3D
-                    print('load parameters with inflated operation from pre-trained models:', key)
-                    inflated_weights = state_dict[key].repeat(self.clip_frames, self.clip_frames, 1, 1) \
-                                        if state_dict[key].dim() == 4 else state_dict[key].repeat(self.clip_frames)
-                    inflated_weights = (inflated_weights / float(self.clip_frames)).to(model_dict[key].device)
-                    if not cfg.clip_prediction_with_correlation:
-                        model_dict[key] = inflated_weights
-                    else:
+                    if cfg.cubic_prediction_with_reduced_channels and cfg.clip_prediction_with_correlation:
+                        print('load parameters with reduced channels operation from pre-trained models:', key)
                         if state_dict[key].dim() == 4:
-                            model_dict[key][idx][:, idx] = inflated_weights
+                            model_dict[key][idx][:, idx] = state_dict[key].to(model_dict[key].device)
                         else:
-                            model_dict[key][idx] = inflated_weights
+                            model_dict[key][idx] = state_dict[key].to(model_dict[key].device)
+                    else:
+                        # inflated weights from 2D to 3D
+                        print('load parameters with inflated operation from pre-trained models:', key)
+                        inflated_weights = state_dict[key].repeat(self.clip_frames, self.clip_frames, 1, 1) \
+                                        if state_dict[key].dim() == 4 else state_dict[key].repeat(self.clip_frames)
+                        inflated_weights = (inflated_weights / float(self.clip_frames)).to(model_dict[key].device)
+                        if not cfg.clip_prediction_with_correlation:
+                            model_dict[key] = inflated_weights
+                        else:
+                            if state_dict[key].dim() == 4:
+                                model_dict[key][idx][:, idx] = inflated_weights
+                            else:
+                                model_dict[key][idx] = inflated_weights
                 else:
                     print('parameters in pre-trained model but not in current model:', key)
             else:
@@ -336,7 +348,8 @@ class STMask(nn.Module):
                 if cfg.train_track and cfg.clip_prediction_module:
                     _, c, h, w = fpn_outs[idx].size()
                     fpn_outs_clip = fpn_outs[idx].reshape(-1, self.clip_frames, c, h, w)
-                    pred_x = [fpn_outs_clip[:, 0]]
+                    pred_x = [self.fpn_reduced_channels(fpn_outs_clip[:, 0])] \
+                        if cfg.cubic_prediction_with_reduced_channels else [fpn_outs_clip[:, 0]]
                     for frame_idx in range(self.clip_frames-1):
                         if cfg.clip_prediction_with_correlation:
                             corr = correlate_operator(fpn_outs_clip[:, frame_idx].contiguous(),
@@ -347,7 +360,9 @@ class STMask(nn.Module):
                             #     x_clip = x.reshape(-1, self.clip_frames, 3, x.size(-2), x.size(-1))
                             #     display_correlation_map(corr, imgs=x_clip, img_meta=img_meta[-1], idx=idx)
                             pred_x.append(corr)
-                        pred_x.append(fpn_outs_clip[:, frame_idx+1])
+                        cur_fpn_x = self.fpn_reduced_channels(fpn_outs_clip[:, frame_idx+1]) \
+                            if cfg.cubic_prediction_with_reduced_channels else fpn_outs_clip[:, frame_idx+1]
+                        pred_x.append(cur_fpn_x)
 
                     pred_x = torch.cat(pred_x, dim=1)
                 else:
@@ -363,11 +378,11 @@ class STMask(nn.Module):
 
         if cfg.train_track and cfg.track_by_Gaussian:
             with timer.env('track_by_Gaussian'):
-                pred_outs['track'] = self.track_conv(fpn_outs[0]).permute(0, 2, 3, 1).contiguous()
+                pred_outs['track'] = self.track_conv(pred_x).permute(0, 2, 3, 1).contiguous()
 
         if cfg.use_semantic_segmentation_loss or not cfg.train_class:
             with timer.env('sem_seg'):
-                pred_outs['sem_seg'] = self.semantic_seg_conv(fpn_outs[0]).permute(0, 2, 3, 1).contiguous()
+                pred_outs['sem_seg'] = self.semantic_seg_conv(pred_x).permute(0, 2, 3, 1).contiguous()
 
         if cfg.train_masks:
             pred_outs['proto'] = proto_dict
