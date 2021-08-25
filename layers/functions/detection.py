@@ -85,7 +85,7 @@ class Detect(object):
         boxes = decode(candidate['loc'].reshape(-1, 4), candidate['priors'].repeat(1, clip_frames).reshape(-1, 4))
         boxes = boxes.reshape(-1, 4*clip_frames)
         mask_coeff = candidate['mask_coeff'] if cfg.train_masks else None
-        proto_data = candidate['proto']
+        proto_data = candidate['proto'] if cfg.train_masks else None
         sem_data = candidate['sem_seg'] if cfg.use_semantic_segmentation_loss else None  # [h, w, num_class]
         centerness_scores = candidate['centerness'] if cfg.train_centerness else None
         track_data = candidate['track'] if cfg.train_track and not cfg.track_by_Gaussian else None
@@ -146,13 +146,17 @@ class Detect(object):
                 non_empty_mask = (det_masks_soft.gt(0.5).sum(dim=[1, 2]) > 5).sum(dim=-1) == clip_frames
                 keep = keep & non_empty_mask
             boxes = boxes[keep]
-            masks_coeff = masks_coeff[keep]
             scores = scores[keep]
-            det_masks_soft = det_masks_soft[keep]
+            if cfg.train_masks:
+                masks_coeff = masks_coeff[keep]
+                det_masks_soft = det_masks_soft[keep]
 
             if boxes.nelement() == 0:
-                return {'box': torch.Tensor(), 'mask_coeff': torch.Tensor(), 'class': torch.Tensor(),
-                        'score': torch.Tensor(), 'mask': torch.Tensor()}
+                out_after_NMS = {'box': torch.Tensor(), 'class': torch.Tensor(), 'score': torch.Tensor(),}
+                if cfg.train_masks:
+                    out_after_NMS['mask_coeff'] = torch.Tensor()
+                    out_after_NMS['mask'] = torch.Tensor()
+                return out_after_NMS
 
             # Collapse all the classes into 1
             if cfg.train_class:

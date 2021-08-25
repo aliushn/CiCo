@@ -114,9 +114,10 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
     classes = dets_out['class'][:args.top_k].view(-1).detach().cpu().numpy()
     num_dets_to_consider = min(args.top_k, classes.shape[0])
     color_type = dets_out['box_ids'].view(-1)
-    masks = dets_out['mask'][:args.top_k]
     centerness = dets_out['centerness'][:args.top_k].view(-1).detach().cpu().numpy() if 'centerness' in dets_out.keys() else None
     num_tracked_mask = dets_out['tracked_mask'] if 'tracked_mask' in dets_out.keys() else None
+    if cfg.train_masks:
+        masks = dets_out['mask'][:args.top_k]
 
     for j in range(num_dets_to_consider):
         if scores[j] < args.score_threshold:
@@ -466,7 +467,7 @@ def evaluate(net: STMask, dataset, ann_file=None, epoch=-1):
             json.dump(json_results, f)
         if ann_file is not None:
             metric_path = os.path.join(args.save_folder, str(epoch) + '.txt')
-            calc_metrics(ann_file, json_path, output_file=metric_path)
+            calc_metrics(ann_file, json_path, output_file=metric_path, data_type=cfg.data_type)
 
     print('Finish inference.')
 
@@ -489,14 +490,17 @@ def evaluate_clip(net: STMask, dataset, ann_file=None, epoch=-1):
         print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
 
         vid_objs = {}
-        len_vid = dataset.vid_infos[vdx]['length']
+        if cfg.data_type == 'vis':
+            len_vid = dataset.vid_infos[vdx]['length']
+        else:
+            len_vid = len(dataset.vid_infos[vdx])
         len_clips = (len_vid + n_newly_frames//2) // n_newly_frames
         progress_bar_clip = ProgressBar(len_clips, len_clips)
         for cdx in range(len_clips):
             progress_clip = (cdx + 1) / len_clips * 100
             progress_bar_clip.set_val(cdx+1)
-            print('\rProcessing Clips of Video %s  %6d  %6d / %6d (%5.2f%%)     '
-              % (repr(progress_bar_clip), vid, cdx+1, len_clips, progress_clip), end='')
+            print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)     '
+              % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip), end='')
 
             with timer.env('Load Data'):
                 left = cdx * n_newly_frames
@@ -514,17 +518,20 @@ def evaluate_clip(net: STMask, dataset, ann_file=None, epoch=-1):
 
             pred_frame = dict()
             for k, v in pred_clip.items():
-                if k in {'score', 'class', 'mask_coeff', 'box_ids'}:
+                if k in {'score', 'class', 'mask_coeff', 'box_ids'} and v is not None:
                     pred_frame[k] = v
 
             for batch_id, frame_id in enumerate(clip_frame_ids[:n_newly_frames]):
                 img_id = (vid, frame_id)
-                pred_frame['proto'] = pred_clip['proto'][batch_id]
+                if cfg.train_masks:
+                    pred_frame['proto'] = pred_clip['proto'][batch_id]
                 if pred_clip['box'].size(0) == 0:
-                    pred_frame['mask'] = torch.Tensor()
+                    if cfg.train_masks:
+                        pred_frame['mask'] = torch.Tensor()
                     pred_frame['box'] = torch.Tensor()
                 else:
-                    pred_frame['mask'] = pred_clip['mask'][..., batch_id]
+                    if cfg.train_masks:
+                        pred_frame['mask'] = pred_clip['mask'][..., batch_id]
                     pred_frame['box'] = pred_clip['box'][:, batch_id * 4:(batch_id + 1) * 4]
 
                 if args.display:
@@ -557,7 +564,8 @@ def evaluate_clip(net: STMask, dataset, ann_file=None, epoch=-1):
             json.dump(json_results, f)
         if ann_file is not None:
             metric_path = os.path.join(args.save_folder, str(epoch)+'.txt')
-            calc_metrics(ann_file, json_path, output_file=metric_path)
+            iouType = 'segm' if cfg.train_masks else 'bbox'
+            calc_metrics(ann_file, json_path, output_file=metric_path, iouType=iouType, data_type=cfg.data_type)
 
     print('Finish inference.')
 
@@ -640,6 +648,10 @@ if __name__ == '__main__':
         print('Config not specified. Parsed %s from the file name.\n' % args.config)
         set_cfg(args.config)
 
+    if 'VID' in args.config:
+        cfg.data_type = 'vid'
+        args.eval_types = ['bbox']
+
     if args.detect:
         cfg.eval_mask_branch = False
 
@@ -650,21 +662,25 @@ if __name__ == '__main__':
         if args.eval_data == 'train':
             print('load train_sub dataset')
             cfg.train_dataset.has_gt = False
-            val_dataset = get_dataset('vis', cfg.train_dataset, cfg.backbone.transform)
+            val_dataset = get_dataset(cfg.data_type, cfg.train_dataset, cfg.backbone.transform, inference=True)
             ann_file = cfg.train_dataset.ann_file
         elif args.eval_data == 'valid_sub':
             print('load valid_sub dataset')
             cfg.valid_sub_dataset.has_gt = False
-            val_dataset = get_dataset('vis', cfg.valid_sub_dataset, cfg.backbone.transform)
-            ann_file = cfg.valid_sub_dataset.ann_file
+            val_dataset = get_dataset(cfg.data_type, cfg.valid_sub_dataset, cfg.backbone.transform, inference=True)
+            if cfg.data_type == 'vis':
+                ann_file = cfg.valid_sub_dataset.ann_file
+            elif cfg.data_type == 'vid':
+                ann_file = cfg.valid_sub_dataset.img_prefix + '/cache/' \
+                           + cfg.valid_sub_dataset.img_index.split('/')[-1][:-4] + '_anno_eval.json'
 
         elif args.eval_data == 'test':
             print('load test dataset')
             cfg.test_dataset.has_gt = False
-            val_dataset = get_dataset('vis', cfg.test_dataset, cfg.backbone.transform)
+            val_dataset = get_dataset(cfg.data_type, cfg.test_dataset, cfg.backbone.transform, inference=True)
         elif args.eval_data == 'valid':
             print('load valid dataset')
-            val_dataset = get_dataset('vis', cfg.valid_dataset, cfg.backbone.transform)
+            val_dataset = get_dataset(cfg.data_type, cfg.valid_dataset, cfg.backbone.transform, inference=True)
     else:
         val_dataset = None
 
@@ -710,10 +726,16 @@ if __name__ == '__main__':
         else:
             if args.eval_data == 'metric':
                 print('calculate evaluation metrics ...')
-                ann_file = cfg.valid_sub_dataset.ann_file
+                if cfg.data_type == 'vis':
+                    ann_file = cfg.valid_sub_dataset.ann_file
+                    iouType = 'segm'
+                elif cfg.data_type == 'vid':
+                    iouType = 'bbox'
+                    ann_file = cfg.valid_sub_dataset.img_prefix + '/cache/' \
+                               + cfg.valid_sub_dataset.img_index.split('/')[-1][:-4] + '_anno_eval.json'
                 dt_file = args.save_folder + 'results.json'
                 print('det_file:', dt_file)
-                metrics = calc_metrics(ann_file, dt_file)
+                metrics = calc_metrics(ann_file, dt_file, iouType=iouType, data_type=cfg.data_type)
                 metrics_name = ['mAP', 'AP50', 'AP75', 'small', 'medium', 'large',
                                 'AR1', 'AR10', 'AR100', 'AR100_small', 'AR100_medium', 'AR100_large']
                 log_dir = 'weights/temp/train_log'

@@ -33,6 +33,8 @@ class CustomDataParallel(nn.DataParallel):
         devices = ['cuda:' + str(x) for x in device_ids]
         if cfg.data_type == 'coco':
             splits = prepare_data_coco(inputs[0], devices)
+        elif cfg.data_type == 'vid':
+            splits = prepare_data_vid(inputs[0], devices)
         else:
             splits = prepare_data_vis(inputs[0], devices)
 

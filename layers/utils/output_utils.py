@@ -111,40 +111,40 @@ def postprocess_ytbvis(dets_output, img_meta, interpolation_mode='bilinear',
     pad_h, pad_w = img_meta['pad_shape'][:2]
     s_w, s_h = img_w / pad_w, img_h / pad_h
 
-    # Actually extract everything from dets now
-    boxes = dets['box']
-    mask_coeff = dets['mask_coeff']
-    masks = dets['mask']
-    if cfg.mask_proto_coeff_occlusion:
-        masks_non_target = dets['mask_non_target']
-        masks = torch.clamp(masks - masks_non_target, min=0)
-    else:
-        masks_non_target = None
-
-    if visualize_lincomb:
-        img_ids = (img_meta['video_id'], img_meta['frame_id'])
-        proto = dets['proto'][:int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
-        display_lincomb(proto, masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))],
-                        mask_coeff, img_ids, output_file, masks_non_target)
-
-    # Undo padding for masks
-    masks = masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
-    # Scale masks up to the full image
-    masks = masks.squeeze(-1) if masks.dim() == 4 else masks
-    masks = F.interpolate(masks.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode,
-                          align_corners=False).squeeze(0)
-    # Binarize the masks
-    masks.gt_(0.5)
-    dets['mask'] = masks
-
     # Undo padding for bboxes
+    boxes = dets['box']
     boxes[:, 0::2] /= s_w
     boxes[:, 1::2] /= s_h
-
     boxes[:, 0], boxes[:, 2] = sanitize_coordinates(boxes[:, 0], boxes[:, 2], ori_w, cast=False)
     boxes[:, 1], boxes[:, 3] = sanitize_coordinates(boxes[:, 1], boxes[:, 3], ori_h, cast=False)
 
     dets['box'] = boxes.long()
+
+    # Actually extract everything from dets now
+    if cfg.train_masks:
+        masks = dets['mask']
+        mask_coeff = dets['mask_coeff']
+        if cfg.mask_proto_coeff_occlusion:
+            masks_non_target = dets['mask_non_target']
+            masks = torch.clamp(masks - masks_non_target, min=0)
+        else:
+            masks_non_target = None
+
+        if visualize_lincomb:
+            img_ids = (img_meta['video_id'], img_meta['frame_id'])
+            proto = dets['proto'][:int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
+            display_lincomb(proto, masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))],
+                            mask_coeff, img_ids, output_file, masks_non_target)
+
+        # Undo padding for masks
+        masks = masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
+        # Scale masks up to the full image
+        masks = masks.squeeze(-1) if masks.dim() == 4 else masks
+        masks = F.interpolate(masks.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode,
+                              align_corners=False).squeeze(0)
+        # Binarize the masks
+        masks.gt_(0.5)
+        dets['mask'] = masks
 
     return dets
 

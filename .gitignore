@@ -29,7 +29,6 @@ MANIFEST
 
 # dirs
 weights/
-cocoapi/
 external/
 results/ 
 .idea/

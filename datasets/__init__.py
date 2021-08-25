@@ -8,7 +8,7 @@ from .augmentations_vid import BaseTransform_vid
 from .augmentations_coco import SSDAugmentation, BaseTransform_coco, FastBaseTransform
 
 from .coco import COCODetection, get_label_map, detection_collate_coco, prepare_data_coco
-from .VID import VIDDataset, detection_collate_vid
+from .VID import VIDDataset, detection_collate_vid, prepare_data_vid
 from .CustomDataParallel import NetLoss, CustomDataParallel
 
 __all__ = [
@@ -18,7 +18,7 @@ __all__ = [
     'GroupSampler', 'DistributedGroupSampler', 'build_dataloader',
     'random_scale', 'show_ann', 'prepare_data_vis', 'ImageList_from_tensors', 'prepare_data_coco',
     'SSDAugmentation', 'BaseTransform_coco', 'FastBaseTransform', 'BaseTransform_vis',
-    'VIDDataset', 'detection_collate_vid',
+    'VIDDataset', 'detection_collate_vid', 'prepare_data_vid',
     'NetLoss', 'CustomDataParallel'
 ]
 

@@ -2,8 +2,11 @@
 import numpy as np
 import mmcv
 import os
+import json
 from cocoapi.PythonAPI.pycocotools.ytvos import YTVOS
 from cocoapi.PythonAPI.pycocotools.ytvoseval import YTVOSeval
+from cocoapi.PythonAPI.pycocotools.vid import VID
+from cocoapi.PythonAPI.pycocotools.videval import VIDeval
 import pycocotools.mask as mask_util
 from matplotlib.patches import Polygon
 
@@ -117,8 +120,12 @@ def bbox2result_video(results, preds, frame_idx, types=None):
     types = ['segm'] if types is None else types
 
     if len(results) > 0:
-        for obj_id in results:
-            results[obj_id]['segmentations'] += [None]
+        for type in types:
+            for obj_id in results:
+                if type == 'segm':
+                    results[obj_id]['segmentations'] += [None]
+                elif type == 'bbox':
+                    results[obj_id]['bbox'] += [None]
 
     if preds is None or (preds is not None and preds['box'].shape[0] == 0):
         return results
@@ -126,10 +133,10 @@ def bbox2result_video(results, preds, frame_idx, types=None):
         bboxes = preds['box'].cpu().numpy()
         labels = preds['class'].view(-1).cpu().numpy()
         scores = preds['score'].view(-1).cpu().numpy()
-        segms = preds['mask']
         obj_ids = preds['box_ids'].view(-1).cpu().numpy()
         for type in types:
             if type == 'segm':
+                segms = preds['mask']
                 for label, score, segm, obj_id in zip(labels, scores, segms, obj_ids):
                     # segm annotation: png2rle
                     segm = mask_util.encode(np.array(segm.cpu(), order='F', dtype='uint8'))
@@ -147,23 +154,33 @@ def bbox2result_video(results, preds, frame_idx, types=None):
                 for bbox, label, score, obj_id in zip(bboxes, labels, scores, obj_ids):
                     if obj_id not in results:
                         results[obj_id] = {'score': [score], 'category_id': [label],
-                                           'bbox': [None]*frame_idx + [bbox]}
+                                           'bbox': [None]*frame_idx + [bbox.tolist()]}
                     else:
                         results[obj_id]['score'] += [score]
                         results[obj_id]['category_id'] += [label]
-                        results[obj_id]['box'][-1] = bbox
+                        results[obj_id]['bbox'][-1] = bbox.tolist()
 
         return results
 
 
-def calc_metrics(anno_file, dt_file, output_file=None):
-    ytvosGt = YTVOS(anno_file)
-    ytvosDt = ytvosGt.loadRes(dt_file)
+def calc_metrics(anno_file, dt_file, output_file=None, iouType='segm', data_type='vis'):
+    # iouType is 'segm' or 'bbox'
+    if data_type == 'vis':
+        ytvosGt = YTVOS(anno_file)
+        ytvosDt = ytvosGt.loadRes(dt_file)
 
-    E = YTVOSeval(ytvosGt, ytvosDt, iouType='segm', output_file=output_file)
-    E.evaluate()
-    E.accumulate()
-    E.summarize()
+        E = YTVOSeval(ytvosGt, ytvosDt, iouType=iouType, output_file=output_file)
+        E.evaluate()
+        E.accumulate()
+        E.summarize()
+    elif data_type == 'vid':
+        vidGt = VID(anno_file)
+        vidDt = vidGt.loadRes(dt_file)
+
+        E = VIDeval(vidGt, vidDt, iouType=iouType, output_file=output_file)
+        E.evaluate()
+        E.accumulate()
+        E.summarize()
     print('finish validation')
 
     return E.stats

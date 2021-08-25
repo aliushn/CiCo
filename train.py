@@ -150,7 +150,6 @@ def train():
                              neg_threshold=cfg.negative_iou_threshold)
 
     train_dataset = get_dataset(cfg.data_type, cfg.train_dataset, cfg.backbone.transform)
-    detection_collate = detection_collate_coco if cfg.data_type == 'coco' else detection_collate_vis
 
     if args.is_distributed:
         if args.batch_size < 8:
@@ -167,7 +166,7 @@ def train():
 
     data_loader = data.DataLoader(train_dataset, args.batch_size,
                                   num_workers=args.num_workers,
-                                  collate_fn=detection_collate,
+                                  collate_fn=cfg.detection_collate,
                                   sampler=train_sampler,
                                   shuffle=(train_sampler is None),
                                   pin_memory=True)
@@ -267,22 +266,30 @@ def train():
                             print('Deleting old save...')
                             os.remove(latest)
 
-                    if args.save_interval > 0:
-                        if cfg.data_type == 'vis':
-                            print('None Inference!')
-                            setup_eval()
-                            # valid_sub, the last one ten of training data
-                            cfg.valid_sub_dataset.has_gt = False
-                            valid_sub_dataset = get_dataset(cfg.data_type, cfg.valid_sub_dataset, cfg.backbone.transform)
-                            valid_sub_ann_file = cfg.valid_sub_dataset.ann_file
-                            compute_validation_map(net, valid_sub_dataset, ann_file=valid_sub_ann_file, epoch=epoch)
-
-                            # valid datasets
-                            valid_dataset = get_dataset(cfg.data_type, cfg.valid_dataset, cfg.backbone.transform)
-                            compute_validation_map(net, valid_dataset, epoch=epoch)
-                        else:
+                    do_inference = True
+                    if do_inference:
+                        if cfg.data_type == 'coco':
                             setup_eval_coco()
                             compute_validation_map_coco(epoch, iteration, net, cfg.valid_dataset, log if args.log else None)
+                        else:
+                            print('Inference for valid data!')
+                            setup_eval()
+                            # valid_sub, the last one ten of training data
+                            if cfg.data_type == 'vis':
+                                cfg.valid_sub_dataset.has_gt = False
+                                valid_sub_ann_file = cfg.valid_sub_dataset.ann_file
+                                valid_sub_dataset = get_dataset(cfg.data_type, cfg.valid_sub_dataset, cfg.backbone.transform)
+                            else:
+                                cfg.valid_dataset.has_gt = False
+                                valid_sub_ann_file = cfg.valid_dataset.ann_file
+                                valid_sub_dataset = get_dataset(cfg.data_type, cfg.valid_dataset, cfg.backbone.transform)
+
+                            compute_validation_map(net, valid_sub_dataset, ann_file=valid_sub_ann_file, epoch=epoch)
+
+                            # valid or test datasets
+                            if cfg.data_type == 'vis':
+                                valid_dataset = get_dataset(cfg.data_type, cfg.valid_dataset, cfg.backbone.transform)
+                                compute_validation_map(net, valid_dataset, epoch=epoch)
 
                 iteration += 1
 
@@ -400,9 +407,11 @@ def compute_validation_map_coco(epoch, iteration, net, dataset_config, log: Log 
 
 
 def setup_eval():
+    eval_type = 'bbox' if cfg.data_type == 'vid' else 'segm'
     eval_script.parse_args(['--batch_size=' + str(args.eval_batch_size),
                             '--score_threshold=' + str(cfg.eval_conf_thresh),
                             '--save_folder=' + args.save_folder,
+                            '--eval_types=' + eval_type
                             ])
 
 
@@ -422,12 +431,15 @@ if __name__ == '__main__':
 
     args = parse_args()
     cfg.data_type = 'vis'
+    cfg.detection_collate = detection_collate_vis
     if args.config is not None:
         set_cfg(args.config)
         if 'coco' in args.config:
             cfg.data_type = 'coco'
+            cfg.detection_collate = detection_collate_coco
         elif 'VID' in args.config:
             cfg.data_type = 'vid'
+            cfg.detection_collate = detection_collate_vid
 
     # This is managed by set_lr
     cur_lr = args.lr

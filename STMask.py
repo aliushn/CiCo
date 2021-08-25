@@ -54,21 +54,17 @@ class STMask(nn.Module):
             self.bifpn = nn.Sequential(*[BiFPN(self.fpn_num_features)
                                              for _ in range(cfg.num_bifpn)])
 
+        in_channels = cfg.fpn.num_features
         # ------------ build ProtoNet ------------
-        self.proto_src = cfg.mask_proto_src
-        if self.proto_src is None:
-            in_channels = 3
-        else:
-            in_channels = cfg.fpn.num_features
-
-        if self.proto_src is not None and len(self.proto_src) > 1:
-            self.mask_refine = nn.ModuleList([nn.Sequential(*[
-                nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
-                nn.BatchNorm2d(in_channels),
-                nn.ReLU(inplace=True)
-            ]) for _ in range(len(self.proto_src))])
-
         if cfg.train_masks:
+            self.proto_src = cfg.mask_proto_src
+            if self.proto_src is not None and len(self.proto_src) > 1:
+                self.mask_refine = nn.ModuleList([nn.Sequential(*[
+                    nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+                    nn.BatchNorm2d(in_channels),
+                    nn.ReLU(inplace=True)
+                ]) for _ in range(len(self.proto_src))])
+
             # The include_last_relu=false here is because we might want to change it to another function
             self.proto_net, proto_channles = make_net(in_channels, cfg.mask_proto_net, include_bn=True, include_last_relu=True)
             self.proto_dim = cfg.mask_dim * (len(self.selected_layers) + 1) if cfg.mask_proto_with_levels else cfg.mask_dim
@@ -82,7 +78,7 @@ class STMask(nn.Module):
         self.pred_scales = cfg.backbone.pred_scales
         self.pred_aspect_ratios = cfg.backbone.pred_aspect_ratios
         self.num_priors = len(self.pred_scales[0]) * len(self.pred_aspect_ratios[0][0])
-        #
+        # reduced channels
         if cfg.cubic_prediction_with_reduced_channels:
             self.fpn_reduced_channels = nn.Sequential(*[
                 nn.Conv2d(in_channels, in_channels//self.clip_frames, kernel_size=1, padding=0),
@@ -140,7 +136,7 @@ class STMask(nn.Module):
                                      nms_thresh=cfg.nms_thresh)
                 self.Track = Track(self.clip_frames)
 
-        if cfg.use_semantic_segmentation_loss:
+        if cfg.train_masks and cfg.use_semantic_segmentation_loss:
             sem_seg_head = [(in_channels, 3, {'padding': 1})]*2 + [(cfg.num_classes, 1, {})]
             self.semantic_seg_conv, _ = make_net(in_channels, sem_seg_head, include_bn=True,
                                                  include_last_relu=False)
@@ -402,11 +398,11 @@ class STMask(nn.Module):
 
         if cfg.train_track and cfg.track_by_Gaussian:
             with timer.env('track_by_Gaussian'):
-                pred_outs['track'] = self.track_conv(pred_x).permute(0, 2, 3, 1).contiguous()
+                pred_outs['track'] = self.track_conv(fpn_outs[0]).permute(0, 2, 3, 1).contiguous()
 
         if cfg.use_semantic_segmentation_loss or not cfg.train_class:
             with timer.env('sem_seg'):
-                pred_outs['sem_seg'] = self.semantic_seg_conv(pred_x).permute(0, 2, 3, 1).contiguous()
+                pred_outs['sem_seg'] = self.semantic_seg_conv(fpn_outs[0]).permute(0, 2, 3, 1).contiguous()
 
         if cfg.train_masks:
             pred_outs['proto'] = proto_dict

@@ -91,6 +91,13 @@ OVIS_LABEL_MAP = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8,
                   25: 25}
 
 
+VID_CLASSES = ['airplane', 'antelope', 'bear', 'bicycle', 'bird',
+               'bus', 'car', 'cattle', 'dog', 'domestic_cat',
+               'elephant', 'fox', 'giant_panda', 'hamster', 'horse',
+               'lion', 'lizard', 'monkey', 'motorcycle', 'rabbit',
+               'red_panda', 'sheep', 'snake', 'squirrel', 'tiger',
+               'train', 'turtle', 'watercraft', 'whale', 'zebra']
+
 # ----------------------- CONFIG CLASS ----------------------- #
 
 
@@ -322,6 +329,12 @@ train_VID_dataset = dataset_base_vid.copy({
     'img_prefix': '../datasets/ILSVRC2015/Data/VID',
     'ann_file': '../datasets/ILSVRC2015/Annotations/VID',
     'img_index': '../datasets/ILSVRC2015/ImageSets/VID_train_every10frames.txt'
+})
+
+valid_sub_VID_dataset = dataset_base_vid.copy({
+    'img_prefix': '../datasets/ILSVRC2015/Data/VID',
+    'ann_file': '../datasets/ILSVRC2015/Annotations/VID',
+    'img_index': '../datasets/ILSVRC2015/ImageSets/VID_val_videos_every10frames.txt'
 })
 
 valid_VID_dataset = dataset_base_vid.copy({
@@ -701,10 +714,10 @@ STMask_base_config = base_config.copy({
     # FCA and prediction module settings
     'share_prediction_module': True,
     'clip_prediction_module': True,
-    'clip_prediction_with_correlation': True,
+    'clip_prediction_with_correlation': False,
     'clip_prediction_with_external_box': True,
     'clip_prediction_with_individual_box': True,
-    'cubic_prediction_with_reduced_channels': True,
+    'cubic_prediction_with_reduced_channels': False,
     'extra_layers': (4, 4, 4),   # class, box, track
     'pred_conv_kernels': [[3,3], [3,3], [3,3]],
 
@@ -1088,8 +1101,10 @@ STMask_base_VID_config = STMask_base_config.copy({
 
     # Dataset stuff
     'train_dataset': train_VID_dataset,
+    'valid_sub_dataset': valid_sub_VID_dataset,
     'valid_dataset': valid_VID_dataset,
     'test_dataset': train_VID_dataset,
+    'classes': VID_CLASSES,
     'num_classes': 30,
 
     'train_masks': False,
@@ -1109,8 +1124,10 @@ STMask_plus_resnet50_VID_config = STMask_plus_resnet50_config.copy({
 
     # Dataset stuff
     'train_dataset': train_VID_dataset,
+    'valid_sub_dataset': valid_sub_VID_dataset,
     'valid_dataset': valid_VID_dataset,
-    'test_dataset': train_VID_dataset,
+    'test_dataset':  train_VID_dataset,
+    'classes': VID_CLASSES,
     'num_classes': 30,
 
     'train_masks': False,

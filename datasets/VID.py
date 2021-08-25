@@ -56,6 +56,7 @@ class VIDDataset(torch.utils.data.Dataset):
         self.ann_file = ann_file
         self.img_index = img_index
 
+        self.preserve_aspect_ratio = preserve_aspect_ratio
         self.has_gt = has_gt
         self.clip_frames = clip_frames
 
@@ -64,6 +65,7 @@ class VIDDataset(torch.utils.data.Dataset):
 
         with open(self.img_index) as f:
             lines = [x.strip().split(" ") for x in f.readlines()]
+
         if len(lines[0]) == 2:
             self.image_set_index = [x[0] for x in lines]
             self.frame_id = [int(x[1]) for x in lines]
@@ -92,6 +94,15 @@ class VIDDataset(torch.utils.data.Dataset):
         self.categories = dict(zip(range(len(self.classes)), self.classes))
         self.annos = self.load_annos(os.path.join(self.cache_dir, self.image_set + "_anno.json"))
 
+        self.vid_ids = list(set([img_set_index.split('/')[-2] for img_set_index in self.image_set_index]))
+        self.vid_ids.sort()
+        self.vid_infos = [[] for _ in range(len(self.vid_ids))]
+        for img_set_index in self.image_set_index:
+            idx = self.vid_ids.index(img_set_index.split('/')[-2])
+            self.vid_infos[idx].append(img_set_index)
+
+        self.anns2json_video_bbox(os.path.join(self.cache_dir, self.image_set + "_anno_eval.json"))
+
     def __getitem__(self, idx):
         return self._get_train(idx)
 
@@ -106,14 +117,15 @@ class VIDDataset(torch.utils.data.Dataset):
         imgs = []
         for idx in clip_frame_idx:
             filename = self.image_set_index[idx]
-            imgs.append(Image.open(self._img_dir % filename).convert("RGB"))
+            imgs.append(np.array(Image.open(self._img_dir % filename).convert("RGB")))
+        ori_shape = imgs[0].shape
 
         if self.has_gt:
             boxes, labels, obj_ids, boxes_occluded = [], [], [], []
             for idx in clip_frame_idx:
                 anno = self.annos[idx]
-                boxes.append(anno['boxes'])
-                labels.append(anno['lables'])
+                boxes.append(np.stack(anno['boxes'], axis=0))
+                labels.append(anno['labels'])
                 obj_ids.append(anno['obj_ids'])
                 boxes_occluded.append(anno['occluded'])
         else:
@@ -122,10 +134,83 @@ class VIDDataset(torch.utils.data.Dataset):
         if self.transform is not None:
             imgs, boxes, labels = self.transform(imgs, boxes, labels)
 
-        return imgs, boxes, labels, obj_ids, boxes_occluded
+        img_meta = []
+        for i, idx in enumerate(clip_frame_idx):
+            vid, frame_id = self.image_set_index[idx].split('/')[-2:]
+            pad_h, pad_w = imgs[i].shape[:2]
+
+            if self.preserve_aspect_ratio:
+                # resize long edges
+                if (ori_shape[0]/float(ori_shape[1])) < (pad_h/float(pad_w)):
+                    img_w, img_h = pad_w, int(ori_shape[0] * (pad_w / ori_shape[1]))
+                else:
+                    img_w, img_h = int(ori_shape[1] * (pad_h / ori_shape[0])), pad_h
+            else:
+                img_w, img_h = pad_w, pad_h
+            img_meta.append(dict(
+                ori_shape=ori_shape,
+                img_shape=(img_h, img_w, 3),
+                pad_shape=(pad_h, pad_w, 3),
+                video_id=vid,
+                frame_id=frame_id,
+                is_first=(int(frame_id) == 0)))
+
+        return imgs, img_meta, (boxes, labels, obj_ids, boxes_occluded)
 
     def __len__(self):
         return len(self.image_set_index)
+
+    def pull_clip_from_video(self, vid, clip_frame_idx):
+        # prepare a sequence from a video
+        vid_idx = self.vid_ids.index(vid)
+        vid_info = self.vid_infos[vid_idx]
+        imgs = []
+        for idx in clip_frame_idx:
+            filename = vid_info[idx]
+            imgs.append(np.array(Image.open(self._img_dir % filename).convert("RGB")))
+
+        height, width, depth = imgs[0].shape
+        ori_shape = (height, width, depth)
+
+        # load annotation of ref_frames
+        if self.has_gt:
+            boxes, labels, obj_ids, boxes_occluded = [], [], [], []
+            for idx in clip_frame_idx:
+                anno = self.annos[self.image_set_index.index(vid_info[idx])]
+                boxes.append(np.stack(anno['boxes'], axis=0))
+                labels.append(anno['labels'])
+                obj_ids.append(anno['obj_ids'])
+                boxes_occluded.append(anno['occluded'])
+
+        else:
+            boxes, labels, obj_ids, boxes_occluded = None, None, None, None
+
+        # apply transforms
+        if self.transform is not None:
+            imgs, boxes, labels = self.transform(imgs, boxes, labels)
+
+        img_meta = []
+        for i, img in enumerate(imgs):
+            pad_h, pad_w = img.shape[:2]
+
+            if self.preserve_aspect_ratio:
+                # resize long edges
+                if (height/float(width)) < (pad_h/float(pad_w)):
+                    img_w, img_h = pad_w, int(height * (pad_w / width))
+                else:
+                    img_w, img_h = int(width * (pad_h / height)), pad_h
+            else:
+                img_w, img_h = pad_w, pad_h
+
+            img_meta.append(dict(
+                ori_shape=ori_shape,
+                img_shape=(img_h, img_w, 3),
+                pad_shape=(pad_h, pad_w, 3),
+                video_id=vid,
+                frame_id=clip_frame_idx[i],
+                is_first=(clip_frame_idx[i] == 0)))
+
+        return imgs, img_meta, (boxes, labels, obj_ids, boxes_occluded)
 
     def sample_ref(self, idx):
         # sample another frame in the same sequence as reference
@@ -144,6 +229,20 @@ class VIDDataset(torch.utils.data.Dataset):
         else:
             ref_frames_idx = random.sample(valid_samples, self.clip_frames-1)
         return ref_frames_idx
+
+    def _interval_samples(self, lines):
+        lines_interval10 = []
+        for idx, line in enumerate(lines):
+            if int(line[2]) % 10 == 0:
+                lines_interval10.append(line)
+
+        new_img_index_file = self.img_index[:-4] + '_every10frames.txt'
+        with open(new_img_index_file, 'w') as fid:
+            for line in lines_interval10:
+                for x in line:
+                    fid.write(x)
+                    fid.write(' ')
+                fid.write('\n')
 
     def filter_annotation(self):
         cache_file = os.path.join(self.cache_dir, self.image_set + "_keep.json")
@@ -269,10 +368,97 @@ class VIDDataset(torch.utils.data.Dataset):
     def map_class_id_to_class_name(class_id):
         return VIDDataset.classes[class_id]
 
+    def anns2json_video_bbox(self, json_file):
+        if not os.path.exists(json_file):
+            print('Prepare video annotation as json format for metric evaluation')
+            json_results = []
+            for idx, vid_info in enumerate(self.vid_infos):
+                if idx % 100 == 0:
+                    print("Had processed {} videos".format(idx))
+                # assume results is ordered
+                vid_id = vid_info[0].split('/')[-2]
+                vid_anns = []
+                obj_ids_vid = []
+                for frame_info in vid_info:
+                    jdx = self.image_set_index.index(frame_info)
+                    obj_ids_vid += self.annos[jdx]['obj_ids']
+                    vid_anns.append(self.annos[jdx])
+
+                obj_ids_vid = list(set(obj_ids_vid))
+                vid_objs = dict()
+                for obj_id in obj_ids_vid:
+                    vid_objs[obj_id] = {'video_id': vid_id, 'bbox': [], 'category_id': [], 'occluded': []}
+                    for ann in vid_anns:
+                        if obj_id in ann['obj_ids']:
+                            kdx = ann['obj_ids'].index(obj_id)
+                            vid_objs[obj_id]['bbox'].append(ann['boxes'][kdx])
+                            vid_objs[obj_id]['category_id'].append(ann['labels'][kdx])
+                            vid_objs[obj_id]['occluded'].append(ann['occluded'][kdx])
+                        else:
+                            vid_objs[obj_id]['bbox'].append(None)
+
+                for obj_id, obj in vid_objs.items():
+                    # majority voting of those frames with top k highest scores for sequence catgory
+                    obj['category_id'] = np.bincount(obj['category_id']).argmax().item()
+                    json_results.append(obj)
+
+            results = {'annotations': json_results, 'categories': self.classes[1:], 'videos': self.vid_ids}
+
+            with open(json_file, 'w', encoding='utf-8') as fid:
+                json.dump(results, fid)
+            print('Done')
+
 
 def detection_collate_vid(batch):
-    transposed_batch = list(zip(*batch))
-    images = [torch.from_numpy(img).permute(2, 0, 1) for img in transposed_batch[0]]
-    targets = transposed_batch[1]
-    img_ids = transposed_batch[2]
-    return images, targets, img_ids
+    imgs = []
+    boxes = []
+    labels = []
+    ids = []
+    occluded_boxes = []
+    img_metas = []
+
+    for sample in batch:
+        imgs += [torch.from_numpy(img).permute(2, 0, 1) for img in sample[0]]
+        img_metas += sample[1]
+        boxes += [box for box in sample[2][0]]
+        labels += sample[2][1]
+        ids += sample[2][2]
+        occluded_boxes += sample[2][3]
+
+    imgs_batch = torch.stack(imgs, dim=0)
+    return imgs_batch, img_metas, (boxes, labels, ids, occluded_boxes)
+
+
+def prepare_data_vid(data_batch, devices):
+    images, image_metas, (bboxes, labels, obj_ids, occluded_boxes) = data_batch
+    d = len(devices) * 2
+    if images.size(0) % d != 0:
+        # TODO: if read multi frames (n_f) as a clip, thus the condition should be images.size(0) / n_f % len(devices)
+        idx = [i % images.size(0) for i in range(d)]
+        remainder = d - images.size(0) % d
+        images = torch.cat([images, images[idx[:remainder]]])
+        bboxes += [bboxes[i] for i in idx[:remainder]]
+        labels += [labels[i] for i in idx[:remainder]]
+        obj_ids += [obj_ids[i] for i in idx[:remainder]]
+        occluded_boxes += [occluded_boxes[i] for i in idx[:remainder]]
+        image_metas += [image_metas[i] for i in idx[:remainder]]
+    n = images.size(0) // len(devices)
+
+    with torch.no_grad():
+        images_list, masks_list, bboxes_list, labels_list, obj_ids_list, num_crowds_list = [], [], [], [], [], []
+        image_metas_list = []
+        for idx, device in enumerate(devices):
+            images_list.append(gradinator(images[idx * n:(idx + 1) * n].to(device)))
+            masks_list.append([None] * n)
+            bboxes_list.append([gradinator(torch.tensor(bboxes[jdx], dtype=torch.float32).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            labels_list.append([gradinator(torch.tensor(labels[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            obj_ids_list.append([gradinator(torch.tensor(obj_ids[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            num_crowds_list.append([0] * n)
+            image_metas_list.append(image_metas[idx * n:(idx + 1) * n])
+
+        return images_list, bboxes_list, labels_list, masks_list, obj_ids_list, num_crowds_list, image_metas_list
+
+
+def gradinator(x):
+    x.requires_grad = False
+    return x
