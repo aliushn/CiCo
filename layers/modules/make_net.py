@@ -12,8 +12,8 @@ def make_net(in_channels, conf, include_bn=False, include_last_relu=True):
         nonlocal in_channels
 
         # Possible patterns:
-        # ( 256, 3, {}) -> conv
-        # ( 256,-2, {}) -> deconv
+        # ( 256, 3, padding) -> conv
+        # ( 256,-2, padding) -> deconv
         # (None,-2, {}) -> bilinear interpolate
         # ('cat',[],{}) -> concat the subnetworks in the list
         #
@@ -31,7 +31,7 @@ def make_net(in_channels, conf, include_bn=False, include_last_relu=True):
             kernel_size = layer_cfg[1]
 
             if kernel_size > 0:
-                layer1 = nn.Conv2d(in_channels, num_channels, kernel_size, **layer_cfg[2])
+                layer1 = nn.Conv2d(in_channels, num_channels, kernel_size, padding=layer_cfg[2])
                 if include_bn:
                     BN = nn.BatchNorm2d(num_channels)
                     layer = [layer1, BN]
@@ -39,10 +39,9 @@ def make_net(in_channels, conf, include_bn=False, include_last_relu=True):
                     layer = [layer1]
             else:
                 if num_channels is None:
-                    layer = [InterpolateModule(scale_factor=-kernel_size, mode='bilinear', align_corners=False,
-                                               **layer_cfg[2])]
+                    layer = [InterpolateModule(scale_factor=-kernel_size, mode='bilinear', align_corners=False)]
                 else:
-                    layer = [nn.ConvTranspose2d(in_channels, num_channels, -kernel_size, **layer_cfg[2])]
+                    layer = [nn.ConvTranspose2d(in_channels, num_channels, -kernel_size, padding=layer_cfg[2])]
 
         in_channels = num_channels if num_channels is not None else in_channels
 

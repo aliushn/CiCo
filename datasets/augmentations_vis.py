@@ -43,33 +43,27 @@ class Resize(object):
     the image so the long side is max_size.
     """
 
-    def __init__(self, img_scales, MS_train=False, preserve_aspect_ratio=True, resize_gt=True):
-        self.divisibility = 32
+    def __init__(self, min_size, max_size, MS_train=False, resize_gt=True):
         self.resize_gt = resize_gt
         self.MS_train = MS_train
-        self.img_scales = img_scales
-        self.preserve_aspect_ratio = preserve_aspect_ratio
+        self.min_size = min_size
+        self.max_size = max_size
 
     def __call__(self, image, masks, boxes, labels=None):
         n_f = len(image)
         img_h, img_w, _ = image[0].shape
-
-        if self.MS_train:
-            ms_idx = np.random.randint(len(self.img_scales))
-            pad_h, pad_w = min(self.img_scales[ms_idx]), max(self.img_scales[ms_idx])
+        min_size = self.min_size[np.random.randint(len(self.min_size))] if self.MS_train else self.min_size[-1]
+        # resize short edges
+        if img_h > img_w:
+            width, height = min_size, int(img_h * (min_size / img_w))
+            if height > self.max_size:
+                width = int(min_size * (self.max_size / height))
+                height = self.max_size
         else:
-            pad_h, pad_w = min(self.img_scales[-1]), max(self.img_scales[-1])
-        img_ratio, pad_ratio = img_h / img_w, pad_h / pad_w
-
-        if self.preserve_aspect_ratio:
-            # resize long edges
-            if img_ratio < pad_ratio:
-                width, height = pad_w, int(img_h * (pad_w / img_w))
-            else:
-                width, height = int(img_w * (pad_h / img_h)), pad_h
-        else:
-            width, height = pad_w, pad_h
-        assert width <= pad_w and height <= pad_h
+            width, height = int(img_w * (min_size / img_h)), min_size
+            if width > self.max_size:
+                height = int(min_size*(self.max_size/height))
+                width = self.max_size
 
         # the input of cv2.resize() should be 3-dimention with (h, w, c)
         image = [cv2.resize(image[i], (width, height)) for i in range(n_f)]
@@ -97,32 +91,34 @@ class Pad(object):
 
     Note: this expects im_w <= width and im_h <= height
     """
-    def __init__(self, img_scales, mean=MEANS, pad_gt=True):
+    def __init__(self, mean=MEANS, pad_gt=True):
         self.mean = mean
-        self.img_scales = img_scales
+        self.divisibility = 32
         self.pad_gt = pad_gt
 
     def __call__(self, image, masks, boxes=None, labels=None):
         n_f = len(image)
         im_h, im_w, depth = image[0].shape
 
-        width, height = max(self.img_scales[-1]), min(self.img_scales[-1])
-        for i in range(n_f):
-            expand_image = np.zeros((height, width, depth), dtype=image[i].dtype)
-            expand_image[:, :, :] = self.mean
-            expand_image[:im_h, :im_w] = image[i]
-            image[i] = expand_image
-
-        if self.pad_gt:
+        width = ((im_w-1)//self.divisibility+1)*self.divisibility
+        height = ((im_h-1)//self.divisibility+1)*self.divisibility
+        if im_h != height or width != im_w:
             for i in range(n_f):
-                expand_masks = np.zeros(
-                        (masks[i].shape[0], height, width), dtype=masks[i].dtype)
-                expand_masks[:, :im_h, :im_w] = masks[i]
-                masks[i] = expand_masks
+                expand_image = np.zeros((height, width, depth), dtype=image[i].dtype)
+                expand_image[:, :, :] = self.mean
+                expand_image[:im_h, :im_w] = image[i]
+                image[i] = expand_image
 
-                # Scale bounding boxes (which are currently percent coordinates)
-                boxes[i][:, [0, 2]] *= (im_w / width)
-                boxes[i][:, [1, 3]] *= (im_h / height)
+            if self.pad_gt:
+                for i in range(n_f):
+                    expand_masks = np.zeros(
+                            (masks[i].shape[0], height, width), dtype=masks[i].dtype)
+                    expand_masks[:, :im_h, :im_w] = masks[i]
+                    masks[i] = expand_masks
+
+                    # Scale bounding boxes (which are currently percent coordinates)
+                    boxes[i][:, [0, 2]] *= (im_w / width)
+                    boxes[i][:, [1, 3]] *= (im_h / height)
 
         return image, masks, boxes, labels
 
@@ -164,14 +160,14 @@ def enable_if(condition, obj):
 class BaseTransform_vis(object):
     """ Transorm to be used when evaluating. """
 
-    def __init__(self, img_scales, Flip=False, MS_train=False, preserve_aspect_ratio=True,
-                 backbone_transform=None, resize_gt=True, pad_gt=True, mean=MEANS, std=STD):
+    def __init__(self, min_size, max_size, Flip=False, MS_train=False, backbone_transform=None,
+                 resize_gt=True, pad_gt=True, mean=MEANS, std=STD):
         self.augment = Compose([
             ConvertFromInts(),
             ToPercentCoords(),
             enable_if(Flip, RandomFlip()),
-            Resize(img_scales, MS_train=MS_train, preserve_aspect_ratio=preserve_aspect_ratio, resize_gt=resize_gt),
-            Pad(img_scales, mean, pad_gt=pad_gt),
+            Resize(min_size, max_size, MS_train=MS_train, resize_gt=resize_gt),
+            # Pad(mean, pad_gt=pad_gt),
             BackboneTransform(backbone_transform, mean, std, 'BGR')
         ])
 
@@ -194,18 +190,18 @@ class BackboneTransform(object):
 
         # Here I use "Algorithms and Coding" to convert string permutations to numbers
         self.channel_map = {c: idx for idx, c in enumerate(in_channel_order)}
-        self.channel_permutation = [self.channel_map[c] for c in transform.channel_order]
+        self.channel_permutation = [self.channel_map[c] for c in transform['channel_order']]
 
     def __call__(self, imgs, masks=None, boxes=None, labels=None):
 
         for i in range(len(imgs)):
             img = imgs[i].astype(np.float32)
 
-            if self.transform.normalize:
+            if self.transform['normalize']:
                 img = (img - self.mean) / self.std
-            elif self.transform.subtract_means:
+            elif self.transform['subtract_means']:
                 img = (img - self.mean)
-            elif self.transform.to_float:
+            elif self.transform['to_float']:
                 img = img / 255
 
             imgs[i] = img[:, :, self.channel_permutation].astype(np.float32)

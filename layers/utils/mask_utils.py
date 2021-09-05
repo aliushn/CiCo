@@ -3,7 +3,6 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from .box_utils import crop, crop_sipmask, center_size
-from datasets import cfg
 
 
 def generate_rel_coord_gauss(det_bbox, mask_h, mask_w, sigma_scale=2.):
@@ -81,10 +80,11 @@ def plot_protos(protos, pred_masks, img_meta, num):
                          str(num), '.png']))
 
 
-def generate_mask(proto_data, mask_coeff, bbox=None, fpn_levels=None):
+def generate_mask(proto_data, mask_coeff, bbox=None, mask_dim=32, use_sipmask=False, proto_coeff_occlusion=False):
     '''
-    :param proto_data: [h, w, 32] or [n, h, w, 32]
-    :param mask_coeff: [n, 32]
+    Activation function of mask is sigmoid
+    :param proto_data : [h, w, 32] or [n, h, w, 32]
+    :param mask_coeff: [n, 32], value in [-1, 1]
     :param bbox: [n, 4]
     :return:
     '''
@@ -92,47 +92,30 @@ def generate_mask(proto_data, mask_coeff, bbox=None, fpn_levels=None):
     dim_proto = proto_data.dim()
 
     # get masks
-    if cfg.use_sipmask:
-
-        mask_coeff = cfg.mask_proto_coeff_activation(mask_coeff)
-        pred_masks00 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data,  mask_coeff[:, :cfg.mask_dim]))
-        pred_masks01 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim:cfg.mask_dim*2]))
-        pred_masks10 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim*2:cfg.mask_dim*3]))
-        pred_masks11 = cfg.mask_proto_mask_activation(generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim*3:]))
+    if use_sipmask:
+        pred_masks00 = torch.sigmoid(generate_single_mask(proto_data,  mask_coeff[:, :mask_dim]))
+        pred_masks01 = torch.sigmoid(generate_single_mask(proto_data, mask_coeff[:, mask_dim:mask_dim*2]))
+        pred_masks10 = torch.sigmoid(generate_single_mask(proto_data, mask_coeff[:, mask_dim*2:mask_dim*3]))
+        pred_masks11 = torch.sigmoid(generate_single_mask(proto_data, mask_coeff[:, mask_dim*3:]))
         assert bbox is not None
         pred_masks = crop_sipmask(pred_masks00, pred_masks01, pred_masks10, pred_masks11, bbox)
 
-    elif cfg.mask_proto_with_levels:
-        mask_coeff = cfg.mask_proto_coeff_activation(mask_coeff)
-
-        assert fpn_levels is not None
-        n = mask_coeff.size(0)
-        mask_coeff_expand = torch.zeros([n, 6, cfg.mask_dim], device=mask_coeff.device)
-        mask_coeff_expand[:, fpn_levels.tolist()] = mask_coeff[:, :cfg.mask_dim]
-        mask_coeff_expand[:, -1] = mask_coeff[:, -cfg.mask_dim:]
-        pred_masks = generate_single_mask(proto_data, mask_coeff_expand.reshape(n, -1))
-        pred_masks = cfg.mask_proto_mask_activation(pred_masks)
-        if bbox is not None:
-            pred_masks = crop(pred_masks, bbox)
-
     else:
 
-        if not cfg.mask_proto_coeff_occlusion:
-            mask_coeff = cfg.mask_proto_coeff_activation(mask_coeff)
+        if not proto_coeff_occlusion:
             pred_masks = generate_single_mask(proto_data, mask_coeff)
 
         else:
-            mask_coeff = cfg.mask_proto_coeff_activation(mask_coeff)
             # background
-            pred_masks_b = generate_single_mask(proto_data, mask_coeff[:, :cfg.mask_dim])
+            pred_masks_b = generate_single_mask(proto_data, mask_coeff[:, :mask_dim])
             # target objects
-            pred_masks_t = generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim:cfg.mask_dim*2])
+            pred_masks_t = generate_single_mask(proto_data, mask_coeff[:, mask_dim:mask_dim*2])
             # parts from overlapped objects
-            pred_masks_o = generate_single_mask(proto_data, mask_coeff[:, cfg.mask_dim*2:])
+            pred_masks_o = generate_single_mask(proto_data, mask_coeff[:, mask_dim*2:])
             pred_masks = torch.stack([pred_masks_b, pred_masks_t, pred_masks_o], dim=-2)    # [h, w, 3, n]
-        pred_masks = cfg.mask_proto_mask_activation(pred_masks)
+        pred_masks = pred_masks.sigmoid()
         if bbox is not None:
-            pred_masks = crop(pred_masks, bbox)                                          # [h, w, n] or [h, w, 3, n]
+            pred_masks = crop(pred_masks, bbox)                                            # [h, w, n] or [h, w, 3, n]
 
     if dim_proto == 3:
         pred_masks = pred_masks.permute(2, 0, 1).contiguous()                               # [n, h, w]
@@ -151,8 +134,7 @@ def generate_single_mask(proto_data, mask_coeff):
         pred_masks = (proto_data * mask_coeff.unsqueeze(1).unsqueeze(2)).sum(dim=-1)
         pred_masks = pred_masks.permute(1, 2, 0).contiguous()
     else:
-        pred_masks = None
-        print('please input the proto_data with size [h, w, c] or [n, h, w, c]')
+        RuntimeError('Please input the proto_data with size [h, w, c] or [n, h, w, c]!')
 
     return pred_masks
 

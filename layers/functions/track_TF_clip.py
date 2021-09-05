@@ -3,13 +3,7 @@ from layers.utils import jaccard, mask_iou, compute_comp_scores, compute_kl_div
 from .TF_clip_utils import Fold_candidates_by_order, UnFold_candidate_clip, select_distinct_track
 from .track_TF_within_clip import Track_TF_within_clip, Backward_Track_TF_within_clip
 from utils import timer
-
-from datasets import cfg, activation_func
-import torch.nn.functional as F
-
 import numpy as np
-import matplotlib.pyplot as plt
-import os
 
 import pyximport
 pyximport.install(setup_args={"include_dirs":np.get_include()}, reload_support=True)
@@ -23,13 +17,17 @@ class Track_TF_Clip(object):
     """
     # TODO: Refactor this whole class away. It needs to go.
 
-    def __init__(self):
+    def __init__(self, net, match_coeff, correlation_patch_size, train_maskshift=False, conf_thresh=0.1,
+                 track_by_Gaussian=False, train_masks=True):
         self.last_clip_result = None
         self.prev_track = None
+        self.net = net
+        self.match_coeff = match_coeff
+        self.track_by_Gaussian = track_by_Gaussian
         # used for two clips, so the threshold should be small
         self.bbox_dummy_iou = 0.1
 
-    def __call__(self, net, candidates, img_metas, imgs=None):
+    def __call__(self, candidates, img_metas, imgs=None):
         """
         Args:
              loc_data: (tensor) Loc preds from loc layers
@@ -58,19 +56,19 @@ class Track_TF_Clip(object):
 
             else:
                 # first tracking within a clip and then tracking within clips
-                results = self.track_clips(net, candidates, is_first, img_metas=img_metas, imgs=imgs)
+                results = self.track_clips(candidates, is_first, img_metas=img_metas, imgs=imgs)
 
         return results
 
-    def track_clips(self, net, candidates, is_first, img_metas=None, imgs=None):
+    def track_clips(self, candidates, is_first, img_metas=None, imgs=None):
         n_frames = len(candidates)
 
         # Forward_tracking: assign instances IDs for each frame
-        candidates = Track_TF_within_clip(net, candidates, img_metas, imgs)
+        candidates = Track_TF_within_clip(self.net, candidates, img_metas, imgs)
 
         # Backward shift for adding missed objects
-        candidates = Backward_Track_TF_within_clip(net, candidates, img_metas, imgs)
-        candidates_clip = Fold_candidates_by_order(candidates, cfg.track_by_Gaussian, img_metas)
+        candidates = Backward_Track_TF_within_clip(self.net, candidates, img_metas, imgs)
+        candidates_clip = Fold_candidates_by_order(candidates, self.track_by_Gaussian, img_metas)
         remove_blank = True
         if remove_blank:
             threshold = min(1, n_frames//4)
@@ -129,7 +127,7 @@ class Track_TF_Clip(object):
                                 (candidates_clip['tracked_mask'][cur_overlapped_idx].unsqueeze(-1) == 0)
                 num_detected = torch.clamp((keep_detected.sum(dim=0)), min=1)
 
-                if cfg.track_by_Gaussian:
+                if self.track_by_Gaussian:
                     # calculate KL divergence for Gaussian distribution of isntances
                     last_clip_track_mu = self.last_clip_result['track_mu'][last_overlapped_idx]
                     last_clip_track_var = self.last_clip_result['track_var'][last_overlapped_idx]
@@ -187,7 +185,7 @@ class Track_TF_Clip(object):
 
             if new_obj_last.sum() > 0:
 
-                if cfg.track_by_Gaussian:
+                if self.track_by_Gaussian:
                     # calculate KL divergence of Gaussian distribution between instances of the current clip
                     # and all instances of previous instances
                     kl_divergence = compute_kl_div(self.prev_track['track_mu'], self.prev_track['track_var'],
@@ -212,7 +210,7 @@ class Track_TF_Clip(object):
                                                   label_delta[new_obj_last],
                                                   add_bbox_dummy=True,
                                                   bbox_dummy_iou=self.bbox_dummy_iou,
-                                                  match_coeff=cfg.match_coeff)
+                                                  match_coeff=self.match_coeff)
 
                 new_obj_match_likelihood, new_obj_match_ids = torch.max(comp_scores, dim=1)
                 new_obj_last_idx = torch.arange(n_dets)[new_obj_last]

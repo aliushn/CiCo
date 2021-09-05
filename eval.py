@@ -5,14 +5,12 @@ from utils import timer
 from utils.functions import SavePath
 from layers.utils.output_utils import postprocess_ytbvis, undo_image_transformation
 from layers.visualization_temporal import draw_dotted_rectangle, get_color
+from configs.load_config import load_config
 
-from datasets import prepare_data_vis, prepare_data_coco
 import mmcv
-import math
 import torch
 import torch.backends.cudnn as cudnn
 import argparse
-import random
 import numpy as np
 import os
 import json
@@ -20,7 +18,6 @@ from layers.utils.eval_utils import bbox2result_video, calc_metrics
 
 import matplotlib.pyplot as plt
 import cv2
-from torch.utils.tensorboard import SummaryWriter
 
 
 def str2bool(v):
@@ -34,7 +31,7 @@ def str2bool(v):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description='YOLACT COCO Evaluation')
+        description='STMask Evaluation in video domain')
     parser.add_argument('--epoch', default=0, type=int)
     parser.add_argument('--batch_size', default=1, type=int,
                         help='Batch size for training')
@@ -42,6 +39,8 @@ def parse_args(argv=None):
                         default='weights/ssd300_mAP_77.43_v2.pth', type=str,
                         help='Trained state_dict file path to open. If "interrupt", this will open the interrupt file.')
     parser.add_argument('--eval_data', default='valid', type=str, help='data type')
+    parser.add_argument('--eval', default=True, type=str2bool,
+                        help='False, only calculate metrics between ground truth annotations and prediction json file.')
     parser.add_argument('--overlap_frames', default=0, type=int, help='the overlapped frames between two video clips')
     parser.add_argument('--top_k', default=100, type=int,
                         help='Further restrict the number of predictions to parse')
@@ -75,14 +74,6 @@ def parse_args(argv=None):
                         help='An input folder of images and output folder to save detected images. Should be in the format input->output.')
     parser.add_argument('--video', default=None, type=str,
                         help='A path to a video to evaluate on. Passing in a number will use that index webcam.')
-    parser.add_argument('--video_multiframe', default=1, type=int,
-                        help='The number of frames to evaluate in parallel to make videos play at higher fps.')
-    parser.add_argument('--score_threshold', default=0, type=float,
-                        help='Detections with a score under this threshold will not be considered. This currently only works in display mode.')
-    parser.add_argument('--eval_dataset', default=None, type=str,
-                        help='If specified, override the dataset specified in the config with this one (example: coco2017_dataset).')
-    parser.add_argument('--detect', default=False, dest='detect', action='store_true',
-                        help='Don\'t evauluate the mask branch at all and only do object detection. This only works for --display and --benchmark.')
     parser.add_argument('--eval_types', default=['segm'], type=str, nargs='+', choices=['bbox', 'segm'], help='eval types')
     parser.set_defaults(display=False, resume=False, detect=False)
 
@@ -116,7 +107,7 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
     color_type = dets_out['box_ids'].view(-1)
     centerness = dets_out['centerness'][:args.top_k].view(-1).detach().cpu().numpy() if 'centerness' in dets_out.keys() else None
     num_tracked_mask = dets_out['tracked_mask'] if 'tracked_mask' in dets_out.keys() else None
-    if cfg.train_masks:
+    if 'mask' in dets_out.keys():
         masks = dets_out['mask'][:args.top_k]
 
     for j in range(num_dets_to_consider):
@@ -131,7 +122,7 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
     # First, draw the masks on the GPU where we can do it really fast
     # Beware: very fast but possibly unintelligible mask-drawing code ahead
     # I wish I had access to OpenGL or Vulkan but alas, I guess Pytorch tensor operations will have to suffice
-    if args.display_masks and cfg.eval_mask_branch:
+    if args.display_masks:
         # After this, mask is of size [num_dets, h, w, 1]
         masks = masks[:num_dets_to_consider, :, :, None]
 
@@ -231,8 +222,6 @@ def prep_display_single(dets_out, img, img_meta=None, undo_transform=True, mask_
         img_gpu = img / 255.0
 
     with timer.env('Postprocess'):
-        cfg.mask_proto_debug = args.mask_proto_debug
-        cfg.preserve_aspect_ratio = False
         dets_out = postprocess_ytbvis(dets_out, img_meta,
                                       visualize_lincomb=args.display_lincomb,
                                       crop_masks=args.crop,
@@ -259,7 +248,7 @@ def prep_display_single(dets_out, img, img_meta=None, undo_transform=True, mask_
     # First, draw the masks on the GPU where we can do it really fast
     # Beware: very fast but possibly unintelligible mask-drawing code ahead
     # I wish I had access to OpenGL or Vulkan but alas, I guess Pytorch tensor operations will have to suffice
-    if args.display_masks and cfg.eval_mask_branch:
+    if args.display_masks:
         # After this, mask is of size [num_dets, h, w, 1]
         masks = masks[:num_dets_to_consider, :, :, None]
 
@@ -367,38 +356,50 @@ def prep_display_single(dets_out, img, img_meta=None, undo_transform=True, mask_
     return img_numpy
 
 
-def evaluate(net: STMask, dataset, ann_file=None, epoch=-1):
-    eval_clip_frames = cfg.eval_clip_frames
+def evaluate(net: STMask, dataset, data_type='vis', eval_clip_frames=1, output_dir=None):
     n_overlapped_frames = args.overlap_frames
     n_newly_frames = eval_clip_frames - n_overlapped_frames
-
     dataset_size = len(dataset.vid_ids)
-    progress_bar = ProgressBar(dataset_size, dataset_size)
 
     print()
-
     json_results = []
 
     timer.reset()
     for vdx, vid in enumerate(dataset.vid_ids):
+        progress = (vdx + 1) / dataset_size * 100
+        print()
+        print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
         results_video = {}
 
-        len_vid = dataset.vid_infos[vdx]['length']
+        if data_type == 'vis':
+            len_vid = dataset.vid_infos[vdx]['length']
+            use_vid_metric = False
+        elif data_type == 'vid':
+            len_vid = len(dataset.vid_infos[vdx])
+            use_vid_metric = True
         if eval_clip_frames == 1:
             len_clips = (len_vid + args.batch_size//2) // args.batch_size
         else:
             len_clips = (len_vid + n_overlapped_frames) // n_newly_frames
+        progress_bar_clip = ProgressBar(len_clips, len_clips)
         for cdx in range(len_clips):
+            progress_clip = (cdx + 1) / len_clips * 100
+            progress_bar_clip.set_val(cdx+1)
+            print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)     '
+                  % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip), end='')
+
             with timer.env('Load Data'):
-                if eval_clip_frames > 1:
+                if eval_clip_frames == 1:
+                    clip_frame_ids = range(cdx*args.batch_size, min((cdx+1)*args.batch_size, len_vid))
+                else:
                     left = cdx * n_newly_frames
                     clip_frame_ids = range(left, min(left+eval_clip_frames, len_vid))
-                else:
-                    clip_frame_ids = range(cdx*args.batch_size, min((cdx+1)*args.batch_size, len_vid))
-
-                print('Process video id: ', vid, 'frames: ', clip_frame_ids)
                 images, images_meta, targets = dataset.pull_clip_from_video(vid, clip_frame_ids)
-                images = torch.stack([torch.from_numpy(img).permute(2, 0, 1) for img in images], dim=0).cuda()
+                images = [torch.from_numpy(img).permute(2, 0, 1) for img in images]
+                images = ImageList_from_tensors(images, size_divisibility=32).cuda()
+                pad_shape = {'pad_shape': (images.size(-2), images.size(-1), 3)}
+                for k in range(len(images_meta)):
+                    images_meta[k].update(pad_shape)
 
             with timer.env('Network Extra'):
                 preds = net(images, img_meta=images_meta)
@@ -411,10 +412,9 @@ def evaluate(net: STMask, dataset, ann_file=None, epoch=-1):
                 preds = preds[n_overlapped_frames:]
 
             for batch_id, pred in enumerate(preds):
-
                 if args.display:
                     img_id = (vid, clip_frame_ids[batch_id])
-                    root_dir = os.path.join(args.save_folder, 'out', str(vid))
+                    root_dir = os.path.join(output_dir, 'out', str(vid))
                     if not os.path.exists(root_dir):
                         os.makedirs(root_dir)
                     if not args.display_single_mask:
@@ -444,7 +444,15 @@ def evaluate(net: STMask, dataset, ann_file=None, epoch=-1):
                     if pred is not None:
                         pred = postprocess_ytbvis(pred, images_meta[batch_id],
                                                   output_file=args.save_folder)
-                    bbox2result_video(results_video, pred, clip_frame_ids[batch_id], types=args.eval_types)
+
+                    if data_type == 'vid' and use_vid_metric:
+                        for k, v in pred.items():
+                            pred[k] = v.tolist()
+                        pred['video_id'] = vid
+                        pred['frame_id'] = clip_frame_ids[batch_id]
+                        json_results.append(pred)
+                    else:
+                        bbox2result_video(results_video, pred, clip_frame_ids[batch_id], types=args.eval_types)
 
         if not args.display:
             for obj_id, result_obj in results_video.items():
@@ -453,30 +461,12 @@ def evaluate(net: STMask, dataset, ann_file=None, epoch=-1):
                 result_obj['category_id'] = np.bincount(result_obj['category_id']).argmax().item()
                 json_results.append(result_obj)
 
-        progress = (vdx + 1) / dataset_size * 100
-        progress_bar.set_val(vdx + 1)
-        print('\rProcessing Images  %s %6d / %6d (%5.2f%%)      '
-              % (repr(progress_bar), vdx+1, dataset_size, progress), end='')
-
-    if not args.display:
-        if epoch >= 0:
-            json_path = os.path.join(args.save_folder, 'results_' + str(epoch) + '.json')
-        else:
-            json_path = os.path.join(args.save_folder, 'results.json')
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(json_results, f)
-        if ann_file is not None:
-            metric_path = os.path.join(args.save_folder, str(epoch) + '.txt')
-            calc_metrics(ann_file, json_path, output_file=metric_path, data_type=cfg.data_type)
-
-    print('Finish inference.')
+    return json_results
 
 
-def evaluate_clip(net: STMask, dataset, ann_file=None, epoch=-1):
-    clip_frames = cfg.train_dataset.clip_frames
-    n_newly_frames = clip_frames - args.overlap_frames
+def evaluate_clip(net: STMask, dataset, data_type='vis', eval_clip_frames=1, output_dir=None):
+    n_newly_frames = eval_clip_frames - args.overlap_frames
     dataset_size = len(dataset.vid_ids)
-    # progress_bar = ProgressBar(dataset_size, dataset_size)
 
     print()
     json_results = []
@@ -490,10 +480,14 @@ def evaluate_clip(net: STMask, dataset, ann_file=None, epoch=-1):
         print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
 
         vid_objs = {}
-        if cfg.data_type == 'vis':
+        if data_type == 'vis':
             len_vid = dataset.vid_infos[vdx]['length']
-        else:
+            use_vid_metric = False
+        elif data_type == 'vid':
             len_vid = len(dataset.vid_infos[vdx])
+            use_vid_metric = True
+        else:
+            print('Please input a specific data type, like vis or vid')
         len_clips = (len_vid + n_newly_frames//2) // n_newly_frames
         progress_bar_clip = ProgressBar(len_clips, len_clips)
         for cdx in range(len_clips):
@@ -504,17 +498,22 @@ def evaluate_clip(net: STMask, dataset, ann_file=None, epoch=-1):
 
             with timer.env('Load Data'):
                 left = cdx * n_newly_frames
-                clip_frame_ids = range(left, min(left+clip_frames, len_vid))
+                clip_frame_ids = range(left, min(left+eval_clip_frames, len_vid))
                 # clip_frame_ids = range(cdx*clip_frames, min((cdx+1)*clip_frames, len_vid))
                 images, images_meta, targets = dataset.pull_clip_from_video(vid, clip_frame_ids)
-                images = torch.stack([torch.from_numpy(img).permute(2, 0, 1) for img in images], dim=0).cuda()
-                if images.size(0) < clip_frames:
-                    images = torch.cat([images, images[:clip_frames-images.size(0)]], dim=0)
-                    images_meta += images_meta[:clip_frames-images.size(0)]
+                images = [torch.from_numpy(img).permute(2, 0, 1) for img in images]
+                images = ImageList_from_tensors(images, size_divisibility=32).cuda()
+                pad_shape = {'pad_shape': (images.size(-2), images.size(-1), 3)}
+                for k in range(len(images_meta)):
+                    images_meta[k].update(pad_shape)
+                if images.size(0) < eval_clip_frames:
+                    images = torch.cat([images, images[:eval_clip_frames-images.size(0)]], dim=0)
+                    images_meta += images_meta[:eval_clip_frames-images.size(0)]
 
             with timer.env('Network Extra'):
                 preds_clip = net(images, img_meta=images_meta)
                 pred_clip = preds_clip[0]
+                train_masks = True if 'proto' in pred_clip.keys() else False
 
             pred_frame = dict()
             for k, v in pred_clip.items():
@@ -523,19 +522,19 @@ def evaluate_clip(net: STMask, dataset, ann_file=None, epoch=-1):
 
             for batch_id, frame_id in enumerate(clip_frame_ids[:n_newly_frames]):
                 img_id = (vid, frame_id)
-                if cfg.train_masks:
+                if train_masks:
                     pred_frame['proto'] = pred_clip['proto'][batch_id]
                 if pred_clip['box'].size(0) == 0:
-                    if cfg.train_masks:
+                    if train_masks:
                         pred_frame['mask'] = torch.Tensor()
                     pred_frame['box'] = torch.Tensor()
                 else:
-                    if cfg.train_masks:
+                    if train_masks:
                         pred_frame['mask'] = pred_clip['mask'][..., batch_id]
                     pred_frame['box'] = pred_clip['box'][:, batch_id * 4:(batch_id + 1) * 4]
 
                 if args.display:
-                    root_dir = os.path.join(args.save_folder, 'out', str(vid))
+                    root_dir = os.path.join(output_dir, 'out', str(vid))
                     if not os.path.exists(root_dir):
                         os.makedirs(root_dir)
                     img_numpy = prep_display(pred_frame, images[batch_id],
@@ -549,25 +548,23 @@ def evaluate_clip(net: STMask, dataset, ann_file=None, epoch=-1):
                 else:
                     preds_cur = postprocess_ytbvis(pred_frame, images_meta[batch_id],
                                                    output_file=args.save_folder)
-                    bbox2result_video(vid_objs, preds_cur, frame_id, types=args.eval_types)
+                    if data_type == 'vid' and use_vid_metric:
+                        for k, v in preds_cur.items():
+                            preds_cur[k] = v.tolist()
+                        preds_cur['video_id'] = vid
+                        preds_cur['frame_id'] = frame_id
+                        json_results.append(preds_cur)
+                    else:
+                        bbox2result_video(vid_objs, preds_cur, frame_id, types=args.eval_types)
 
-        if not args.display:
+        if not args.display and data_type == 'vis':
             for obj_id, vid_obj in vid_objs.items():
                 vid_obj['video_id'] = vid
                 vid_obj['score'] = np.array(vid_obj['score']).mean().item()
                 vid_obj['category_id'] = np.bincount(vid_obj['category_id']).argmax().item()
                 json_results.append(vid_obj)
 
-    if not args.display:
-        json_path = os.path.join(args.save_folder, 'results_'+str(epoch)+'.json')
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(json_results, f)
-        if ann_file is not None:
-            metric_path = os.path.join(args.save_folder, str(epoch)+'.txt')
-            iouType = 'segm' if cfg.train_masks else 'bbox'
-            calc_metrics(ann_file, json_path, output_file=metric_path, iouType=iouType, data_type=cfg.data_type)
-
-    print('Finish inference.')
+    return json_results
 
 
 def evaluate_single(net: STMask, im_path=None, save_path=None, idx=None):
@@ -629,58 +626,67 @@ def evalvideo(net: STMask, input_folder: str, output_folder: str):
     return
 
 
+def evaldatasets(net: STMask, val_dataset, data_type, output_dir, eval_clip_frames=1, cubic_mode=False):
+    json_path = os.path.join(output_dir, 'results_' + str(args.epoch) + '.json')
+    if args.eval:
+        print('Begin Inference!')
+        if cubic_mode:
+            results = evaluate_clip(net, val_dataset, data_type=data_type,
+                                    eval_clip_frames=eval_clip_frames, output_dir=output_dir)
+        else:
+            results = evaluate(net, val_dataset, data_type=data_type,
+                               eval_clip_frames=eval_clip_frames, output_dir=output_dir)
+
+        if not args.display:
+            print('Save prediction into results.json file:')
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(results, f)
+            print('Finish save results.json!')
+
+    if val_dataset.has_gt:
+        print('Begin calculate metrics!')
+        ann_file = val_dataset.ann_file if data_type == 'vis' else \
+            val_dataset.img_prefix + '/cache/' + val_dataset.img_index.split('/')[-1].replace('.txt', '_anno.json')
+        use_vid_metric = False if data_type == 'vis' else True
+        metric_path = json_path.replace('.json', '.txt')
+        iouType = 'segm' if data_type == 'vis' else 'bbox'
+        if data_type == 'vid' and not use_vid_metric:
+            ann_file = ann_file[:-4] + '_eval' + ann_file[-4:]
+        calc_metrics(ann_file, json_path, output_file=metric_path, iouType=iouType, data_type=data_type,
+                     use_vid_metric=use_vid_metric)
+
+    print('Finish!')
+
+
 if __name__ == '__main__':
     parse_args()
-    ann_file = None
 
     if args.config is not None:
-        set_cfg(args.config)
-
-    if args.trained_model == 'interrupt':
-        args.trained_model = SavePath.get_interrupt('weights/')
-    elif args.trained_model == 'latest':
-        args.trained_model = SavePath.get_latest('weights/', cfg.name)
-
-    if args.config is None:
+        cfg = load_config(args.config)
+    else:
         model_path = SavePath.from_str(args.trained_model)
         # TODO: Bad practice? Probably want to do a name lookup instead.
         args.config = model_path.model_name + '_config'
         print('Config not specified. Parsed %s from the file name.\n' % args.config)
-        set_cfg(args.config)
-
-    if 'VID' in args.config:
-        cfg.data_type = 'vid'
-        args.eval_types = ['bbox']
-
-    if args.detect:
-        cfg.eval_mask_branch = False
+        cfg = load_config(args.config)
+    cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, cfg.NAME)
 
     if args.image is None and args.images is None:
-        if args.eval_dataset is not None:
-            set_dataset(args.eval_dataset, 'eval')
-
+        print('Load dataset:', cfg.DATASETS, args.eval_data)
         if args.eval_data == 'train':
-            print('load train_sub dataset')
-            cfg.train_dataset.has_gt = False
-            val_dataset = get_dataset(cfg.data_type, cfg.train_dataset, cfg.backbone.transform, inference=True)
-            ann_file = cfg.train_dataset.ann_file
-        elif args.eval_data == 'valid_sub':
-            print('load valid_sub dataset')
-            cfg.valid_sub_dataset.has_gt = False
-            val_dataset = get_dataset(cfg.data_type, cfg.valid_sub_dataset, cfg.backbone.transform, inference=True)
-            if cfg.data_type == 'vis':
-                ann_file = cfg.valid_sub_dataset.ann_file
-            elif cfg.data_type == 'vid':
-                ann_file = cfg.valid_sub_dataset.img_prefix + '/cache/' \
-                           + cfg.valid_sub_dataset.img_index.split('/')[-1][:-4] + '_anno_eval.json'
+            val_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.TRAIN, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES, 
+                                      inference=True)
 
-        elif args.eval_data == 'test':
-            print('load test dataset')
-            cfg.test_dataset.has_gt = False
-            val_dataset = get_dataset(cfg.data_type, cfg.test_dataset, cfg.backbone.transform, inference=True)
+        elif args.eval_data == 'valid_sub':
+            val_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.VALID_SUB, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES, 
+                                      inference=True)
+
         elif args.eval_data == 'valid':
-            print('load valid dataset')
-            val_dataset = get_dataset(cfg.data_type, cfg.valid_dataset, cfg.backbone.transform, inference=True)
+            val_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.VALID, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES,
+                                      inference=True)
+        else:
+            val_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.TEST, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES,
+                                      inference=True)
     else:
         val_dataset = None
 
@@ -695,11 +701,11 @@ if __name__ == '__main__':
         else:
             torch.set_default_tensor_type('torch.FloatTensor')
 
-        print('Loading model...', end='')
-        net = STMask()
+        print('Loading model from {}'.format(args.trained_model))
+        net = STMask(cfg)
         net.load_weights(args.trained_model)
         net.eval()
-        print(' Done.')
+        print('Loading model Done.')
 
         if args.cuda:
             net = net.cuda()
@@ -724,28 +730,8 @@ if __name__ == '__main__':
                 evalvideo(net, args.video)
 
         else:
-            if args.eval_data == 'metric':
-                print('calculate evaluation metrics ...')
-                if cfg.data_type == 'vis':
-                    ann_file = cfg.valid_sub_dataset.ann_file
-                    iouType = 'segm'
-                elif cfg.data_type == 'vid':
-                    iouType = 'bbox'
-                    ann_file = cfg.valid_sub_dataset.img_prefix + '/cache/' \
-                               + cfg.valid_sub_dataset.img_index.split('/')[-1][:-4] + '_anno_eval.json'
-                dt_file = args.save_folder + 'results.json'
-                print('det_file:', dt_file)
-                metrics = calc_metrics(ann_file, dt_file, iouType=iouType, data_type=cfg.data_type)
-                metrics_name = ['mAP', 'AP50', 'AP75', 'small', 'medium', 'large',
-                                'AR1', 'AR10', 'AR100', 'AR100_small', 'AR100_medium', 'AR100_large']
-                log_dir = 'weights/temp/train_log'
-                writer = SummaryWriter(log_dir=log_dir, comment='_scalars', filename_suffix='VIS')
-                for i_m in range(len(metrics_name)):
-                    writer.add_scalar('valid_metrics/' + metrics_name[i_m], metrics[i_m], 1)
-            else:
-                if cfg.train_track and cfg.clip_prediction_module:
-                    evaluate_clip(net, val_dataset, ann_file=ann_file, epoch=args.epoch)
-                else:
-                    evaluate(net, val_dataset, ann_file=ann_file, epoch=args.epoch)
+            evaldatasets(net, val_dataset, cfg.DATASETS.TYPE, cfg.OUTPUT_DIR, cfg.TEST.NUM_CLIP_FRAMES,
+                         cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE)
+
 
 

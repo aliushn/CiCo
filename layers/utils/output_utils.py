@@ -101,7 +101,8 @@ def postprocess_ytbvis(dets_output, img_meta, interpolation_mode='bilinear',
     """
     dets = dict()
     for k, v in dets_output.items():
-        dets[k] = v.clone()
+        if k is not None:
+            dets[k] = v.clone()
 
     if dets['box'].nelement() == 0:
         return dets

@@ -1,8 +1,7 @@
 from typing import List
-
+import os
 import mmcv
 import torch
-
 import matplotlib.pyplot as plt
 import numpy as np
 from .augmentations_vis import BaseTransform_vis
@@ -55,6 +54,51 @@ def show_ann(coco, img, ann_info):
     plt.show()
 
 
+def GtList_from_tensor(height, width, masks=None, boxes=None, img_metas=None):
+    '''
+    :param pad_h:
+    :param pad_w:
+    :param masks: List[torch.Tensor]
+    :param boxes: List[torch.Tensor]
+    :param img_metas:
+    :return:
+    '''
+    assert masks is not None or img_metas is not None
+    n_list = len(masks) if masks is not None else len(boxes)
+    for i in range(n_list):
+        if masks is not None:
+            if len(masks[i].shape) == 4:
+                n_obj, n_frames, im_h, im_w = masks[i].shape
+                n = n_obj*n_frames
+            else:
+                n, im_h, im_w = masks[i].shape
+            expand_masks = np.zeros(
+                (n, height, width), dtype=masks[i].dtype)
+            expand_masks[:, :im_h, :im_w] = masks[i].reshape(-1, im_h, im_w)
+            masks[i] = expand_masks.reshape(n_obj,n_frames,height,width) if len(masks[i].shape) == 4 else expand_masks
+
+        if boxes is not None:
+            if masks is not None:
+                im_h, im_w = masks[i].shape[-2:]
+            else:
+                if isinstance(img_metas[i], list):
+                    im_h, im_w = img_metas[i][0]['img_shape'][:2]
+                else:
+                    im_h, im_w = img_metas[i]['img_shape'][:2]
+            # Scale bounding boxes (which are currently percent coordinates)
+            boxes[i][..., [0, 2]] *= (im_w / width)
+            boxes[i][..., [1, 3]] *= (im_h / height)
+
+        if img_metas is not None:
+            if isinstance(img_metas[i], list):
+                for j in range(len(img_metas[i])):
+                    img_metas[i][j]['img_shape'] = (height, width, 3)
+            else:
+                img_metas[i]['img_shape'] = (height, width, 3)
+
+    return masks, boxes, img_metas
+
+
 # modify from detectron2.structures.image_list
 def ImageList_from_tensors(
         tensors: List[torch.Tensor], size_divisibility: int = 0, pad_value: float = 0.0):
@@ -101,56 +145,76 @@ def ImageList_from_tensors(
     return batched_imgs.contiguous()
 
 
-def get_dataset(data_type, dataset, backbone_transform, inference=False):
-    if dataset.has_gt and not inference:
-        flip, MS_train = True, dataset.MS_train
-        resize_gt, pad_gt = True, True
-    else:
-        flip, MS_train = False, False
-        resize_gt, pad_gt = False, False
-
+def get_dataset(data_type, data_name, input, num_clip_frame, inference=False):
+    from configs._base_.datasets import get_dataset_config
     from .ytvos import YTVOSDataset
     from .coco import COCODetection
     from .VID import VIDDataset
 
+    dataset_config = get_dataset_config(data_name, data_type)
+    if not inference:
+        flip, MS_train = True, input.MULTISCALE_TRAIN
+        resize_gt, pad_gt = True, True
+        img_scales = [input.MIN_SIZE_TRAIN, input.MAX_SIZE_TRAIN]
+    else:
+        flip, MS_train = False, False
+        resize_gt, pad_gt = False, False
+        img_scales = [input.MIN_SIZE_TEST, input.MAX_SIZE_TEST]
+
+    backbone_transform = {
+        'channel_order': 'RGB',
+        'normalize': True,
+        'subtract_means': False,
+        'to_float': False,
+    }
+
+    dataset_config['ann_file'] = os.path.join(dataset_config['data_dir'], dataset_config['ann_file'])
+    dataset_config['img_prefix'] = os.path.join(dataset_config['data_dir'], dataset_config['img_prefix'])
+
     if data_type == 'vis':
-        dataset = YTVOSDataset(ann_file=dataset.ann_file,
-                               img_prefix=dataset.img_prefix,
-                               has_gt=dataset.has_gt,
-                               clip_frames=dataset.clip_frames,
+        dataset = YTVOSDataset(ann_file=dataset_config['ann_file'],
+                               img_prefix=dataset_config['img_prefix'],
+                               has_gt=dataset_config['has_gt'],
+                               clip_frames=num_clip_frame,
+                               size_divisor=input.SIZE_DIVISOR,
                                transform=BaseTransform_vis(
-                                    img_scales=dataset.img_scales,
+                                    min_size=input.MIN_SIZE_TRAIN,
+                                    max_size=input.MAX_SIZE_TRAIN,
                                     Flip=flip,
                                     MS_train=MS_train,
-                                    preserve_aspect_ratio=dataset.preserve_aspect_ratio,
                                     backbone_transform=backbone_transform,
                                     resize_gt=resize_gt,
                                     pad_gt=pad_gt))
     elif data_type == 'vid':
-        dataset = VIDDataset(ann_file=dataset.ann_file,
-                             img_prefix=dataset.img_prefix,
-                             img_index=dataset.img_index,
-                             has_gt=dataset.has_gt,
-                             clip_frames=dataset.clip_frames,
+        dataset_config['img_idx'] = os.path.join(dataset_config['data_dir'], dataset_config['img_idx'])
+        dataset = VIDDataset(ann_file=dataset_config['ann_file'],
+                             img_prefix=dataset_config['img_prefix'],
+                             img_index=dataset_config['img_index'],
+                             has_gt=dataset_config['has_gt'],
+                             clip_frames=num_clip_frame,
+                             size_divisor=input.SIZE_DIVISOR,
                              transform=BaseTransform_vid(
-                                   img_scales=dataset.img_scales,
+                                   img_scales=img_scales,
                                    Flip=flip,
                                    MS_train=MS_train,
-                                   preserve_aspect_ratio=dataset.preserve_aspect_ratio,
+                                   preserve_aspect_ratio=input.PRESERVE_ASPECT_RATIO,
                                    backbone_transform=backbone_transform,
                                    resize_gt=resize_gt,
                                    pad_gt=pad_gt))
 
     elif data_type == 'coco':
-        dataset = COCODetection(image_path=dataset.img_prefix,
-                                info_file=dataset.ann_file,
-                                transform=BaseTransform_coco(dataset.img_scales,
+        dataset = COCODetection(image_path=dataset_config['img_prefix'],
+                                info_file=dataset_config['ann_file'],
+                                transform=BaseTransform_coco(img_scales,
                                                              Flip=flip,
                                                              MS_train=MS_train,
-                                                             preserve_aspect_ratio=dataset.preserve_aspect_ratio,
+                                                             preserve_aspect_ratio=input.PRESERVE_ASPECT_RATIO,
                                                              backbone_transform=backbone_transform,
                                                              resize_gt=resize_gt,
                                                              pad_gt=pad_gt))
+    else:
+        RuntimeError("Dataset not available: {}".format(data_name))
+
     return dataset
 
 

@@ -150,10 +150,6 @@ dataset_base_coco = Config({
     'img_prefix': '../datasets/coco/train2017/',
     'ann_file': 'path_to_annotation_file',
 
-    # Validation images and annotations.
-    'valid_images': '../datasets/coco/val2017/',
-    'valid_info': '../datasets/coco/annotations/',
-
     # Whether or not to load GT. If this is False, eval.py quantitative evaluation won't work.
     'has_gt': True,
     'img_scales': [640, 704, 768, 832, 896, 960],
@@ -218,6 +214,7 @@ dataset_base_vis = Config({
     'with_crowd': True,
     'with_label': True,
     'with_track': True,
+    'with_cubic_prediction': True,
     'clip_frames': 2,
     'has_gt': True,
 
@@ -311,7 +308,7 @@ dataset_base_vid = Config({
     'ann_file': 'path_to_annotation_file',
     'img_index': 'path_to_images_index',
     # 'img_scales': [(640, 384), (800, 480), (960, 576), (1280, 768), (768, 512)],
-    'img_scales': [(768, 512)],
+    'img_scales': [(640, 384), (768, 512), (960, 640)],
     'MS_train': True,
     'preserve_aspect_ratio': True,
     'tranform': None,
@@ -320,6 +317,7 @@ dataset_base_vid = Config({
     'with_crowd': True,
     'with_label': True,
     'with_track': True,
+    'with_cubic_prediction': True,
     'clip_frames': 2,
     'has_gt': True,
 
@@ -341,6 +339,13 @@ valid_VID_dataset = dataset_base_vid.copy({
     'img_prefix': '../datasets/ILSVRC2015/Data/VID',
     'ann_file': '../datasets/ILSVRC2015/Annotations/VID',
     'img_index': '../datasets/ILSVRC2015/ImageSets/VID_val_videos.txt'
+})
+
+train_DET_dataset = dataset_base_vid.copy({
+    'img_prefix': '../datasets/ILSVRC2015/Data/DET',
+    'ann_file': '../datasets/ILSVRC2015/Annotations/DET',
+    'img_index': '../datasets/ILSVRC2015/ImageSets/DET_train_30classes.txt',
+    'clip_frames': 1,
 })
 
 # ----------------------- TRANSFORMS ----------------------- #
@@ -670,7 +675,7 @@ base_config = Config({
 # ----------------------- STMask CONFIGS ----------------------- #
 STMask_base_config = base_config.copy({
     'name': 'STMask_base_config',
-    'use_prediction_matching': False,
+    'use_prediction_matching': True,     # IMPORTANT!!!
 
     # Dataset stuff
     'train_dataset': train_YouTube_VOS_dataset,
@@ -715,8 +720,6 @@ STMask_base_config = base_config.copy({
     'share_prediction_module': True,
     'clip_prediction_module': True,
     'clip_prediction_with_correlation': False,
-    'clip_prediction_with_external_box': True,
-    'clip_prediction_with_individual_box': True,
     'cubic_prediction_with_reduced_channels': False,
     'extra_layers': (4, 4, 4),   # class, box, track
     'pred_conv_kernels': [[3,3], [3,3], [3,3]],
@@ -768,10 +771,10 @@ STMask_base_config = base_config.copy({
     'track_crop_with_pred_box': False,
 
     # temporal settings
-    'use_temporal_info': True,
+    'use_temporal_info': False,
     # temporal fusion module settings
     'temporal_fusion_module': True,
-    't2s_with_roialign': False,
+    't2s_with_roialign': True,
     'correlation_patch_size': 5,
     'correlation_selected_layer': 1,
     'boxshift_with_pred_box': False,
@@ -802,8 +805,6 @@ STMask_base_config = base_config.copy({
     'nms_with_biou': True,
     'nms_with_miou': False,
     'add_missed_masks': False,
-    'only_count_classes': False,
-    'display_corr': False,
     'eval_single_im': False,
 })
 
@@ -1119,6 +1120,13 @@ STMask_resnet50_VID_config = STMask_base_VID_config.copy({
 
 })
 
+STMask_resnet50_DET_config = STMask_resnet50_VID_config.copy({
+    'name': 'STMask_resnet50_DET',
+    'train_dataset': train_DET_dataset,
+    'train_track': False,
+
+})
+
 STMask_plus_resnet50_VID_config = STMask_plus_resnet50_config.copy({
     'name': 'STMask_plus_resnet50_VID',
 
@@ -1130,7 +1138,18 @@ STMask_plus_resnet50_VID_config = STMask_plus_resnet50_config.copy({
     'classes': VID_CLASSES,
     'num_classes': 30,
 
+    # 'backbone': STMask_base_config.backbone.copy({
+    #     'path': 'STMask_plus_resnet50_DET_960_22_50000.pth',
+    # }),
+
     'train_masks': False,
+
+})
+
+STMask_plus_resnet50_DET_config = STMask_plus_resnet50_VID_config.copy({
+    'name': 'STMask_plus_resnet50_DET',
+    'train_dataset': train_DET_dataset,
+    'train_track': False,
 
 })
 

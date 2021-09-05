@@ -8,6 +8,7 @@ from cocoapi.PythonAPI.pycocotools.ytvoseval import YTVOSeval
 from cocoapi.PythonAPI.pycocotools.vid import VID
 from cocoapi.PythonAPI.pycocotools.videval import VIDeval
 import pycocotools.mask as mask_util
+from datasets.vid_eval import do_vid_evaluation
 from matplotlib.patches import Polygon
 
 
@@ -163,7 +164,7 @@ def bbox2result_video(results, preds, frame_idx, types=None):
         return results
 
 
-def calc_metrics(anno_file, dt_file, output_file=None, iouType='segm', data_type='vis'):
+def calc_metrics(anno_file, dt_file, output_file=None, iouType='segm', data_type='vis', use_vid_metric=True):
     # iouType is 'segm' or 'bbox'
     if data_type == 'vis':
         ytvosGt = YTVOS(anno_file)
@@ -173,17 +174,23 @@ def calc_metrics(anno_file, dt_file, output_file=None, iouType='segm', data_type
         E.evaluate()
         E.accumulate()
         E.summarize()
+        return E.stats
     elif data_type == 'vid':
-        vidGt = VID(anno_file)
-        vidDt = vidGt.loadRes(dt_file)
+        if use_vid_metric:
+            gt_annos = json.load(open(anno_file, 'r'))
+            dt_annos = json.load(open(dt_file, 'r'))
+            do_vid_evaluation(gt_annos, dt_annos, os.path.split(output_file)[0])
+        else:
+            vidGt = VID(anno_file)
+            vidDt = vidGt.loadRes(dt_file)
 
-        E = VIDeval(vidGt, vidDt, iouType=iouType, output_file=output_file)
-        E.evaluate()
-        E.accumulate()
-        E.summarize()
-    print('finish validation')
+            E = VIDeval(vidGt, vidDt, iouType=iouType, output_file=output_file)
+            E.evaluate()
+            E.accumulate()
+            E.summarize()
+            print('finish validation')
 
-    return E.stats
+            return E.stats
 
 
 def ytvos_eval(result_file, result_types, ytvos, max_dets=(100, 300, 1000), save_path_valid_metrics=None):

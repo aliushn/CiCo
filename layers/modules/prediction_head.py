@@ -2,9 +2,7 @@
 import torch, torchvision
 import torch.nn as nn
 import torch.nn.functional as F
-from datasets.config import cfg
 
-from .make_net import make_net
 from .Featurealign import FeatureAlign
 from utils import timer
 from itertools import product
@@ -36,77 +34,75 @@ class PredictionModule(nn.Module):
                          from parent instead of from this module.
     """
 
-    def __init__(self, in_channels, pred_aspect_ratios=None, pred_scales=None, parent=None, deform_groups=1):
+    def __init__(self, cfg, in_channels, pred_aspect_ratios=None, pred_scales=None, parent=None, deform_groups=1):
         super().__init__()
 
+        self.cfg = cfg
         self.in_channels = in_channels
-        self.num_classes = cfg.num_classes if cfg.use_focal_loss else cfg.num_classes + 1
-        self.mask_dim = cfg.mask_dim
+        self.num_classes = cfg.DATASETS.NUM_CLASSES if cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS else cfg.DATASETS.NUM_CLASSES + 1
+        self.mask_dim = cfg.MODEL.MASK_HEADS.MASK_DIM
         self.num_priors = len(pred_aspect_ratios[0]) * len(pred_scales)
-        self.track_dim = cfg.track_dim
+        self.track_dim = cfg.MODEL.TRACK_HEADS.TRACK_DIM
         self.pred_aspect_ratios = pred_aspect_ratios
         self.pred_scales = pred_scales
         self.deform_groups = deform_groups
         self.parent = [parent]  # Don't include this in the state dict
 
-        if cfg.use_sipmask:
-            self.mask_dim = self.mask_dim * cfg.sipmask_head
-        elif cfg.mask_proto_coeff_occlusion:
+        if cfg.MODEL.MASK_HEADS.USE_SIPMASK:
+            self.mask_dim = self.mask_dim * cfg.MODEL.MASK_HEADS.SIPMASK_HEAD
+        elif cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION:
             self.mask_dim = self.mask_dim * 3
-        elif cfg.use_dynamic_mask:
-            self.mask_dim = cfg.mask_dim ** 2 * (cfg.dynamic_mask_head_layers - 1) \
-                            + cfg.mask_dim * cfg.dynamic_mask_head_layers + 1
-            if not cfg.disable_rel_coords:
-                self.mask_dim += cfg.mask_dim * 2
-        elif cfg.mask_proto_with_levels:
-            self.mask_dim = self.mask_dim * 2
-
-        if cfg.train_track and cfg.clip_prediction_module:
-            self.clip_frames = cfg.train_dataset.clip_frames
+        elif cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
+            self.mask_dim = self.mask_dim ** 2 * (cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS - 1) \
+                            + self.mask_dim * cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS + 1
+            if not cfg.MODEL.MASK_HEADS.DISABLE_REL_COORDS:
+                self.mask_dim += self.mask_dim * 2
         else:
-            self.clip_frames = 1
+            self.mask_dim = self.mask_dim
 
-        kernel_size = cfg.pred_conv_kernels[0]
+        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE else 1
+
+        kernel_size = [3, 3]
         padding = [(kernel_size[0] - 1) // 2, (kernel_size[1] - 1) // 2]
         if parent is None:
 
-            self.bbox_layer = nn.Conv2d(self.in_channels, self.num_priors * 4 * self.clip_frames,
+            self.bbox_layer = nn.Conv2d(self.in_channels, self.num_priors*4*self.clip_frames,
                                         kernel_size=kernel_size, padding=padding)
 
-            if cfg.train_class:
-                if cfg.use_dcn_class:
+            if cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
+                if cfg.STMASK.FC.FCB_USE_DCN_CLASS:
                     self.conf_layer = FeatureAlign(self.in_channels,
                                                    self.num_priors * self.num_classes,
                                                    kernel_size=kernel_size,
                                                    deformable_groups=self.deform_groups,
-                                                   use_pred_offset=cfg.use_pred_offset)
+                                                   use_pred_offset=cfg.STMASK.FC.FCB_USE_PRED_OFFSET)
                 else:
-                    self.conf_layer = nn.Conv2d(self.in_channels, self.num_priors * self.num_classes,
+                    self.conf_layer = nn.Conv2d(self.in_channels, self.num_priors*self.num_classes,
                                                 kernel_size=kernel_size, padding=padding)
 
-            if cfg.train_track and not cfg.track_by_Gaussian:
-                if cfg.use_dcn_track:
+            if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
+                if cfg.STMASK.FC.FCB_USE_DCN_TRACK:
                     self.track_layer = FeatureAlign(self.in_channels,
-                                                    self.num_priors * self.embed_dim,
+                                                    self.num_priors*self.track_dim,
                                                     kernel_size=kernel_size,
                                                     deformable_groups=self.deform_groups,
-                                                    use_pred_offset=cfg.use_pred_offset)
+                                                    use_pred_offset=cfg.STMASK.FC.FCB_USE_PRED_OFFSET)
                 else:
-                    self.track_layer = nn.Conv2d(self.in_channels, self.num_priors * self.track_dim,
+                    self.track_layer = nn.Conv2d(self.in_channels, self.num_priors*self.track_dim,
                                                  kernel_size=kernel_size, padding=padding)
 
-            if cfg.train_masks:
-                if cfg.use_dcn_mask:
+            if cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
+                if cfg.STMASK.FC.FCB_USE_DCN_MASK:
                     self.mask_layer = FeatureAlign(self.out_channels,
                                                    self.num_priors * self.mask_dim,
                                                    kernel_size=kernel_size,
                                                    deformable_groups=self.deform_groups,
-                                                   use_pred_offset=cfg.use_pred_offset)
+                                                   use_pred_offset=cfg.STMASK.FC.FCB_USE_PRED_OFFSET)
                 else:
                     self.mask_layer = nn.Conv2d(self.in_channels, self.num_priors * self.mask_dim,
                                                 kernel_size=kernel_size, padding=padding)
 
-            if cfg.train_centerness:
+            if cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
                 self.centerness_layer = nn.Conv2d(self.in_channels, self.num_priors*self.clip_frames,
                                                   kernel_size=kernel_size, padding=padding)
 
@@ -123,9 +119,10 @@ class PredictionModule(nn.Module):
                         nn.ReLU(inplace=True)
                     ] for _ in range(num_layers)], []))
 
-            self.bbox_extra, self.conf_extra = [make_extra(x, self.in_channels) for x in cfg.extra_layers[:2]]
-            if cfg.train_track and not cfg.track_by_Gaussian:
-                self.track_extra = make_extra(cfg.extra_layers[-1], self.in_channels)
+            self.bbox_extra = make_extra(cfg.MODEL.BOX_HEADS.TOWER_LAYERS, self.in_channels)
+            self.conf_extra = make_extra(cfg.MODEL.CLASS_HEADS.TOWER_LAYERS, self.in_channels)
+            if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
+                self.track_extra = make_extra(cfg.MODEL.TRACK_HEADS.TOWER_LAYERS, self.in_channels)
 
     def forward(self, x, idx):
         """
@@ -147,44 +144,32 @@ class PredictionModule(nn.Module):
         preds = {'priors': priors, 'prior_levels': prior_levels}
 
         bbox_x = src.bbox_extra(x)
-        conf_x = src.conf_extra(x)
-        if cfg.train_track and not cfg.track_by_Gaussian:
-            track_x = src.track_extra(x)
-
         bbox = src.bbox_layer(bbox_x)
-        bbox_output = bbox.permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, 4*self.clip_frames)
-        # See box_utils.decode for an explanation of this
-        if cfg.use_yolo_regressors:
-            bbox_output[:, :, :2] = torch.sigmoid(bbox_output[:, :, :2]) - 0.5
-            bbox_output[:, :, 0] /= conv_w
-            bbox_output[:, :, 1] /= conv_h
-        preds['loc'] = bbox_output
+        preds['loc'] = bbox.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, 4*self.clip_frames)
 
-        if cfg.train_class:
-            if cfg.use_dcn_class:
-                conf = src.conf_layer(conf_x, bbox.detach())
-            else:
-                conf = src.conf_layer(conf_x)
-            preds['conf'] = conf.permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.num_classes)
+        # Classification
+        if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
+            conf_x = src.conf_extra(x)
+            conf = src.conf_layer(conf_x, bbox.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_CLASS else src.conf_layer(conf_x)
+            preds['conf'] = conf.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.num_classes)
 
-        if cfg.train_track and not cfg.track_by_Gaussian:
-            if cfg.use_dcn_track:
-                track = src.track_layer(track_x, bbox.detach())
-            else:
-                track = src.track_layer(track_x)
-            track = track.permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.track_dim)
-            preds['track'] = F.normalize(track, dim=-1)
-
-        if cfg.train_masks:
-            if cfg.use_dcn_mask:
-                mask = src.mask_layer(bbox_x, bbox.detach())
-            else:
-                mask = src.mask_layer(bbox_x)
-            preds['mask_coeff'] = mask.permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.mask_dim)
-
-        if cfg.train_centerness:
-            centerness = src.centerness_layer(bbox_x).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.clip_frames)
+        # Centerness for Boxes
+        if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
+            centerness = src.centerness_layer(bbox_x).permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.clip_frames)
             preds['centerness'] = torch.sigmoid(centerness)
+
+        # Mask coefficients
+        if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
+            mask = src.mask_layer(bbox_x, bbox.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_MASK else src.mask_layer(bbox_x)
+            # Activation function is Tanh
+            preds['mask_coeff'] = torch.tanh(mask.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.mask_dim))
+
+        # Tracking
+        if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
+            track_x = src.track_extra(x)
+            track = src.track_layer(track_x, bbox.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_TRACK else src.track_layer(track_x)
+            track = track.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.track_dim)
+            preds['track'] = F.normalize(track, dim=-1)
 
         return preds
 
@@ -211,10 +196,10 @@ class PredictionModule(nn.Module):
                             prior_data += [x, y, w, h]
                             prior_levels += [idx]
 
-            priors = torch.Tensor(prior_data, device=device).view(1, -1, 4).detach()
+            priors = torch.Tensor(prior_data, device=device).reshape(1, -1, 4).detach()
             priors.requires_grad = False
 
-            prior_levels = torch.Tensor(prior_levels, device=device).view(1, -1).detach()
+            prior_levels = torch.Tensor(prior_levels, device=device).reshape(1, -1).detach()
             prior_levels.requires_grad = False
 
         return priors, prior_levels

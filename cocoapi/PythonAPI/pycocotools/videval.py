@@ -393,27 +393,34 @@ class VIDeval:
 
             aind = [i for i, aRng in enumerate(p.areaRngLbl) if aRng == areaRng]
             mind = [i for i, mDet in enumerate(p.maxDets) if mDet == maxDets]
-            if ap == 1:
+            if ap == 1 or ap == 2:
                 # dimension of precision: [TxRxKxAxM]
-                s = self.eval['precision']
+                s_ap = self.eval['precision']
                 # IoU
                 if iouThr is not None:
                     t = np.where(iouThr == p.iouThrs)[0]
-                    s = s[t]
-                s = s[:, :, :, aind, mind]
-                s_temp = s.reshape((-1, s.shape[2]))
-                # print(np.sum(s_temp, axis=0) / (s_temp > -1).sum(axis=0), 1)
-            else:
+                    s_ap = s_ap[t]
+                s_ap = s_ap[:, :, :, aind, mind]
+
+            if ap == 0 or ap == 2:
                 # dimension of recall: [TxKxAxM]
-                s = self.eval['recall']
+                s_rec = self.eval['recall']
                 if iouThr is not None:
                     t = np.where(iouThr == p.iouThrs)[0]
-                    s = s[t]
-                s = s[:, :, aind, mind]
+                    s_rec = s_rec[t]
+                s_rec = s_rec[:, :, aind, mind]
+
+            if ap == 2:
+                # TODO: plan to compute PR curve in PASCAL VOC
+                s_temp = s_ap.reshape((-1, s_ap.shape[2]))
+                print(np.sum(s_temp, axis=0) / (s_temp > -1).sum(axis=0), 1)
+            else:
+                s = s_ap if ap == 1 else s_rec
+
             if len(s[s > -1]) == 0:
                 mean_s = -1
             else:
-                mean_s = np.mean(s[s > -1])
+                 mean_s = np.mean(s[s > -1])
             performance = iStr.format(titleStr, typeStr, iouStr, areaRng, maxDets, mean_s)
             print(performance)
             if self.output_file is not None:

@@ -1,12 +1,8 @@
 import torch
-import torch.nn.functional as F
-from layers.utils import jaccard, mask_iou, compute_DIoU, generate_mask, compute_comp_scores, generate_rel_coord, \
+import numpy as np
+from layers.utils import jaccard, mask_iou, generate_mask, compute_comp_scores, generate_rel_coord, \
     generate_track_gaussian, compute_kl_div
 from utils import timer
-
-from datasets import cfg
-
-import numpy as np
 
 import pyximport
 pyximport.install(setup_args={"include_dirs":np.get_include()}, reload_support=True)
@@ -20,11 +16,14 @@ class Track(object):
     """
     # TODO: Refactor this whole class away. It needs to go.
 
-    def __init__(self, clip_frames=1):
+    def __init__(self, match_coeff, clip_frames=1, track_by_Gaussian=False, train_masks=True):
         self.prev_detection = None
+        self.match_coeff = match_coeff
         self.clip_frames = clip_frames
+        self.track_by_Gaussian = track_by_Gaussian
+        self.train_masks = train_masks
 
-    def __call__(self, pred_outs_after_NMS, img_meta):
+    def __call__(self, pred_outs_after_NMS, img_meta, img=None):
         """
         Args:
              loc_data: (tensor) Loc preds from loc layers
@@ -38,10 +37,9 @@ class Track(object):
         """
 
         with timer.env('Track'):
-            batch_size = len(pred_outs_after_NMS)
 
             results = []
-            for batch_idx in range(batch_size):
+            for batch_idx in range(len(pred_outs_after_NMS)):
                 results.append(self.track(pred_outs_after_NMS[batch_idx],
                                           img_meta[batch_idx*self.clip_frames:(batch_idx+1)*self.clip_frames]))
 
@@ -62,22 +60,26 @@ class Track(object):
         det_bbox = detection['box']
         det_labels = detection['class']  # class
         det_score = detection['score']
-        det_masks_soft = detection['mask'] if cfg.train_masks else None
-        det_masks = det_masks_soft.gt(0.5).float() if cfg.train_masks else None
+        if 'mask' in detection.keys():
+            det_masks_soft = detection['mask']
+            det_masks = det_masks_soft.gt(0.5).float()
+        else:
+            det_masks_soft, det_masks = None, None
 
-        if cfg.track_by_Gaussian:
+        if self.track_by_Gaussian:
             detection['track_mu'], detection['track_var'] = generate_track_gaussian(detection['track'].squeeze(0),
                                                                                     det_masks_soft, det_bbox)
             del detection['track']
 
         # compared bboxes in current frame with bboxes in previous frame to achieve tracking
         if is_first or (not is_first and self.prev_detection is None):
-            det_obj_ids = torch.arange(det_bbox.size(0))
             # save bbox and features for later matching
             self.prev_detection = dict()
             for k, v in detection.items():
-                if k in {'box', 'mask', 'class', 'track', 'track_mu', 'track_var'}:
+                if k in {'box', 'mask', 'class', 'track', 'track_mu', 'track_var', 'score'}:
                     self.prev_detection[k] = v.clone()
+            detection['box_ids'] = torch.arange(det_bbox.size(0))
+            return detection
 
         else:
 
@@ -85,7 +87,7 @@ class Track(object):
             n_dets = det_bbox.size(0)
             n_prev = self.prev_detection['box'].size(0)
             # only support one image at a time
-            if cfg.track_by_Gaussian:
+            if self.track_by_Gaussian:
                 kl_divergence = compute_kl_div(self.prev_detection['track_mu'], self.prev_detection['track_var'],
                                                detection['track_mu'], detection['track_var'])     # value in [[0, +infinite]]
                 sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10  # threshold for kl_divergence = 10
@@ -98,14 +100,14 @@ class Track(object):
 
             label_delta = (self.prev_detection['class'] == det_labels.view(-1, 1)).float()
             bbox_ious = jaccard(det_bbox[:, :4], self.prev_detection['box'][:, -4:])
-            if cfg.train_masks:
+            if self.train_masks:
                 if self.clip_frames > 1:
                     mask_ious = mask_iou(det_masks[..., 0], self.prev_detection['mask'].gt(0.5).float()[..., -1])
                 else:
                     mask_ious = mask_iou(det_masks, self.prev_detection['mask'].gt(0.5).float())
             else:
                 mask_ious = torch.zeros_like(bbox_ious)
-                cfg.match_coeff[1] = 0
+                self.match_coeff[1] = 0
 
             # compute comprehensive score
             comp_scores = compute_comp_scores(sim,
@@ -115,7 +117,7 @@ class Track(object):
                                               label_delta,
                                               add_bbox_dummy=True,
                                               bbox_dummy_iou=0.3,
-                                              match_coeff=cfg.match_coeff)
+                                              match_coeff=self.match_coeff)
 
             match_likelihood, match_ids = torch.max(comp_scores, dim=1)
             # translate match_ids to det_obj_ids, assign new id to new objects
@@ -145,11 +147,10 @@ class Track(object):
                         for k, v in self.prev_detection.items():
                             self.prev_detection[k][obj_id] = detection[k][idx].clone()
 
-        detection['box_ids'] = det_obj_ids
+            detection['box_ids'] = det_obj_ids
+            keep = det_obj_ids >= 0
+            for k, v in detection.items():
+                if k not in {'proto'}:
+                    detection[k] = v[keep]
 
-        keep = det_obj_ids >= 0
-        for k, v in detection.items():
-            if k not in {'proto'}:
-                detection[k] = v[keep]
-
-        return detection
+            return detection

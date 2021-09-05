@@ -59,7 +59,9 @@ class VID:
             self.vids = self.dataset['videos']
             self.cats = self.dataset['categories']
 
+            self.cats_occur = []
             for id, ann in enumerate(self.dataset['annotations']):
+                self.cats_occur.append(ann['category_id'])
                 ann['areas'] = []
                 if not 'bbox' in ann:
                     ann['bbox'] = []
@@ -71,13 +73,14 @@ class VID:
                         ann['areas'].append(None)
                 ann['id'] = id+1
                 l = [a for a in ann['areas'] if a]
-                if len(l)==0:
+                if len(l) == 0:
                     ann['avg_area'] = 0
                 else:
                     ann['avg_area'] = np.array(l).mean()
                 ann['iscrowd'] = 0
 
             self.anns = self.dataset['annotations']
+            self.cats_occur = list(set(self.cats_occur))
 
     def info(self):
         """
@@ -106,7 +109,7 @@ class VID:
             cats = cats if len(catNms) == 0 else [cat for cat in cats if cat['name']          in catNms]
             cats = cats if len(supNms) == 0 else [cat for cat in cats if cat['supercategory'] in supNms]
             cats = cats if len(catIds) == 0 else [cat for cat in cats if cat['id']            in catIds]
-        ids = range(len(cats))
+        ids = range(1, len(cats)+1)
         return ids
 
     def getVidIds(self, vidIds=[], catIds=[]):
@@ -186,7 +189,9 @@ class VID:
                'Results do not correspond to current coco set'
         if 'bbox' in anns[0]:
             res.dataset['categories'] = copy.deepcopy(self.dataset['categories'])
+            res.cats_occur = []
             for id, ann in enumerate(anns):
+                res.cats_occur.append(ann['category_id'])
                 ann['areas'] = []
                 if not 'bbox' in ann:
                     ann['bbox'] = []
@@ -203,6 +208,7 @@ class VID:
                 else:
                   ann['avg_area'] = np.array(l).mean() 
                 ann['iscrowd'] = 0
+            res.cats_occur = list(set(res.cats_occur))
         print('DONE (t={:0.2f}s)'.format(time.time()- tic))
 
         res.dataset['annotations'] = anns

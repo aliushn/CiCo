@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from datasets import *
+from configs._base_.models import cfg
 
 
 class NetLoss(nn.Module):
@@ -17,7 +18,7 @@ class NetLoss(nn.Module):
 
     def forward(self, images, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds, img_metas):
         preds = self.net(images)
-        losses = self.criterion(self.net, preds, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds)
+        losses = self.criterion(preds, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds)
         return losses
 
 
@@ -31,9 +32,9 @@ class CustomDataParallel(nn.DataParallel):
         # More like scatter and data prep at the same time. The point is we prep the data in such a way
         # that no scatter is necessary, and there's no need to shuffle stuff around different GPUs.
         devices = ['cuda:' + str(x) for x in device_ids]
-        if cfg.data_type == 'coco':
+        if cfg.DATASETS.TYPE == 'coco':
             splits = prepare_data_coco(inputs[0], devices)
-        elif cfg.data_type == 'vid':
+        elif cfg.DATASETS.TYPE == 'vid':
             splits = prepare_data_vid(inputs[0], devices)
         else:
             splits = prepare_data_vis(inputs[0], devices)

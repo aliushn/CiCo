@@ -1,33 +1,31 @@
+# From https://github.com/Scalsol/mega.pytorch/blob/master/mega_core/data/datasets/evaluation/vid/vid_eval.py
+# with slight modifications
 from __future__ import division
 
 import os
 from collections import defaultdict
 import numpy as np
 import scipy.io as sio
+from layers.utils import jaccard
 
 import torch
 
 
-def do_vid_evaluation(dataset, predictions, output_folder, box_only, motion_specific, logger):
-    pred_boxlists = []
-    gt_boxlists = []
-    for image_id, prediction in enumerate(predictions):
-        img_info = dataset.get_img_info(image_id)
-        image_width = img_info["width"]
-        image_height = img_info["height"]
-        prediction = prediction.resize((image_width, image_height))
-        pred_boxlists.append(prediction)
-
-        gt_boxlist = dataset.get_groundtruth(image_id)
-        gt_boxlists.append(gt_boxlist)
+def do_vid_evaluation(gt_annos, predictions, output_folder, logger=None, box_only=False, motion_specific=False):
+    # pred_boxlists = []
+    # gt_boxlists = []
+    # for gt_anno, prediction in zip(gt_annos, predictions):
+    #     pred_boxlists.append(prediction['box'])
+    #     gt_boxlists.append(gt_anno['boxes'])
     if box_only:
         result = eval_proposals_vid(
-            pred_boxlists=pred_boxlists,
-            gt_boxlists=gt_boxlists,
+            pred_lists=predictions,
+            gt_lists=gt_annos,
             iou_thresh=0.5,
         )
         result_str = "Recall: {:.4f}".format(result["recall"])
-        logger.info(result_str)
+        if logger is not None:
+            logger.info(result_str)
         if output_folder:
             with open(os.path.join(output_folder, "proposal_result.txt"), "w") as fid:
                 fid.write(result_str)
@@ -40,8 +38,8 @@ def do_vid_evaluation(dataset, predictions, output_folder, box_only, motion_spec
         motion_ranges = [[0.0, 1.0]]
         motion_name = ["all"]
     result = eval_detection_vid(
-        pred_boxlists=pred_boxlists,
-        gt_boxlists=gt_boxlists,
+        pred_boxlists=predictions,
+        gt_boxlists=gt_annos,
         iou_thresh=0.5,
         motion_ranges=motion_ranges,
         motion_specific=motion_specific,
@@ -55,10 +53,10 @@ def do_vid_evaluation(dataset, predictions, output_folder, box_only, motion_spec
     for i, ap in enumerate(result[0]["ap"]):
         if i == 0:  # skip background
             continue
-        result_str += "{:<16}: {:.4f}\n".format(
-            dataset.map_class_id_to_class_name(i), ap
-        )
-    logger.info("\n" + result_str)
+        result_str += "{:<16}: {:.4f}\n".format(i, ap)
+    if logger is not None:
+        logger.info("\n" + result_str)
+    print(result_str)
     if output_folder:
         with open(os.path.join(output_folder, "result.txt"), "w") as fid:
             fid.write(result_str)
@@ -66,20 +64,21 @@ def do_vid_evaluation(dataset, predictions, output_folder, box_only, motion_spec
     return result
 
 
-def eval_proposals_vid(pred_boxlists, gt_boxlists, iou_thresh=0.5, limit=300):
-    assert len(gt_boxlists) == len(
-        pred_boxlists
+def eval_proposals_vid(pred_lists, gt_lists, iou_thresh=0.5, limit=300):
+    assert len(gt_lists) == len(
+        pred_lists
     ), "Length of gt and pred lists need to be same."
 
     gt_overlaps = []
     num_pos = 0
-    for gt_boxlist, pred_boxlist in zip(gt_boxlists, pred_boxlists):
-        inds = pred_boxlist.get_field("objectness").sort(descending=True)[1]
-        pred_boxlist = pred_boxlist[inds]
+    for gt_list, pred_list in zip(gt_lists, pred_lists):
+        inds = torch.tensor(pred_list['score']).sort(descending=True)[1]
+        pred_boxlist = torch.tensor(pred_list['box'])[inds]
 
         if len(pred_boxlist) > limit:
             pred_boxlist = pred_boxlist[:limit]
 
+        gt_boxlist = torch.tensor(gt_list['boxes'])
         num_pos += len(gt_boxlist)
 
         if len(gt_boxlist) == 0:
@@ -88,7 +87,7 @@ def eval_proposals_vid(pred_boxlists, gt_boxlists, iou_thresh=0.5, limit=300):
         if len(pred_boxlist) == 0:
             continue
 
-        overlaps = boxlist_iou(pred_boxlist, gt_boxlist)
+        overlaps = jaccard(pred_boxlist, gt_boxlist)
 
         _gt_overlaps = torch.zeros(len(gt_boxlist))
         for j in range(min(len(pred_boxlist), len(gt_boxlist))):
@@ -139,8 +138,8 @@ def eval_detection_vid(pred_boxlists,
     for motion_index, motion_range in enumerate(motion_ranges):
         print("Evaluating motion iou range {} - {}".format(motion_range[0], motion_range[1]))
         prec, rec = calc_detection_vid_prec_rec(
-            pred_boxlists=pred_boxlists,
-            gt_boxlists=gt_boxlists,
+            pred_lists=pred_boxlists,
+            gt_lists=gt_boxlists,
             motion_ious=motion_ious,
             iou_thresh=iou_thresh,
             motion_range=motion_range,
@@ -150,13 +149,13 @@ def eval_detection_vid(pred_boxlists,
     return motion_ap
 
 
-def calc_detection_vid_prec_rec(gt_boxlists, pred_boxlists, motion_ious, iou_thresh=0.5, motion_range=[0., 1.]):
+def calc_detection_vid_prec_rec(gt_lists, pred_lists, motion_ious, iou_thresh=0.5, motion_range=[0., 1.]):
     n_pos = defaultdict(int)
     score = defaultdict(list)
     match = defaultdict(list)
     pred_ignore = defaultdict(list)
     if motion_ious is None:
-        motion_ious = [None] * len(gt_boxlists)
+        motion_ious = [None] * len(gt_lists)
         empty_weight = 0
     else:
         all_motion_iou = np.concatenate(motion_ious, axis=0)
@@ -164,12 +163,12 @@ def calc_detection_vid_prec_rec(gt_boxlists, pred_boxlists, motion_ious, iou_thr
                             range(len(all_motion_iou))]) / float(len(all_motion_iou))
         if empty_weight == 1:
             empty_weight = 0
-    for gt_boxlist, pred_boxlist, motion_iou in zip(gt_boxlists, pred_boxlists, motion_ious):
-        pred_bbox = pred_boxlist.bbox.numpy()
-        pred_label = pred_boxlist.get_field("labels").numpy()
-        pred_score = pred_boxlist.get_field("scores").numpy()
-        gt_bbox = gt_boxlist.bbox.numpy()
-        gt_label = gt_boxlist.get_field("labels").numpy()
+    for gt_list, pred_list, motion_iou in zip(gt_lists, pred_lists, motion_ious):
+        pred_bbox = np.asarray(pred_list['box'])
+        pred_label = np.asarray(pred_list['class'])
+        pred_score = np.asarray(pred_list['score'])
+        gt_bbox = np.asarray(gt_list['boxes'])
+        gt_label = np.asarray(gt_list['labels'])
         gt_ignore = np.zeros(len(gt_bbox))
 
         for gt_index, gt in enumerate(gt_bbox):
@@ -208,10 +207,8 @@ def calc_detection_vid_prec_rec(gt_boxlists, pred_boxlists, motion_ious, iou_thr
             pred_bbox_l[:, 2:] += 1
             gt_bbox_l = gt_bbox_l.copy()
             gt_bbox_l[:, 2:] += 1
-            iou = boxlist_iou(
-                BoxList(pred_bbox_l, gt_boxlist.size),
-                BoxList(gt_bbox_l, gt_boxlist.size),
-            ).numpy()
+            iou = jaccard(torch.from_numpy(pred_bbox_l).to(torch.float32),
+                          torch.from_numpy(gt_bbox_l).to(torch.float32)).numpy()
 
             num_obj, num_gt_obj = iou.shape
 
@@ -250,7 +247,6 @@ def calc_detection_vid_prec_rec(gt_boxlists, pred_boxlists, motion_ious, iou_thr
                     # pred_ignore[l].append(0)
 
     n_fg_class = max(n_pos.keys()) + 1
-    print(n_pos)
     prec = [None] * n_fg_class
     rec = [None] * n_fg_class
 

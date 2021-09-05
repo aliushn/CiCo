@@ -12,7 +12,7 @@ from .VID import VIDDataset, detection_collate_vid, prepare_data_vid
 from .CustomDataParallel import NetLoss, CustomDataParallel
 
 __all__ = [
-    'COLORS', 'MEANS', 'STD', 'cfg', 'set_cfg', 'set_dataset',
+    'COLORS', 'MEANS', 'STD',
     'detection_collate_coco', 'detection_collate_vis', 'get_dataset',
     'YTVOSDataset', 'COCODetection', 'get_label_map',
     'GroupSampler', 'DistributedGroupSampler', 'build_dataloader',

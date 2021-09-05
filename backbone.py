@@ -466,12 +466,41 @@ class VGGBackbone(nn.Module):
 
 def construct_backbone(cfg):
     """ Constructs a backbone given a backbone config object (see config.py). """
-    backbone = cfg.type(*cfg.args)
+    if cfg.TYPE == 'ResNetBackbone':
+        backbone = ResNetBackbone(*cfg.ARGS)
+    else:
+        backbone = VGGBackbone(*cfg.ARGS)
 
     # Add downsampling layers until we reach the number we need
-    num_layers = max(cfg.selected_layers) + 1
+    num_layers = max(cfg.SELECTED_LAYERS) + 1
 
     while len(backbone.layer) < num_layers:
         backbone.add_layer()
 
     return backbone
+
+
+# ----------------------- TRANSFORMS ----------------------- #
+
+resnet_transform = {
+    'channel_order': 'RGB',
+    'normalize': True,
+    'subtract_means': False,
+    'to_float': False,
+}
+
+vgg_transform = {
+    # Note that though vgg is traditionally BGR,
+    # the channel order of vgg_reducedfc.pth is RGB.
+    'channel_order': 'RGB',
+    'normalize': False,
+    'subtract_means': True,
+    'to_float': False,
+}
+
+darknet_transform = {
+    'channel_order': 'RGB',
+    'normalize': False,
+    'subtract_means': False,
+    'to_float': True,
+}

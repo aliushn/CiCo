@@ -1,48 +1,36 @@
 import torch
 import torch.nn as nn
-from datasets import cfg
 from mmcv.ops import roi_align
 from layers.utils import sanitize_coordinates_hw
 
 
 class TemporalNet(nn.Module):
-    def __init__(self, corr_channels, mask_proto_n=32, pooling_size=7):
+    def __init__(self, corr_channels, mask_proto_n=32, pooling_size=7, maskshift_loss=False,
+                 use_sipmask=False, sipmask_head=4):
 
         super().__init__()
+        self.maskshift_loss = maskshift_loss
         self.conv1 = nn.Conv2d(corr_channels, 512, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(512, 512, kernel_size=3, padding=1)
         self.conv3 = nn.Conv2d(512, 1024, kernel_size=3, padding=1)
         self.relu = nn.ReLU(inplace=True)
         self.fc = nn.Linear(1024, 4)
-        if cfg.t2s_with_roialign:
-            self.pool = nn.AvgPool2d((7, 7), stride=1)
-        else:
-            self.downsample = nn.MaxPool2d(2)
-            self.pool = nn.AvgPool2d(pooling_size, stride=1)
+        self.pool = nn.AvgPool2d((pooling_size, pooling_size), stride=1)
 
-        if cfg.maskshift_loss:
-            if cfg.use_sipmask:
-                self.fc_coeff = nn.Linear(1024, mask_proto_n * cfg.sipmask_head)
-            else:
-                self.fc_coeff = nn.Linear(1024, mask_proto_n)
+        if self.maskshift_loss:
+            self.fc_coeff = nn.Linear(1024, mask_proto_n*sipmask_head) if use_sipmask else nn.Linear(1024, mask_proto_n)
 
     def forward(self, x):
         x = self.relu(self.conv1(x))
-        if not cfg.t2s_with_roialign:
-            x = self.downsample(x)
         x = self.relu(self.conv2(x))
-        if not cfg.t2s_with_roialign:
-            x = self.downsample(x)
         x = self.relu(self.conv3(x))
         x = self.pool(x)
         x = x.view(x.size(0), -1)
         x_reg = self.fc(x)
 
-        if cfg.maskshift_loss:
+        if self.maskshift_loss:
             x_coeff = self.fc_coeff(x)
-
             return x_reg, x_coeff
-
         else:
             return x_reg
 

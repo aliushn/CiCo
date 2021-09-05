@@ -2,16 +2,10 @@ import torch
 from layers.utils import compute_DIoU,  mask_iou, generate_track_gaussian, compute_comp_scores, compute_kl_div, center_size
 from .TF_utils import CandidateShift
 from utils import timer
-
-from datasets import cfg
-import torch.nn.functional as F
-
 import numpy as np
-import matplotlib.pyplot as plt
-import os
 
 import pyximport
-pyximport.install(setup_args={"include_dirs":np.get_include()}, reload_support=True)
+pyximport.install(setup_args={"include_dirs": np.get_include()}, reload_support=True)
 
 
 class Track_TF(object):
@@ -22,14 +16,23 @@ class Track_TF(object):
     """
     # TODO: Refactor this whole class away. It needs to go.
 
-    def __init__(self):
+    def __init__(self, net, match_coeff, correlation_patch_size, train_maskshift=False, conf_thresh=0.1,
+                 track_by_Gaussian=False, train_masks=True):
         self.prev_candidate = None
-        self.easy_match = False
+        self.match_coeff = match_coeff
+        self.correlation_patch_size = correlation_patch_size
+        self.train_maskshift = train_maskshift
+        self.conf_thresh = conf_thresh
+        self.track_by_Gaussian = track_by_Gaussian
+        self.train_masks = train_masks
         self.img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
-        if cfg.track_by_Gaussian:
+        if self.track_by_Gaussian:
             self.img_level_keys += 'track'
 
-    def __call__(self, net, candidates, imgs_meta, img=None):
+        self.CandidateShift = CandidateShift(net, self.correlation_patch_size, train_maskshift=self.train_maskshift,
+                                             train_masks=self.train_masks, track_by_Gaussian=self.track_by_Gaussian)
+
+    def __call__(self, candidates, imgs_meta, img=None):
         """
         Args:
              loc_data: (tensor) Loc preds from loc layers
@@ -43,15 +46,13 @@ class Track_TF(object):
         """
 
         with timer.env('Track_TF'):
-            batch_size = len(candidates)
-
             # only support batch_size = 1 for video test
-            for batch_idx in range(batch_size):
-                self.track(net, candidates[batch_idx], imgs_meta[batch_idx], img=img[batch_idx])
+            for batch_idx in range(len(candidates)):
+                self.track(candidates[batch_idx], imgs_meta[batch_idx], img=img[batch_idx])
 
         return candidates
 
-    def track(self, net, candidate, img_meta, img=None):
+    def track(self, candidate, img_meta, img=None):
         # only support batch_size = 1 for video test
         is_first = img_meta['is_first']
         if is_first:
@@ -65,11 +66,9 @@ class Track_TF(object):
         # get bbox and class after NMS
         det_bbox = candidate['box']
         det_score, det_labels = candidate['score'], candidate['class']
-        det_masks_soft = candidate['mask'] if cfg.train_mask else None
-        if cfg.use_semantic_segmentation_loss:
-            sem_seg = candidate['sem_seg'].squeeze(0).permute(2, 0, 1).contiguous()
-
-        if cfg.track_by_Gaussian:
+        if self.train_masks:
+            det_masks_soft = candidate['mask']
+        if self.track_by_Gaussian:
             candidate['track_mu'], candidate['track_var'] = generate_track_gaussian(candidate['track'].squeeze(0),
                                                                                     det_masks_soft, det_bbox)
 
@@ -89,20 +88,20 @@ class Track_TF(object):
             assert self.prev_candidate is not None
 
             # tracked mask: to track masks from previous frames to current frame
-            CandidateShift(net, candidate, self.prev_candidate, img=img, img_meta=img_meta, update_track=False)
+            self.CandidateShift(candidate, self.prev_candidate, img=img, img_meta=img_meta)
 
             # calculate KL divergence for Gaussian distribution of isntances
             n_prev = self.prev_candidate['box'].size(0)
             # Calculate BIoU and MIoU between detected masks and tracked masks for assign IDs
             bbox_ious = compute_DIoU(det_bbox, self.prev_candidate['box'])  # [n_dets, n_prev]
             label_delta = (self.prev_candidate['class'] == det_labels.view(-1, 1)).float()
-            if cfg.train_mask:
+            if self.train_masks:
                 mask_ious = mask_iou(det_masks_soft.gt(0.5).float(),
                                      self.prev_candidate['mask'].gt(0.5))  # [n_dets, n_prev]
             else:
                 mask_ious = torch.zeros_like(bbox_ious)
 
-            if cfg.track_by_Gaussian:
+            if self.train_masks and self.track_by_Gaussian:
                 kl_divergence = compute_kl_div(self.prev_candidate['track_mu'], self.prev_candidate['track_var'],
                                                candidate['track_mu'], candidate['track_var'])    # value in [[0, +infinite]]
                 sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10.
@@ -123,7 +122,7 @@ class Track_TF(object):
                                               label_delta,
                                               add_bbox_dummy=True,
                                               bbox_dummy_iou=0.3,
-                                              match_coeff=cfg.match_coeff)
+                                              match_coeff=self.match_coeff)
             # only need to do that for isntances whose Mask IoU is lower than 0.9
             match_likelihood, match_ids = torch.max(comp_scores, dim=1)
 
@@ -162,9 +161,9 @@ class Track_TF(object):
         # Whether add some objects whose masks are tracked form previous frames by Temporal Fusion Module
         cond1 = (self.prev_candidate['tracked_mask'] > 0) & (self.prev_candidate['tracked_mask'] <= 7)
         # a declining weights (0.8) to remove some false positives that cased by consecutively track to segment
-        cond2 = self.prev_candidate['score'].clone().detach() > 0.5*cfg.eval_conf_thresh
+        cond2 = self.prev_candidate['score'].clone().detach() > 0.5*self.conf_thresh
         keep_tracked_objs = cond1 & cond2
-        if cfg.train_mask:
+        if self.train_masks:
             # whether tracked masks are greater than a small threshold, which removes some false positives
             cond3 = self.prev_candidate['mask'].gt(0.5).sum([1, 2]) > 0
             keep_tracked_objs = keep_tracked_objs & cond3

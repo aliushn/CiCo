@@ -39,14 +39,12 @@ class VIDDataset(torch.utils.data.Dataset):
                  img_prefix,
                  img_index,
                  preserve_aspect_ratio=True,
+                 clip_frames=1,
+                 has_gt=False,
                  transform=None,
                  size_divisor=None,
-                 with_mask=False,
                  with_crowd=True,
-                 with_label=True,
-                 with_track=False,
-                 clip_frames=1,
-                 has_gt=False):
+                 with_cubic_mode=False):
 
         self.det_vid = ann_file.split('/')[-1]
         self.image_set = img_index.split('/')[-1][:-4]
@@ -59,6 +57,7 @@ class VIDDataset(torch.utils.data.Dataset):
         self.preserve_aspect_ratio = preserve_aspect_ratio
         self.has_gt = has_gt
         self.clip_frames = clip_frames
+        self.with_cubic_mode = with_cubic_mode
 
         self._img_dir = os.path.join(self.img_prefix, "%s.JPEG")
         self._anno_path = os.path.join(self.ann_file, "%s.xml")
@@ -101,7 +100,7 @@ class VIDDataset(torch.utils.data.Dataset):
             idx = self.vid_ids.index(img_set_index.split('/')[-2])
             self.vid_infos[idx].append(img_set_index)
 
-        self.anns2json_video_bbox(os.path.join(self.cache_dir, self.image_set + "_anno_eval.json"))
+        # self.anns2json_video_bbox(os.path.join(self.cache_dir, self.image_set + "_anno_eval.json"))
 
     def __getitem__(self, idx):
         return self._get_train(idx)
@@ -121,13 +120,18 @@ class VIDDataset(torch.utils.data.Dataset):
         ori_shape = imgs[0].shape
 
         if self.has_gt:
-            boxes, labels, obj_ids, boxes_occluded = [], [], [], []
+            boxes, labels = [], []
+            if 'VID' in self.ann_file:
+                obj_ids, boxes_occluded = [], []
+            else:
+                obj_ids, boxes_occluded = None, None
             for idx in clip_frame_idx:
                 anno = self.annos[idx]
                 boxes.append(np.stack(anno['boxes'], axis=0))
                 labels.append(anno['labels'])
-                obj_ids.append(anno['obj_ids'])
-                boxes_occluded.append(anno['occluded'])
+                if 'VID' in self.ann_file:
+                    obj_ids.append(anno['obj_ids'])
+                    boxes_occluded.append(anno['occluded'])
         else:
             boxes, labels, obj_ids, boxes_occluded = None, None, None, None
 
@@ -152,10 +156,37 @@ class VIDDataset(torch.utils.data.Dataset):
                 img_shape=(img_h, img_w, 3),
                 pad_shape=(pad_h, pad_w, 3),
                 video_id=vid,
-                frame_id=frame_id,
-                is_first=(int(frame_id) == 0)))
+                frame_id=frame_id))
+            if 'VID' in self.ann_file:
+                img_meta[i]['is_first'] = (int(frame_id) == 0)
 
-        return imgs, img_meta, (boxes, labels, obj_ids, boxes_occluded)
+        if self.clip_frames > 1 and self.with_cubic_mode:
+            imgs = np.concatenate(imgs, axis=-1)
+            clip_obj_ids = list(set([id for ids in obj_ids for id in ids]))
+            clip_boxes = []
+            clip_labels = []
+            clip_boxes_occluded = []
+            for id in clip_obj_ids:
+                boxes_obj = []
+                labels_obj = []
+                boxes_occluded_obj = []
+                for ids, box, label, box_occluded in zip(obj_ids, boxes, labels, boxes_occluded):
+                    if id in ids:
+                        boxes_obj.append(box[ids.index(id)])
+                        labels_obj += [label[ids.index(id)]]
+                        boxes_occluded_obj += [box_occluded[ids.index(id)]]
+                    else:
+                        # -1 means object do not exist in the frame
+                        boxes_obj.append(np.array([-1]*4))
+                        boxes_occluded_obj += [-1]
+                clip_boxes.append(np.stack(boxes_obj, axis=0))
+                clip_labels += [np.argmax(np.bincount(np.array(labels_obj)))]
+                clip_boxes_occluded.append(boxes_occluded_obj)
+
+            return [imgs], [img_meta], ([clip_boxes], [clip_labels], [clip_obj_ids], [clip_boxes_occluded])
+        else:
+
+            return imgs, img_meta, (boxes, labels, obj_ids, boxes_occluded)
 
     def __len__(self):
         return len(self.image_set_index)
@@ -174,13 +205,18 @@ class VIDDataset(torch.utils.data.Dataset):
 
         # load annotation of ref_frames
         if self.has_gt:
-            boxes, labels, obj_ids, boxes_occluded = [], [], [], []
+            boxes, labels = [], []
+            if 'VID' in self.ann_file:
+                obj_ids, boxes_occluded = [], []
+            else:
+                obj_ids, boxes_occluded = None, None
             for idx in clip_frame_idx:
                 anno = self.annos[self.image_set_index.index(vid_info[idx])]
                 boxes.append(np.stack(anno['boxes'], axis=0))
                 labels.append(anno['labels'])
-                obj_ids.append(anno['obj_ids'])
-                boxes_occluded.append(anno['occluded'])
+                if 'VID' in self.ann_file:
+                    obj_ids.append(anno['obj_ids'])
+                    boxes_occluded.append(anno['occluded'])
 
         else:
             boxes, labels, obj_ids, boxes_occluded = None, None, None, None
@@ -294,16 +330,18 @@ class VIDDataset(torch.utils.data.Dataset):
             ]
             boxes.append(box)
             gt_classes.append(self.classes_to_ind[obj.find("name").text.lower().strip()])
-            obj_ids.append(int(obj.find("trackid").text))
-            occluded.append(int(obj.find("occluded").text))
+            if 'VID' in self.ann_file:
+                obj_ids.append(int(obj.find("trackid").text))
+                occluded.append(int(obj.find("occluded").text))
 
         res = {
             "boxes": boxes,
             "labels": gt_classes,
-            'obj_ids': obj_ids,
-            'occluded': occluded,
             "im_info": im_info,
         }
+        if 'VID' in self.ann_file:
+            res['obj_ids'] = obj_ids
+            res['occluded'] = occluded
         return res
 
     def load_annos(self, cache_file):
@@ -422,8 +460,10 @@ def detection_collate_vid(batch):
         img_metas += sample[1]
         boxes += [box for box in sample[2][0]]
         labels += sample[2][1]
-        ids += sample[2][2]
-        occluded_boxes += sample[2][3]
+        if sample[2][2] is not None:
+            ids += sample[2][2]
+        if sample[2][3] is not None:
+            occluded_boxes += sample[2][3]
 
     imgs_batch = torch.stack(imgs, dim=0)
     return imgs_batch, img_metas, (boxes, labels, ids, occluded_boxes)
@@ -431,6 +471,7 @@ def detection_collate_vid(batch):
 
 def prepare_data_vid(data_batch, devices):
     images, image_metas, (bboxes, labels, obj_ids, occluded_boxes) = data_batch
+    h, w = images.size()[-2:]
     d = len(devices) * 2
     if images.size(0) % d != 0:
         # TODO: if read multi frames (n_f) as a clip, thus the condition should be images.size(0) / n_f % len(devices)
@@ -439,8 +480,10 @@ def prepare_data_vid(data_batch, devices):
         images = torch.cat([images, images[idx[:remainder]]])
         bboxes += [bboxes[i] for i in idx[:remainder]]
         labels += [labels[i] for i in idx[:remainder]]
-        obj_ids += [obj_ids[i] for i in idx[:remainder]]
-        occluded_boxes += [occluded_boxes[i] for i in idx[:remainder]]
+        if obj_ids is not None and len(obj_ids) > 0:
+            obj_ids += [obj_ids[i] for i in idx[:remainder]]
+        if occluded_boxes is not None and len(occluded_boxes) > 0:
+            occluded_boxes += [occluded_boxes[i] for i in idx[:remainder]]
         image_metas += [image_metas[i] for i in idx[:remainder]]
     n = images.size(0) // len(devices)
 
@@ -448,11 +491,14 @@ def prepare_data_vid(data_batch, devices):
         images_list, masks_list, bboxes_list, labels_list, obj_ids_list, num_crowds_list = [], [], [], [], [], []
         image_metas_list = []
         for idx, device in enumerate(devices):
-            images_list.append(gradinator(images[idx * n:(idx + 1) * n].to(device)))
+            images_list.append(gradinator(images[idx * n:(idx + 1) * n].reshape(-1, 3, h, w).to(device)))
             masks_list.append([None] * n)
             bboxes_list.append([gradinator(torch.tensor(bboxes[jdx], dtype=torch.float32).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
             labels_list.append([gradinator(torch.tensor(labels[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
-            obj_ids_list.append([gradinator(torch.tensor(obj_ids[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            if obj_ids is not None and len(obj_ids) > 0:
+                obj_ids_list.append([gradinator(torch.tensor(obj_ids[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            else:
+                obj_ids_list.append([None] * n)
             num_crowds_list.append([0] * n)
             image_metas_list.append(image_metas[idx * n:(idx + 1) * n])
 
