@@ -377,7 +377,7 @@ def detection_collate_vis(batch):
 def prepare_data_vis(data_batch, devices):
     images, image_metas, (bboxes, labels, masks, obj_ids) = data_batch
     h, w = images.size()[-2:]
-    d = len(devices) * 2
+    d = len(devices)
     if images.size(0) % d != 0:
         # TODO: if read multi frames (n_f) as a clip, thus the condition should be images.size(0) / n_f % len(devices)
         idx = [i % images.size(0) for i in range(d)]

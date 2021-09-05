@@ -10,13 +10,13 @@ MODEL = dict(
 
 SOLVER = dict(
     IMS_PER_BATCH=4,
-    NUM_CLIP_FRAMES=2,
+    NUM_CLIP_FRAMES=3,
     LR=0.0001,
     LR_STEPS=(8, 10),
     MAX_EPOCH=12)
 
 TEST = dict(
     IMS_PER_BATCH=1,
-    NUM_CLIP_FRAMES=2)
+    NUM_CLIP_FRAMES=3)
 
 NAME = 'r50_base_YTVIS2019_cubic'

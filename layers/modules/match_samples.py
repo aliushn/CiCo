@@ -185,7 +185,8 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
                 overlaps_frames[cdx] = 0.5*jaccard(gt_boxes[:, cdx], decoded_boxes[:, cdx]) \
                                        + 0.5*jaccard(gt_boxes[:, cdx], decoded_priors)
         else:
-            overlaps_frames[cdx] = compute_DIoU(gt_boxes[:, cdx], decoded_priors) if cfg.MODEL.PREDICTION_HEADS.USE_DIoU else jaccard(gt_boxes[:, cdx], decoded_priors)
+            overlaps_frames[cdx] = compute_DIoU(gt_boxes[:, cdx], decoded_priors) if cfg.MODEL.PREDICTION_HEADS.USE_DIoU \
+                else jaccard(gt_boxes[:, cdx], decoded_priors)
 
     if cfg.MODEL.PREDICTION_HEADS.USE_DIoU:
         pos_thresh, neg_thresh = 0.85 * pos_thresh, 0.85 * neg_thresh
