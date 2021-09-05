@@ -1,4 +1,4 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/r50_base_YTVIS2019.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/r50_base_YTVIS2019_1X.py']
 
 STMASK = dict(
     FC=dict(
@@ -42,5 +42,5 @@ TEST = dict(
     IMS_PER_BATCH=4,
     NUM_CLIP_FRAMES=1)
 
-NAME = 'r50_base_YTVIS2019_stmask'
+NAME = 'r50_base_YTVIS2019_stmask_1X_TF2'
 

@@ -78,6 +78,6 @@ TEST = dict(
     NMS_WITH_MIoU=True)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019'
+NAME = 'r50_base_YTVIS2019_1X'
 
 

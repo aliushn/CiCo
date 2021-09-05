@@ -119,7 +119,7 @@ def ImageList_from_tensors(
     assert isinstance(tensors, (tuple, list))
     for t in tensors:
         assert isinstance(t, torch.Tensor), type(t)
-        assert t.shape[:-2] == tensors[0].shape[:-2], t.shape
+        assert t.shape[:-2] == tensors[0].shape[:-2], print('Mismatch size:', t.shape, tensors[0].shape)
 
     image_sizes_h = [im.shape[-2] for im in tensors]
     image_sizes_w = [im.shape[-1] for im in tensors]

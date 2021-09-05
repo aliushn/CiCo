@@ -129,7 +129,7 @@ class YTVOSDataset(data.Dataset):
             if i != 0 and ref_idx in self.img_ids:
                 valid_samples.append(i+frame_id)
         if len(valid_samples) == 0:
-            ref_frames = [frame_id]
+            ref_frames = [frame_id]*(self.clip_frames-1)
         else:
             ref_frames = random.sample(valid_samples, self.clip_frames-1)
         return ref_frames
