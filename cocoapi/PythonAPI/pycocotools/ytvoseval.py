@@ -503,10 +503,7 @@ class YTVOSeval:
             print(performance)
             if self.output_file is not None:
                 f = open(self.output_file, 'a+')
-                # f.writelines(performance)
-                for line in performance:
-                    f.write(line)
-                    f.write('\n')
+                f.writelines(performance)
             return mean_s
 
         def _summarizeDets():

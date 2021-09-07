@@ -10,7 +10,7 @@ def get_dataset_config(name, data_type):
     elif data_type == 'vis':
         attrs = DatasetCatalog_vis.DATASETS[name]
         attrs['data_dir'] = DatasetCatalog_vis.DATA_DIR
-    elif data_type == 'vid':
+    elif data_type in {'vid', 'det'}:
         attrs = DatasetCatalog_vid.DATASETS[name]
         attrs['data_dir'] = DatasetCatalog_vid.DATA_DIR
     else:

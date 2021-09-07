@@ -82,7 +82,8 @@ class MultiBoxLoss(nn.Module):
             # So we have to unfold them in the second dim to do frame-level detection or segmentation
             clip_frames = gt_boxes[0].size(1)
             gt_boxes = sum([self._split(boxes, dim=1) for boxes in gt_boxes], [])
-            gt_masks = sum([self._split(masks, dim=1) for masks in gt_masks], [])
+            if None not in gt_masks:
+                gt_masks = sum([self._split(masks, dim=1) for masks in gt_masks], [])
             gt_labels = sum([[labels]*clip_frames for labels in gt_labels], [])
             gt_ids = sum([[ids]*clip_frames for ids in gt_ids], [])
             num_crowds = sum([[num]*clip_frames for num in num_crowds], [])

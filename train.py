@@ -102,7 +102,7 @@ def train(cfg):
         else:
             print('Resuming training, loading {}...'.format(args.resume))
             net.load_weights(path=args.resume)
-        cur_lr = args.lr
+        cur_lr = cfg.SOLVER.LR
 
         if args.start_iter == -1:
             args.start_iter = SavePath.from_str(args.resume).iteration
@@ -144,7 +144,7 @@ def train(cfg):
         detection_collate = detection_collate_coco
     elif cfg.DATASETS.TYPE == 'vis':
         detection_collate = detection_collate_vis
-    elif cfg.DATASETS.TYPE == 'vid':
+    elif cfg.DATASETS.TYPE in {'vid', 'det'}:
         detection_collate = detection_collate_vid
     else:
         RuntimeError('DATASET IS NOT AVAILABLE!!')

@@ -4,12 +4,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from datasets import cfg, MEANS, STD, activation_func
+from datasets import MEANS, STD, activation_func
 import os
 from ..utils import sanitize_coordinates, center_size, generate_single_mask, jaccard
 
 
-def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, interpolation_mode='bilinear',
+def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, train_masks=True, interpolation_mode='bilinear',
                 visualize_lincomb=False, score_threshold=0, output_file=None):
     """
     Postprocesses the output of Yolact on testing mode into a format that makes sense,
@@ -54,7 +54,7 @@ def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, interpolation_mode='biline
     scores = dets['score']
     masks_coeff = dets['mask_coeff']
 
-    if cfg.eval_mask_branch:
+    if train_masks:
         # At this points masks is only the coefficients
         proto_data = dets['proto'][:int(dets['proto'].size(0)*s_h), :int(dets['proto'].size(1)*s_w)]
 
@@ -80,8 +80,8 @@ def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, interpolation_mode='biline
     return classes, scores, boxes, masks
 
 
-def postprocess_ytbvis(dets_output, img_meta, interpolation_mode='bilinear',
-                       visualize_lincomb=False, crop_masks=True, output_file=None):
+def postprocess_ytbvis(dets_output, img_meta, train_masks=True, mask_proto_coeff_occlusion=False,
+                       interpolation_mode='bilinear', visualize_lincomb=False, output_file=None):
     """
     Postprocesses the output of Yolact on testing mode into a format that makes sense,
     accounting for all the possible configuration settings.
@@ -122,10 +122,10 @@ def postprocess_ytbvis(dets_output, img_meta, interpolation_mode='bilinear',
     dets['box'] = boxes.long()
 
     # Actually extract everything from dets now
-    if cfg.train_masks:
+    if train_masks:
         masks = dets['mask']
         mask_coeff = dets['mask_coeff']
-        if cfg.mask_proto_coeff_occlusion:
+        if mask_proto_coeff_occlusion:
             masks_non_target = dets['mask_non_target']
             masks = torch.clamp(masks - masks_non_target, min=0)
         else:
@@ -168,10 +168,11 @@ def undo_image_transformation(img, ori_h, ori_w, img_h=None, img_w=None, interpo
     img_numpy = img.permute(1, 2, 0).cpu().numpy()
     img_numpy = img_numpy[:, :, (2, 1, 0)]  # To BRG
 
-    if cfg.backbone.transform.normalize:
-        img_numpy = (img_numpy * np.array(STD) + np.array(MEANS)) / 255.0
-    elif cfg.backbone.transform.subtract_means:
-        img_numpy = (img_numpy / 255.0 + np.array(MEANS) / 255.0).astype(np.float32)
+    # TODO: If the backbone is not Resnet, please double check the image transformation according to backbone.py
+    # if cfg.backbone.transform.normalize:
+    img_numpy = (img_numpy * np.array(STD) + np.array(MEANS)) / 255.0
+    # elif cfg.backbone.transform.subtract_means:
+    #     img_numpy = (img_numpy / 255.0 + np.array(MEANS) / 255.0).astype(np.float32)
 
     img_numpy = img_numpy[:, :, (2, 1, 0)]  # To RGB
     img_numpy = np.clip(img_numpy, 0, 1)
@@ -183,13 +184,11 @@ def display_lincomb(protos_data, out_masks, masks_coeff=None, img_ids=None, outp
 
     bs = 1 if protos_data.dim() == 3 else protos_data.size(0)
 
-    masks_coeff = cfg.mask_proto_coeff_activation(masks_coeff)
     out_masks_pos = generate_single_mask(protos_data, torch.clamp(masks_coeff, min=0))
     out_masks_neg = generate_single_mask(protos_data, torch.clamp(masks_coeff, max=0))
-
-    out_masks_temp = cfg.mask_proto_mask_activation(out_masks_pos + out_masks_neg)
-    out_masks_pos = cfg.mask_proto_mask_activation(out_masks_pos)
-    out_masks_neg = cfg.mask_proto_mask_activation(-out_masks_neg)
+    out_masks_temp = (out_masks_pos + out_masks_neg).sigmoid()
+    out_masks_pos = out_masks_pos.sigmoid()
+    out_masks_neg = (-out_masks_neg).sigmoid()
 
     for kdx in range(bs):
         import matplotlib.pyplot as plt
@@ -211,9 +210,7 @@ def display_lincomb(protos_data, out_masks, masks_coeff=None, img_ids=None, outp
                     running_total += proto_data_cur.cpu().numpy()   # * coeffs_sort[i]
 
                 running_total_nonlin = running_total
-                if cfg.mask_proto_mask_activation == activation_func.sigmoid:
-                    running_total_nonlin = (1 / (1 + np.exp(-running_total_nonlin)))
-                print(torch.min(proto_data_cur), torch.max(proto_data_cur))
+                running_total_nonlin = (1 / (1 + np.exp(-running_total_nonlin)))
                 arr_img[y * proto_h:(y + 1) * proto_h, x * proto_w:(x + 1) * proto_w] = \
                     ((proto_data_cur - torch.min(proto_data_cur)) / torch.max(proto_data_cur)+1e-5).cpu().numpy()   # * coeffs_sort[i]
                 arr_run[y * proto_h:(y + 1) * proto_h, x * proto_w:(x + 1) * proto_w] = (

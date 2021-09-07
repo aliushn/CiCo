@@ -1,1 +1,0 @@
-CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py --batch_size=4 --eval_batch_size=1 --save_folder=weights/OVIS/weights_plus_r50_m32_yolact_012_clip_prediction/ --config=STMask_plus_resnet50_OVIS_config  --lr=1e-3 --save_interval=5000 

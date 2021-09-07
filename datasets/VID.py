@@ -38,13 +38,11 @@ class VIDDataset(torch.utils.data.Dataset):
                  ann_file,
                  img_prefix,
                  img_index,
-                 preserve_aspect_ratio=True,
                  clip_frames=1,
                  has_gt=False,
                  transform=None,
                  size_divisor=None,
-                 with_crowd=True,
-                 with_cubic_mode=False):
+                 with_crowd=True):
 
         self.det_vid = ann_file.split('/')[-1]
         self.image_set = img_index.split('/')[-1][:-4]
@@ -53,11 +51,8 @@ class VIDDataset(torch.utils.data.Dataset):
         self.img_prefix = img_prefix
         self.ann_file = ann_file
         self.img_index = img_index
-
-        self.preserve_aspect_ratio = preserve_aspect_ratio
         self.has_gt = has_gt
         self.clip_frames = clip_frames
-        self.with_cubic_mode = with_cubic_mode
 
         self._img_dir = os.path.join(self.img_prefix, "%s.JPEG")
         self._anno_path = os.path.join(self.ann_file, "%s.xml")
@@ -106,7 +101,7 @@ class VIDDataset(torch.utils.data.Dataset):
         return self._get_train(idx)
 
     def _get_train(self, idx):
-        if self.has_gt and self.clip_frames > 1:
+        if self.clip_frames > 1:
             ref_frame_idx = self.sample_ref(idx)
             clip_frame_idx = ref_frame_idx + [idx]
             clip_frame_idx.sort()
@@ -141,35 +136,22 @@ class VIDDataset(torch.utils.data.Dataset):
         img_meta = []
         for i, idx in enumerate(clip_frame_idx):
             vid, frame_id = self.image_set_index[idx].split('/')[-2:]
-            pad_h, pad_w = imgs[i].shape[:2]
-
-            if self.preserve_aspect_ratio:
-                # resize long edges
-                if (ori_shape[0]/float(ori_shape[1])) < (pad_h/float(pad_w)):
-                    img_w, img_h = pad_w, int(ori_shape[0] * (pad_w / ori_shape[1]))
-                else:
-                    img_w, img_h = int(ori_shape[1] * (pad_h / ori_shape[0])), pad_h
-            else:
-                img_w, img_h = pad_w, pad_h
+            img_h, img_w = imgs[i].shape[:2]
             img_meta.append(dict(
                 ori_shape=ori_shape,
                 img_shape=(img_h, img_w, 3),
-                pad_shape=(pad_h, pad_w, 3),
                 video_id=vid,
                 frame_id=frame_id))
             if 'VID' in self.ann_file:
                 img_meta[i]['is_first'] = (int(frame_id) == 0)
 
-        if self.clip_frames > 1 and self.with_cubic_mode:
-            imgs = np.concatenate(imgs, axis=-1)
+        # Stack annotations into [n_objs, n_frames, ...]
+        imgs = np.concatenate(imgs, axis=-1)
+        if self.has_gt:
             clip_obj_ids = list(set([id for ids in obj_ids for id in ids]))
-            clip_boxes = []
-            clip_labels = []
-            clip_boxes_occluded = []
+            clip_boxes, clip_labels, clip_boxes_occluded = [], [], []
             for id in clip_obj_ids:
-                boxes_obj = []
-                labels_obj = []
-                boxes_occluded_obj = []
+                boxes_obj, labels_obj, boxes_occluded_obj = [], [], []
                 for ids, box, label, box_occluded in zip(obj_ids, boxes, labels, boxes_occluded):
                     if id in ids:
                         boxes_obj.append(box[ids.index(id)])
@@ -177,15 +159,15 @@ class VIDDataset(torch.utils.data.Dataset):
                         boxes_occluded_obj += [box_occluded[ids.index(id)]]
                     else:
                         # -1 means object do not exist in the frame
-                        boxes_obj.append(np.array([-1]*4))
-                        boxes_occluded_obj += [-1]
+                        boxes_obj.append(np.array([0.]*4))
+                        boxes_occluded_obj += [1]
                 clip_boxes.append(np.stack(boxes_obj, axis=0))
-                clip_labels += [np.argmax(np.bincount(np.array(labels_obj)))]
-                clip_boxes_occluded.append(boxes_occluded_obj)
-
-            return [imgs], [img_meta], ([clip_boxes], [clip_labels], [clip_obj_ids], [clip_boxes_occluded])
+                clip_labels.append(np.argmax(np.bincount(np.array(labels_obj))))
+                clip_boxes_occluded.append(np.stack(boxes_occluded_obj, axis=0))
+            clip_boxes = np.stack(clip_boxes, axis=0)
+            clip_boxes_occluded = np.stack(clip_boxes_occluded, axis=0)
+            return imgs, img_meta, (clip_boxes, clip_labels, clip_obj_ids, clip_boxes_occluded)
         else:
-
             return imgs, img_meta, (boxes, labels, obj_ids, boxes_occluded)
 
     def __len__(self):
@@ -212,7 +194,7 @@ class VIDDataset(torch.utils.data.Dataset):
                 obj_ids, boxes_occluded = None, None
             for idx in clip_frame_idx:
                 anno = self.annos[self.image_set_index.index(vid_info[idx])]
-                boxes.append(np.stack(anno['boxes'], axis=0))
+                boxes.append(np.stack(anno['boxes'], axis=0) if len(anno['boxes']) > 0 else anno['boxes'])
                 labels.append(anno['labels'])
                 if 'VID' in self.ann_file:
                     obj_ids.append(anno['obj_ids'])
@@ -227,21 +209,10 @@ class VIDDataset(torch.utils.data.Dataset):
 
         img_meta = []
         for i, img in enumerate(imgs):
-            pad_h, pad_w = img.shape[:2]
-
-            if self.preserve_aspect_ratio:
-                # resize long edges
-                if (height/float(width)) < (pad_h/float(pad_w)):
-                    img_w, img_h = pad_w, int(height * (pad_w / width))
-                else:
-                    img_w, img_h = int(width * (pad_h / height)), pad_h
-            else:
-                img_w, img_h = pad_w, pad_h
-
+            img_h, img_w = img.shape[:2]
             img_meta.append(dict(
                 ori_shape=ori_shape,
                 img_shape=(img_h, img_w, 3),
-                pad_shape=(pad_h, pad_w, 3),
                 video_id=vid,
                 frame_id=clip_frame_idx[i],
                 is_first=(clip_frame_idx[i] == 0)))
@@ -263,6 +234,8 @@ class VIDDataset(torch.utils.data.Dataset):
         if len(valid_samples) == 0:
             ref_frames_idx = [idx] * (self.clip_frames-1)
         else:
+            if self.clip_frames-1 > len(valid_samples):
+                valid_samples += (valid_samples*self.clip_frames)[:self.clip_frames-1-len(valid_samples)]
             ref_frames_idx = random.sample(valid_samples, self.clip_frames-1)
         return ref_frames_idx
 
@@ -456,16 +429,24 @@ def detection_collate_vid(batch):
     img_metas = []
 
     for sample in batch:
-        imgs += [torch.from_numpy(img).permute(2, 0, 1) for img in sample[0]]
-        img_metas += sample[1]
-        boxes += [box for box in sample[2][0]]
-        labels += sample[2][1]
+        imgs += [torch.from_numpy(sample[0]).permute(2, 0, 1)]
+        img_metas += [sample[1]]
+        boxes += [sample[2][0]]
+        labels += [sample[2][1]]
         if sample[2][2] is not None:
-            ids += sample[2][2]
+            ids += [sample[2][2]]
         if sample[2][3] is not None:
-            occluded_boxes += sample[2][3]
+            occluded_boxes += [sample[2][3]]
 
-    imgs_batch = torch.stack(imgs, dim=0)
+    from .utils import ImageList_from_tensors, GtList_from_tensor
+    imgs_batch = ImageList_from_tensors(imgs, size_divisibility=32)
+    pad_h, pad_w = imgs_batch.size()[-2:]
+
+    if len(boxes) > 0:
+        _, boxes, img_metas = GtList_from_tensor(pad_h, pad_w, None, boxes, img_metas)
+    else:
+        _, _, img_metas = GtList_from_tensor(pad_h, pad_w, None, None, img_metas)
+
     return imgs_batch, img_metas, (boxes, labels, ids, occluded_boxes)
 
 

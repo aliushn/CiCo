@@ -185,8 +185,8 @@ def get_dataset(data_type, data_name, input, num_clip_frame, inference=False):
                                     backbone_transform=backbone_transform,
                                     resize_gt=resize_gt,
                                     pad_gt=pad_gt))
-    elif data_type == 'vid':
-        dataset_config['img_idx'] = os.path.join(dataset_config['data_dir'], dataset_config['img_idx'])
+    elif data_type in {'vid', 'det'}:
+        dataset_config['img_index'] = os.path.join(dataset_config['data_dir'], dataset_config['img_index'])
         dataset = VIDDataset(ann_file=dataset_config['ann_file'],
                              img_prefix=dataset_config['img_prefix'],
                              img_index=dataset_config['img_index'],
@@ -194,10 +194,10 @@ def get_dataset(data_type, data_name, input, num_clip_frame, inference=False):
                              clip_frames=num_clip_frame,
                              size_divisor=input.SIZE_DIVISOR,
                              transform=BaseTransform_vid(
-                                   img_scales=img_scales,
+                                   min_size=input.MIN_SIZE_TRAIN,
+                                   max_size=input.MAX_SIZE_TRAIN,
                                    Flip=flip,
                                    MS_train=MS_train,
-                                   preserve_aspect_ratio=input.PRESERVE_ASPECT_RATIO,
                                    backbone_transform=backbone_transform,
                                    resize_gt=resize_gt,
                                    pad_gt=pad_gt))

@@ -30,7 +30,7 @@ class TemporalNet(nn.Module):
 
         if self.maskshift_loss:
             x_coeff = self.fc_coeff(x)
-            return x_reg, x_coeff
+            return x_reg, torch.tanh(x_coeff)
         else:
             return x_reg
 

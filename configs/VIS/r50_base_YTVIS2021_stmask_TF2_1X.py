@@ -1,4 +1,12 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/r50_base_YTVIS2019_1X.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VIS/r50_base_VIS.py']
+
+DATASETS = dict(
+    TYPE='vis',
+    NUM_CLASSES=40,
+    TRAIN='train_YouTube_VOS2021_dataset',
+    VALID_SUB='valid_sub_YouTube_VOS2021_dataset',
+    VALID='valid_YouTube_VOS2021_dataset',
+    TEST='test_YouTube_VOS2021_dataset')
 
 STMASK = dict(
     FC=dict(
@@ -22,25 +30,6 @@ STMASK = dict(
         BACKWARD_FLOW=False)
 )
 
-INPUT = dict(
-    MIN_SIZE_TRAIN=(360,),
-    MAX_SIZE_TRAIN=640,
-    MIN_SIZE_TEST=360,
-    MAX_SIZE_TEST=640,
-    MULTISCALE_TRAIN=False,
-    PRESERVE_ASPECT_RATIO=True,
-    SIZE_DIVISOR=32)
-
-SOLVER = dict(
-    IMS_PER_BATCH=4,
-    NUM_CLIP_FRAMES=2,
-    LR=0.0001,
-    LR_STEPS=(8, 10),
-    MAX_EPOCH=12)
-
-TEST = dict(
-    IMS_PER_BATCH=4,
-    NUM_CLIP_FRAMES=1)
-
-NAME = 'r50_base_YTVIS2019_stmask_1X_TF2'
+OUTPUT_DIR = 'weights/YTVIS2021/'
+NAME = 'r50_base_YTVIS2021_stmask_TF2_1X'
 

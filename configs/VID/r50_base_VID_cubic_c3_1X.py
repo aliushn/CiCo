@@ -1,4 +1,4 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/r50_base_YTVIS2019_1X.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VID/r50_base_VID.py']
 
 MODEL = dict(
     PREDICTION_HEADS=dict(
@@ -7,6 +7,14 @@ MODEL = dict(
         # INITIALIZATION=reduced or inflated
         CUBIC_MODE_WITH_INITIALIZATION='inflated')
 )
+
+DATASETS = dict(
+    TYPE='vid',
+    NUM_CLASSES=30,
+    TRAIN='train_VID_dataset',
+    VALID_SUB='valid_sub_VID_dataset',
+    VALID='valid_VID_dataset',
+    TEST='test_VID_dataset')
 
 SOLVER = dict(
     IMS_PER_BATCH=4,
@@ -19,4 +27,5 @@ TEST = dict(
     IMS_PER_BATCH=1,
     NUM_CLIP_FRAMES=3)
 
-NAME = 'r50_base_YTVIS2019_cubic_1X_C3'
+OUTPUT_DIR = 'weights/VID/'
+NAME = 'r50_base_VID_cubic_c3_1X'

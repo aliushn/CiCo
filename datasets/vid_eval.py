@@ -121,9 +121,7 @@ def eval_detection_vid(pred_boxlists,
                        motion_ranges=[[0.0, 0.7], [0.7, 0.9], [0.9, 1.0]],
                        motion_specific=False,
                        use_07_metric=False):
-    assert len(gt_boxlists) == len(
-        pred_boxlists
-    ), "Length of gt and pred lists need to be same."
+    assert len(gt_boxlists) == len(pred_boxlists), "Length of gt and pred lists need to be same."
 
     if motion_specific:
         motion_iou_file = "mega_core/data/datasets/evaluation/vid/vid_groundtruth_motion_iou.mat"

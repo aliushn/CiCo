@@ -43,17 +43,19 @@ class T2SLoss(nn.Module):
             if self.cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT or self.cfg.STMASK.T2S_HEADS.SHIFT_WITH_PRED_BOX:
                 boxes_ref, boxes_tar = boxes[cdx::self.clip_frames], boxes[cdx+1::self.clip_frames]
                 mask_coeff_ref, mask_coeff_tar = mask_coeff[::self.clip_frames], mask_coeff[cdx+1::self.clip_frames]
-                boxes_ref = [boxes.detach() for boxes in boxes_ref]
-                mask_coeff_ref = [mask_coeff.detach() for mask_coeff in mask_coeff_ref]
                 idx_t_ref, idx_t_tar = idx_t[cdx::self.clip_frames], idx_t[cdx+1::self.clip_frames]
                 prototypes_ref, prototypes_tar = prototypes[cdx::self.clip_frames], prototypes[cdx+1::self.clip_frames]
                 if self.forward_flow:
+                    boxes_ref = [boxes.reshape(-1, 4).detach() for boxes in boxes_ref]
+                    mask_coeff_ref = [mask_coeff.detach() for mask_coeff in mask_coeff_ref]
                     losses_shift_for = self.track_to_segment_loss(bb_feat_ref, bb_feat_tar, gt_boxes_tar, gt_masks_tar,
                                                                   boxes_ref, mask_coeff_ref, prototypes_tar, idx_t_ref)
                     for k, v in losses_shift_for.items():
                         losses_shift[k].append(v)
 
                 if self.backward_flow:
+                    boxes_tar = [boxes.reshape(-1, 4).detach() for boxes in boxes_tar]
+                    mask_coeff_tar = [mask_coeff.detach() for mask_coeff in mask_coeff_tar]
                     losses_shift_back = self.track_to_segment_loss(bb_feat_tar, bb_feat_ref, gt_boxes_ref, gt_masks_ref,
                                                                    boxes_tar, mask_coeff_tar, prototypes_ref, idx_t_ref)
                     for k, v in losses_shift_back.items():
@@ -176,7 +178,7 @@ class T2SLoss(nn.Module):
                 # Load ground-truth masks in the target frame
                 masks_tar_gt_cur = gt_masks_tar[i][idx_ref[i]]
                 # Generate masks between shifted mask coefficients and prototypes in the key frame
-                shift_mask_coeff_tar = mask_coeff_ref[i] + shift_mask_coeff_reg
+                shift_mask_coeff_tar = 0.5*(mask_coeff_ref[i].detach() + shift_mask_coeff_reg)
                 pred_masks_tar = generate_mask(prototypes_tar[i], shift_mask_coeff_tar, boxes_tar_gt_cur)
                 h, w = pred_masks_tar.size()[-2:]
                 ds_masks_tar_gt_atr = F.interpolate(masks_tar_gt_cur.unsqueeze(0).float(), (h, w),
@@ -198,7 +200,8 @@ class T2SLoss(nn.Module):
 
             # ----------------- Compute Boxshift loss ----------------------
             shift_boxes_reg_gt = torch.zeros_like(boxes_ref[i])
-            shift_boxes_reg_gt[valid_flag] = encode(boxes_tar_gt_cur[valid_flag], center_size(boxes_ref[i][valid_flag]))
+            shift_boxes_reg_gt[valid_flag] = encode(boxes_tar_gt_cur[valid_flag],
+                                                    center_size(boxes_ref[i][valid_flag]))
             pre_loss_B = F.smooth_l1_loss(shift_boxes_reg, shift_boxes_reg_gt, reduction='none').sum(dim=-1)
             loss_B_shift += pre_loss_B.mean()
 
@@ -209,9 +212,9 @@ class T2SLoss(nn.Module):
             else:
                 loss_BIoU_shift += giou_loss(shift_boxes_tar, boxes_tar_gt_cur, reduction='mean')
 
-        losses = {'B_shift': loss_B_shift / bs * self.cfg.MODEL.BOX_HEADS.LOSS_ALPHA,
-                  'BIoU_shift': loss_BIoU_shift / bs * self.cfg.MODEL.BOX_HEADS.BIoU_ALPHA}
+        losses = {'B_shift': loss_B_shift / bs * self.cfg.MODEL.BOX_HEADS.LOSS_ALPHA * 0.5,
+                  'BIoU_shift': loss_BIoU_shift / bs * self.cfg.MODEL.BOX_HEADS.BIoU_ALPHA * 0.5}
         if self.cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT:
-            losses['M_shift'] = loss_mask_shift / bs * self.cfg.STMASK.T2S_HEADS.MASKSHIFT_ALPHA
+            losses['M_shift'] = loss_mask_shift / bs * self.cfg.STMASK.T2S_HEADS.MASKSHIFT_ALPHA * 0.5
 
         return losses

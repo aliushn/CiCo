@@ -357,6 +357,14 @@ def prep_display_single(dets_out, img, img_meta=None, undo_transform=True, mask_
 
 
 def evaluate(net: STMask, dataset, data_type='vis', eval_clip_frames=1, output_dir=None):
+    '''
+    :param net:
+    :param dataset:
+    :param data_type: 'vis' or 'vid'
+    :param eval_clip_frames:
+    :param output_dir:
+    :return:
+    '''
     n_overlapped_frames = args.overlap_frames
     n_newly_frames = eval_clip_frames - n_overlapped_frames
     dataset_size = len(dataset.vid_ids)
@@ -373,10 +381,10 @@ def evaluate(net: STMask, dataset, data_type='vis', eval_clip_frames=1, output_d
 
         if data_type == 'vis':
             len_vid = dataset.vid_infos[vdx]['length']
-            use_vid_metric = False
-        elif data_type == 'vid':
+            train_masks, use_vid_metric = True, False
+        else:
             len_vid = len(dataset.vid_infos[vdx])
-            use_vid_metric = True
+            train_masks, use_vid_metric = False, True
         if eval_clip_frames == 1:
             len_clips = (len_vid + args.batch_size//2) // args.batch_size
         else:
@@ -442,8 +450,8 @@ def evaluate(net: STMask, dataset, data_type='vis', eval_clip_frames=1, output_d
 
                 else:
                     if pred is not None:
-                        pred = postprocess_ytbvis(pred, images_meta[batch_id],
-                                                  output_file=args.save_folder)
+                        pred = postprocess_ytbvis(pred, images_meta[batch_id], train_masks=train_masks,
+                                                  output_file=output_dir)
 
                     if data_type == 'vid' and use_vid_metric:
                         for k, v in pred.items():
@@ -465,6 +473,14 @@ def evaluate(net: STMask, dataset, data_type='vis', eval_clip_frames=1, output_d
 
 
 def evaluate_clip(net: STMask, dataset, data_type='vis', eval_clip_frames=1, output_dir=None):
+    '''
+    :param net:
+    :param dataset:
+    :param data_type: 'vis' or 'vid'
+    :param eval_clip_frames:
+    :param output_dir:
+    :return:
+    '''
     n_newly_frames = eval_clip_frames - args.overlap_frames
     dataset_size = len(dataset.vid_ids)
 
@@ -475,19 +491,17 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', eval_clip_frames=1, out
     timer.reset()
     for vdx, vid in enumerate(dataset.vid_ids):
         progress = (vdx + 1) / dataset_size * 100
-        # progress_bar.set_val(vdx+1)
         print()
         print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
 
         vid_objs = {}
         if data_type == 'vis':
             len_vid = dataset.vid_infos[vdx]['length']
-            use_vid_metric = False
-        elif data_type == 'vid':
-            len_vid = len(dataset.vid_infos[vdx])
-            use_vid_metric = True
+            train_masks, use_vid_metric = True, False
         else:
-            print('Please input a specific data type, like vis or vid')
+            len_vid = len(dataset.vid_infos[vdx])
+            train_masks, use_vid_metric = False, True
+
         len_clips = (len_vid + n_newly_frames//2) // n_newly_frames
         progress_bar_clip = ProgressBar(len_clips, len_clips)
         for cdx in range(len_clips):
@@ -513,7 +527,6 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', eval_clip_frames=1, out
             with timer.env('Network Extra'):
                 preds_clip = net(images, img_meta=images_meta)
                 pred_clip = preds_clip[0]
-                train_masks = True if 'proto' in pred_clip.keys() else False
 
             pred_frame = dict()
             for k, v in pred_clip.items():
@@ -546,8 +559,8 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', eval_clip_frames=1, out
                     plt.clf()
 
                 else:
-                    preds_cur = postprocess_ytbvis(pred_frame, images_meta[batch_id],
-                                                   output_file=args.save_folder)
+                    preds_cur = postprocess_ytbvis(pred_frame, images_meta[batch_id], train_masks=train_masks,
+                                                   output_file=output_dir)
                     if data_type == 'vid' and use_vid_metric:
                         for k, v in preds_cur.items():
                             preds_cur[k] = v.tolist()

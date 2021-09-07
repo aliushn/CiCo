@@ -1,4 +1,3 @@
-
 _base_ = ['configs/_base_/models/r50_base.yaml']
 
 MODEL = dict(
@@ -52,14 +51,6 @@ INPUT = dict(
     PRESERVE_ASPECT_RATIO=True,
     SIZE_DIVISOR=32)
     
-DATASETS = dict(
-    TYPE='vis',
-    NUM_CLASSES=40,
-    TRAIN='train_YouTube_VOS2019_dataset',
-    VALID_SUB='valid_sub_YouTube_VOS2019_dataset',
-    VALID='valid_YouTube_VOS2019_dataset',
-    TEST='test_YouTube_VOS2019_dataset')
-    
 SOLVER = dict(
     IMS_PER_BATCH=8,
     NUM_CLIP_FRAMES=2,
@@ -69,7 +60,7 @@ SOLVER = dict(
     SAVE_INTERVAL=5000)
     
 TEST = dict(
-    IMS_PER_BATCH=4,
+    IMS_PER_BATCH=1,
     NUM_CLIP_FRAMES=1,
     DETECTIONS_PER_IMG=100,
     NMS_IoU_THRESH=0.5,
@@ -77,7 +68,7 @@ TEST = dict(
     NMS_WITH_BIoU=True,
     NMS_WITH_MIoU=True)
 
-OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_1X'
+OUTPUT_DIR = 'weights/'
+NAME = 'r50_base_VIS'
 
 

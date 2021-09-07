@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from ...utils import center_size, point_form, generate_mask, jaccard, crop
 
@@ -39,7 +38,7 @@ class LincombMaskLoss(object):
             # deal with the i-th clip
             if pos_cur.sum() > 0:
                 idx_t_cur_clip = idx_t[i, pos_cur]
-                proto_coeff = mask_coeff[i, pos_cur]                        # [n_pos, 32 or 196]
+                mask_coeff_cur = mask_coeff[i, pos_cur]                        # [n_pos, 32 or 196]
                 fpn_levels = prior_levels[i, pos_cur]
                 # If the input is given frame by frame style, for example bboxes_gt [n_objs, 4],
                 # please expand them in temporal axis like: [n_objs, 1, 4] to better coding
@@ -50,7 +49,7 @@ class LincombMaskLoss(object):
                 for j in range(clip_frames):
                     # deal with the j-th frame of the i-th clip
                     kdx = i*clip_frames+j
-                    proto_masks = proto_data[kdx]                           # [mask_h, mask_w, 32]
+                    prototypes = proto_data[kdx]                           # [mask_h, mask_w, 32]
                     masks_gt_cur = masks_gt_cur_clip[:, j]
                     if not self.cfg.MODEL.MASK_HEADS.LOSS_WITH_OIR_SIZE:
                         masks_gt_cur = F.interpolate(masks_gt_cur.float().unsqueeze(0), (h, w),
@@ -76,7 +75,7 @@ class LincombMaskLoss(object):
     
                     if self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_LOSS:
                         instance_t = idx_t_cur_clip if obj_ids_gt[i] is None else obj_ids_gt[i][idx_t_cur_clip]
-                        loss_coeff_div += self.coeff_diversity_loss(proto_coeff, instance_t,
+                        loss_coeff_div += self.coeff_diversity_loss(mask_coeff_cur, instance_t,
                                                                     boxes_gt_cur_clip[:, j][idx_t_cur_clip])
     
                     if self.cfg.MODEL.MASK_HEADS.PROTO_CROP or self.cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
@@ -87,15 +86,17 @@ class LincombMaskLoss(object):
                             pos_gt_box_t = boxes_gt_cur_clip[:, j][idx_t_cur_clip]
                         pos_gt_box_t_c = center_size(pos_gt_box_t)
                         pos_gt_box_t_c[:, 2:] *= 1.3
-                        pos_gt_box_t = torch.clamp(point_form(pos_gt_box_t_c), min=1e-5, max=1)
+                        # for small objects, we set width and height of bounding boxes is 0.1
+                        pos_gt_box_t_c[:, 2:] = torch.clamp(pos_gt_box_t_c[:, 2:], min=0.1)
+                        pos_gt_box_t = torch.clamp(point_form(pos_gt_box_t_c), min=0, max=1)
                     else:
                         pos_gt_box_t = None
     
                     if not self.cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
-                        pred_masks = generate_mask(proto_masks, proto_coeff, pos_gt_box_t)
+                        pred_masks = generate_mask(prototypes, mask_coeff_cur, pos_gt_box_t)
                     else:
-                        pred_masks = self.net.DynamicMaskHead(proto_masks.permute(2, 0, 1).contiguous().unsqueeze(0),
-                                                              proto_coeff, pos_gt_box_t, fpn_levels)
+                        pred_masks = self.net.DynamicMaskHead(prototypes.permute(2, 0, 1).contiguous().unsqueeze(0),
+                                                              mask_coeff_cur, pos_gt_box_t, fpn_levels)
                         if self.cfg.MODEL.MASK_HEADS.PROTO_CROP:
                             pred_masks = crop(pred_masks.permute(1, 2, 0).contiguous(), pos_gt_box_t)
                             pred_masks = pred_masks.permute(2, 0, 1).contiguous()
@@ -127,21 +128,20 @@ class LincombMaskLoss(object):
                                 cur_loss.append(self.dice_coefficient(pred_masks[:, k], mask_t.float()[:, k]))
                             pre_loss = torch.stack(cur_loss, dim=0).mean(dim=0)
                         else:
-                            pre_loss = F.binary_cross_entropy(pred_masks, mask_t.float(),
-                                                              reduction='none').sum(dim=1)
+                            pre_loss = F.binary_cross_entropy(pred_masks, mask_t.float(), reduction='none').sum(dim=1)
     
                     if not self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF:
                         if self.cfg.MODEL.MASK_HEADS.PROTO_CROP:
-                            pos_gt_box_wh = center_size(pos_gt_box_t)[:, 2:]
-                            pos_gt_box_w = torch.clamp(pos_gt_box_wh[:, 0], min=1e-5, max=1) * pred_masks.size(-1)
-                            pos_gt_box_h = torch.clamp(pos_gt_box_wh[:, 1], min=1e-5, max=1) * pred_masks.size(-2)
+                            pos_gt_box_wh = center_size(pos_gt_box_t)
+                            pos_gt_box_w = torch.clamp(pos_gt_box_wh[:, 2]*pred_masks.size(-1), min=1)
+                            pos_gt_box_h = torch.clamp(pos_gt_box_wh[:, 3]*pred_masks.size(-2), min=1)
                             pre_loss = pre_loss.sum(dim=(1, 2)) / pos_gt_box_w / pos_gt_box_h
                         else:
                             pre_loss = pre_loss.sum(dim=(1, 2)) / pred_masks.size(-1) / pred_masks.size(-2)
                     loss_cur_clip += pre_loss.mean()
 
-                loss += loss_cur_clip / clip_frames
-        loss = loss*self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA / bs
+                loss += (loss_cur_clip / clip_frames)
+        loss = loss / bs * self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA
         losses = {'M_dice': loss} if self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF else {'M_bce': loss}
         if self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_LOSS:
             losses['M_coeff'] = loss_coeff_div / max(bs, 1)

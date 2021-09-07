@@ -123,7 +123,7 @@ class YTVOSDataset(data.Dataset):
         # sample another frame in the same sequence as reference
         vid, frame_id = idx
         valid_samples = []
-        for i in range(-self.clip_frames+1, self.clip_frames):
+        for i in range(-self.clip_frames, self.clip_frames+1):
             # check if the frame id is valid
             ref_idx = (vid, i+frame_id)
             if i != 0 and ref_idx in self.img_ids:
@@ -131,6 +131,8 @@ class YTVOSDataset(data.Dataset):
         if len(valid_samples) == 0:
             ref_frames = [frame_id]*(self.clip_frames-1)
         else:
+            if self.clip_frames-1 > len(valid_samples):
+                valid_samples += (valid_samples*self.clip_frames)[:self.clip_frames-1-len(valid_samples)]
             ref_frames = random.sample(valid_samples, self.clip_frames-1)
         return ref_frames
 
@@ -186,27 +188,30 @@ class YTVOSDataset(data.Dataset):
         #         bboxes_ignore[i] = self.transform(bboxes_ignore[i], img_shape, pad_shape, scale_factor, flip)
 
         imgs = np.concatenate(imgs, axis=-1)
-        clip_obj_ids = list(set([id for ids in obj_ids for id in ids]))
-        clip_masks, clip_boxes, clip_labels = [], [], []
-        for id in clip_obj_ids:
-            masks_obj, boxes_obj, labels_obj = [], [], []
-            for ids, mask, box, label in zip(obj_ids, masks, bboxes, labels):
-                if id in ids:
-                    masks_obj.append(mask[ids.index(id)])
-                    boxes_obj.append(box[ids.index(id)])
-                    labels_obj += [label[ids.index(id)]]
-                else:
-                    # -1 means object do not exist in the frame
-                    masks_obj.append(np.zeros((imgs.shape[0], imgs.shape[1])))
-                    boxes_obj.append(np.array([0.]*4))
-            clip_masks.append(np.stack(masks_obj, axis=0))
-            clip_boxes.append(np.stack(boxes_obj, axis=0))
-            clip_labels.append(np.argmax(np.bincount(np.array(labels_obj))))
+        if self.has_gt:
+            clip_obj_ids = list(set([id for ids in obj_ids for id in ids]))
+            clip_masks, clip_boxes, clip_labels = [], [], []
+            for id in clip_obj_ids:
+                masks_obj, boxes_obj, labels_obj = [], [], []
+                for ids, mask, box, label in zip(obj_ids, masks, bboxes, labels):
+                    if id in ids:
+                        masks_obj.append(mask[ids.index(id)])
+                        boxes_obj.append(box[ids.index(id)])
+                        labels_obj += [label[ids.index(id)]]
+                    else:
+                        # -1 means object do not exist in the frame
+                        masks_obj.append(np.zeros((imgs.shape[0], imgs.shape[1])))
+                        boxes_obj.append(np.array([0.]*4))
+                clip_masks.append(np.stack(masks_obj, axis=0))
+                clip_boxes.append(np.stack(boxes_obj, axis=0))
+                clip_labels.append(np.argmax(np.bincount(np.array(labels_obj))))
 
-        clip_masks = np.stack(clip_masks, axis=0)
-        clip_boxes = np.stack(clip_boxes, axis=0)
+            clip_masks = np.stack(clip_masks, axis=0)
+            clip_boxes = np.stack(clip_boxes, axis=0)
 
-        return imgs, img_meta, (clip_masks, clip_boxes, clip_labels, clip_obj_ids)
+            return imgs, img_meta, (clip_masks, clip_boxes, clip_labels, clip_obj_ids)
+        else:
+            return imgs, img_meta, (masks, bboxes, labels, obj_ids)
 
     def pull_clip_from_video(self, vid, clip_frame_ids):
         # prepare a sequence from a video
