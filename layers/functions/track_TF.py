@@ -1,5 +1,5 @@
 import torch
-from layers.utils import compute_DIoU,  mask_iou, generate_track_gaussian, compute_comp_scores, compute_kl_div, center_size
+from layers.utils import compute_DIoU,  mask_iou, generate_track_gaussian, compute_comp_scores, compute_kl_div
 from .TF_utils import CandidateShift
 from utils import timer
 import numpy as np

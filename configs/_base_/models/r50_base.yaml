@@ -92,5 +92,5 @@ TEST:
   NMS_WITH_BIoU: True
   NMS_WITH_MIoU: False
 
-OUTPUT_DIR: 'weights/YTVIS2019/'
+OUTPUT_DIR: 'weights/'
 NAME: 'r50_base'

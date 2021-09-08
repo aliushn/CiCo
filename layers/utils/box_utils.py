@@ -241,8 +241,8 @@ def crop(masks, boxes, padding:int=1, return_mask=False):
         masks = masks.unsqueeze(2)
     h, w, c, n = masks.size()
 
-    x1, x2 = sanitize_coordinates(boxes[:, 0], boxes[:, 2], w, padding, cast=False)
-    y1, y2 = sanitize_coordinates(boxes[:, 1], boxes[:, 3], h, padding, cast=False)
+    x1, x2 = sanitize_coordinates(boxes[:, 0], boxes[:, 2], w, padding, cast=True)
+    y1, y2 = sanitize_coordinates(boxes[:, 1], boxes[:, 3], h, padding, cast=True)
 
     rows = torch.arange(w, device=masks.device, dtype=x1.dtype).view(1, -1, 1, 1).expand(h, w, c, n)
     cols = torch.arange(h, device=masks.device, dtype=x1.dtype).view(-1, 1, 1, 1).expand(h, w, c, n)

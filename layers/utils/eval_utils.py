@@ -9,7 +9,6 @@ from cocoapi.PythonAPI.pycocotools.vid import VID
 from cocoapi.PythonAPI.pycocotools.videval import VIDeval
 import pycocotools.mask as mask_util
 from datasets.vid_eval import do_vid_evaluation
-from matplotlib.patches import Polygon
 
 
 def bbox2result_with_id(preds, img_meta):
@@ -179,7 +178,7 @@ def calc_metrics(anno_file, dt_file, output_file=None, iouType='segm', data_type
         if use_vid_metric:
             gt_annos = json.load(open(anno_file, 'r'))
             dt_annos = json.load(open(dt_file, 'r'))
-            do_vid_evaluation(gt_annos, dt_annos, os.path.split(output_file)[0])
+            do_vid_evaluation(gt_annos, dt_annos, output_file)
         else:
             vidGt = VID(anno_file)
             vidDt = vidGt.loadRes(dt_file)

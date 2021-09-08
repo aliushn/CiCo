@@ -78,13 +78,10 @@ def GtList_from_tensor(height, width, masks=None, boxes=None, img_metas=None):
             masks[i] = expand_masks.reshape(n_obj,n_frames,height,width) if len(masks[i].shape) == 4 else expand_masks
 
         if boxes is not None:
-            if masks is not None:
-                im_h, im_w = masks[i].shape[-2:]
+            if isinstance(img_metas[i], list):
+                im_h, im_w = img_metas[i][0]['img_shape'][:2]
             else:
-                if isinstance(img_metas[i], list):
-                    im_h, im_w = img_metas[i][0]['img_shape'][:2]
-                else:
-                    im_h, im_w = img_metas[i]['img_shape'][:2]
+                im_h, im_w = img_metas[i]['img_shape'][:2]
             # Scale bounding boxes (which are currently percent coordinates)
             boxes[i][..., [0, 2]] *= (im_w / width)
             boxes[i][..., [1, 3]] *= (im_h / height)
@@ -155,11 +152,9 @@ def get_dataset(data_type, data_name, input, num_clip_frame, inference=False):
     if not inference:
         flip, MS_train = True, input.MULTISCALE_TRAIN
         resize_gt, pad_gt = True, True
-        img_scales = [input.MIN_SIZE_TRAIN, input.MAX_SIZE_TRAIN]
     else:
         flip, MS_train = False, False
         resize_gt, pad_gt = False, False
-        img_scales = [input.MIN_SIZE_TEST, input.MAX_SIZE_TEST]
 
     backbone_transform = {
         'channel_order': 'RGB',
@@ -205,13 +200,14 @@ def get_dataset(data_type, data_name, input, num_clip_frame, inference=False):
     elif data_type == 'coco':
         dataset = COCODetection(image_path=dataset_config['img_prefix'],
                                 info_file=dataset_config['ann_file'],
-                                transform=BaseTransform_coco(img_scales,
-                                                             Flip=flip,
-                                                             MS_train=MS_train,
-                                                             preserve_aspect_ratio=input.PRESERVE_ASPECT_RATIO,
-                                                             backbone_transform=backbone_transform,
-                                                             resize_gt=resize_gt,
-                                                             pad_gt=pad_gt))
+                                transform=BaseTransform_coco(
+                                    min_size=input.MIN_SIZE_TRAIN,
+                                    max_size=input.MAX_SIZE_TRAIN,
+                                    Flip=flip,
+                                    MS_train=MS_train,
+                                    backbone_transform=backbone_transform,
+                                    resize_gt=resize_gt,
+                                    pad_gt=pad_gt))
     else:
         RuntimeError("Dataset not available: {}".format(data_name))
 

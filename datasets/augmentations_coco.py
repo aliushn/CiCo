@@ -101,16 +101,15 @@ class Pad(object):
 
     Note: this expects im_w <= width and im_h <= height
     """
-    def __init__(self, img_scales=None, mean=MEANS, MS_train=True, pad_gt=True):
+    def __init__(self, min_size, max_size, mean=MEANS, pad_gt=True):
         self.mean = mean
-        self.img_scales = img_scales
-        self.MS_train = MS_train
         self.pad_gt = pad_gt
+        self.min_size = min_size
+        self.max_size = max_size
 
     def __call__(self, image, masks, boxes=None, labels=None):
         im_h, im_w, depth = image.shape
-
-        width, height = max(self.img_scales), max(self.img_scales)
+        width, height = min(self.max_size, im_w), min(self.max_size, im_h)
         expand_image = np.zeros((height, width, depth), dtype=image.dtype)
         expand_image[:, :, :] = self.mean
         expand_image[:im_h, :im_w] = image
@@ -140,32 +139,27 @@ class Resize(object):
     the image so the long side is max_size.
     """
 
-    def __init__(self, img_scales, preserve_aspect_ratio=True, MS_train=False, resize_gt=True):
+    def __init__(self, min_size, max_size, MS_train=False, resize_gt=True):
         self.divisibility = 32
         self.resize_gt = resize_gt
         self.MS_train = MS_train
-        self.img_scales = img_scales
-        self.preserve_aspect_ratio = preserve_aspect_ratio
+        self.min_size = min_size
+        self.max_size = max_size
 
     def __call__(self, image, masks, boxes, labels=None):
         img_h, img_w, _ = image.shape
-
-        if self.MS_train:
-            ms_idx = np.random.randint(len(self.img_scales))
-            pad_h, pad_w = self.img_scales[ms_idx], self.img_scales[ms_idx]
+        min_size = self.min_size[np.random.randint(len(self.min_size))] if self.MS_train else self.min_size[-1]
+        # resize short edges
+        if img_h > img_w:
+            width, height = min_size, int(img_h * (min_size / img_w))
+            if height > self.max_size:
+                width = int(min_size * (self.max_size / height))
+                height = self.max_size
         else:
-            pad_h, pad_w = max(self.img_scales), max(self.img_scales)
-        img_ratio, pad_ratio = img_h / img_w, pad_h / pad_w
-
-        if self.preserve_aspect_ratio:
-            # resize long edges
-            if img_ratio < pad_ratio:
-                width, height = pad_w, int(img_h * (pad_w / img_w))
-            else:
-                width, height = int(img_w * (pad_h / img_h)), pad_h
-        else:
-            width, height = pad_w, pad_h
-        assert width <= pad_w and height <= pad_h
+            width, height = int(img_w * (min_size / img_h)), min_size
+            if width > self.max_size:
+                height = int(min_size*(self.max_size/height))
+                width = self.max_size
 
         image = cv2.resize(image, (width, height))
         
@@ -584,17 +578,17 @@ class BackboneTransform(object):
 
         # Here I use "Algorithms and Coding" to convert string permutations to numbers
         self.channel_map = {c: idx for idx, c in enumerate(in_channel_order)}
-        self.channel_permutation = [self.channel_map[c] for c in transform.channel_order]
+        self.channel_permutation = [self.channel_map[c] for c in transform['channel_order']]
 
     def __call__(self, img, masks=None, boxes=None, labels=None):
 
         img = img.astype(np.float32)
 
-        if self.transform.normalize:
+        if self.transform['normalize']:
             img = (img - self.mean) / self.std
-        elif self.transform.subtract_means:
+        elif self.transform['subtract_means']:
             img = (img - self.mean)
-        elif self.transform.to_float:
+        elif self.transform['to_float']:
             img = img / 255
 
         img = img[:, :, self.channel_permutation]
@@ -605,13 +599,13 @@ class BackboneTransform(object):
 class BaseTransform_coco(object):
     """ Transorm to be used when evaluating. """
 
-    def __init__(self, img_scales, Flip=False, MS_train=False, preserve_aspect_ratio=True,
-                 backbone_transform=None, resize_gt=True, pad_gt=True, mean=MEANS, std=STD):
+    def __init__(self, min_size, max_size, Flip=False, MS_train=False, backbone_transform=None,
+                 resize_gt=True, pad_gt=True, mean=MEANS, std=STD):
         self.augment = Compose([
             ConvertFromInts(),
             enable_if(Flip, RandomFlip()),
-            Resize(img_scales, preserve_aspect_ratio=preserve_aspect_ratio, MS_train=MS_train, resize_gt=resize_gt),
-            Pad(img_scales, MS_train=MS_train, pad_gt=pad_gt),
+            Resize(min_size, max_size, MS_train=MS_train, resize_gt=resize_gt),
+            # Pad(img_scales, pad_gt=pad_gt),
             BackboneTransform(backbone_transform, mean, std, 'BGR')
         ])
 
@@ -671,7 +665,7 @@ def enable_if(condition, obj):
 class SSDAugmentation(object):
     """ Transform to be used when training. """
 
-    def __init__(self, img_scales, preserve_aspect_ratio=True, MS_train=True, mean=MEANS, std=STD):
+    def __init__(self, min_size, max_size, MS_train=True, mean=MEANS, std=STD):
         self.augment = Compose([
             ConvertFromInts(),
             # if cfg.augment_expand = True, it is easier to compile
@@ -684,8 +678,8 @@ class SSDAugmentation(object):
             # enable_if(cfg.augment_random_mirror, RandomMirror()),
             enable_if(cfg.augment_random_flip, RandomFlip()),
             # enable_if(cfg.augment_random_rot90, RandomRot90()),
-            Resize(img_scales, preserve_aspect_ratio=preserve_aspect_ratio, MS_train=MS_train),
-            Pad(img_scales, mean, MS_train=MS_train),
+            Resize(min_size, max_size,  MS_train=MS_train),
+            # Pad(img_scales, mean, MS_train=MS_train),
             # ToPercentCoords(),
             BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')
         ])

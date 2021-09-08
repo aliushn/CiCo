@@ -255,8 +255,8 @@ def train(cfg):
                     do_inference = False if 'DET' in args.config else True
                     if do_inference:
                         if cfg.DATASETS.TYPE == 'coco':
-                            setup_eval_coco(cfg.OUTPUT_DIR)
-                            compute_validation_map_coco(epoch, iteration, net, cfg.valid_dataset, log if args.log else None)
+                            setup_eval_coco()
+                            compute_validation_map_coco(net, epoch, iteration, log if args.log else None)
                         else:
                             print('Inference for valid data!')
                             setup_eval(epoch)
@@ -367,14 +367,14 @@ def compute_validation_map(net, dataset):
         net.train()
 
 
-def compute_validation_map_coco(epoch, iteration, net, dataset_config, log: Log = None):
+def compute_validation_map_coco(net, epoch, iteration, log: Log = None):
     with torch.no_grad():
         net.eval()
 
         start = time.time()
         print()
         print("Computing validation mAP (this may take a while)...", flush=True)
-        val_info = eval_coco_script.evaluate(net, dataset_config, train_mode=True, epoch=epoch, iteration=iteration)
+        val_info = eval_coco_script.evaluate(cfg, net, train_mode=True, epoch=epoch, iteration=iteration)
         end = time.time()
 
         if log is not None:
@@ -390,8 +390,8 @@ def setup_eval(epoch):
                             '--epoch=' + str(epoch)])
 
 
-def setup_eval_coco(OUTPUT_DIR):
-    eval_coco_script.parse_args(['--save_path='+str(OUTPUT_DIR)+'/valid_metrics.txt'])
+def setup_eval_coco():
+    eval_coco_script.parse_args(['--batch_size='+str(cfg.TEST.IMS_PER_BATCH)])
 
 
 if __name__ == '__main__':

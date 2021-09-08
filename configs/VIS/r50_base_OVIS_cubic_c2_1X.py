@@ -1,6 +1,10 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VIS/r50_base_VIS.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VIS/base_VIS.py']
 
 MODEL = dict(
+    BACKBONE=dict(
+        CONV_BODY='ResNet50',
+        PATH='STMask_resnet50_coco_960_46_340000.pth'),
+
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
         CUBIC_CORRELATION_MODE=False,

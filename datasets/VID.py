@@ -148,25 +148,28 @@ class VIDDataset(torch.utils.data.Dataset):
         # Stack annotations into [n_objs, n_frames, ...]
         imgs = np.concatenate(imgs, axis=-1)
         if self.has_gt:
-            clip_obj_ids = list(set([id for ids in obj_ids for id in ids]))
-            clip_boxes, clip_labels, clip_boxes_occluded = [], [], []
-            for id in clip_obj_ids:
-                boxes_obj, labels_obj, boxes_occluded_obj = [], [], []
-                for ids, box, label, box_occluded in zip(obj_ids, boxes, labels, boxes_occluded):
-                    if id in ids:
-                        boxes_obj.append(box[ids.index(id)])
-                        labels_obj += [label[ids.index(id)]]
-                        boxes_occluded_obj += [box_occluded[ids.index(id)]]
-                    else:
-                        # -1 means object do not exist in the frame
-                        boxes_obj.append(np.array([0.]*4))
-                        boxes_occluded_obj += [1]
-                clip_boxes.append(np.stack(boxes_obj, axis=0))
-                clip_labels.append(np.argmax(np.bincount(np.array(labels_obj))))
-                clip_boxes_occluded.append(np.stack(boxes_occluded_obj, axis=0))
-            clip_boxes = np.stack(clip_boxes, axis=0)
-            clip_boxes_occluded = np.stack(clip_boxes_occluded, axis=0)
-            return imgs, img_meta, (clip_boxes, clip_labels, clip_obj_ids, clip_boxes_occluded)
+            if 'VID' in self.ann_file:
+                clip_obj_ids = list(set([id for ids in obj_ids for id in ids]))
+                clip_boxes, clip_labels, clip_boxes_occluded = [], [], []
+                for id in clip_obj_ids:
+                    boxes_obj, labels_obj, boxes_occluded_obj = [], [], []
+                    for ids, box, label, box_occluded in zip(obj_ids, boxes, labels, boxes_occluded):
+                        if id in ids:
+                            boxes_obj.append(box[ids.index(id)])
+                            labels_obj += [label[ids.index(id)]]
+                            boxes_occluded_obj += [box_occluded[ids.index(id)]]
+                        else:
+                            # -1 means object do not exist in the frame
+                            boxes_obj.append(np.array([0.]*4))
+                            boxes_occluded_obj += [1]
+                    clip_boxes.append(np.stack(boxes_obj, axis=0))
+                    clip_labels.append(np.argmax(np.bincount(np.array(labels_obj))))
+                    clip_boxes_occluded.append(np.stack(boxes_occluded_obj, axis=0))
+                clip_boxes = np.stack(clip_boxes, axis=0)
+                clip_boxes_occluded = np.stack(clip_boxes_occluded, axis=0)
+                return imgs, img_meta, (clip_boxes, clip_labels, clip_obj_ids, clip_boxes_occluded)
+            else:
+                return imgs, img_meta, (boxes[0], labels[0], obj_ids, boxes_occluded)
         else:
             return imgs, img_meta, (boxes, labels, obj_ids, boxes_occluded)
 
@@ -453,7 +456,7 @@ def detection_collate_vid(batch):
 def prepare_data_vid(data_batch, devices):
     images, image_metas, (bboxes, labels, obj_ids, occluded_boxes) = data_batch
     h, w = images.size()[-2:]
-    d = len(devices) * 2
+    d = len(devices)
     if images.size(0) % d != 0:
         # TODO: if read multi frames (n_f) as a clip, thus the condition should be images.size(0) / n_f % len(devices)
         idx = [i % images.size(0) for i in range(d)]

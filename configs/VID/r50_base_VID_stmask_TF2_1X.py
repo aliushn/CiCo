@@ -1,4 +1,4 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VID/r50_base_VID.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VID/base_VID.py']
 
 DATASETS = dict(
     TYPE='vid',

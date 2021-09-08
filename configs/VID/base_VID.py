@@ -3,7 +3,7 @@ _base_ = ['configs/_base_/models/r50_base.yaml']
 MODEL = dict(
     BACKBONE=dict(
         CONV_BODY='ResNet50',
-        PATH='STMask_resnet50_coco_960_46_340000.pth'),
+        PATH='STMask_plus_resnet50_DET_960_22_50000.pth'),
 
     FPN=dict(
         NUM_FEATURES=256,
@@ -33,20 +33,14 @@ MODEL = dict(
         MATCH_COEFF=[0, 1, 1, 0]),
     
     MASK_HEADS=dict(
-        TRAIN_MASKS=True,
-        MASK_DIM=32,
-        PROTO_SRC=[0, 1, 2],
-        PROTO_CROP=True,
-        PROTO_CROP_WITH_PRED_BOX=False,
-        LOSS_WITH_OIR_SIZE=False,
-        LOSS_WITH_DICE_COEFF=False)
+        TRAIN_MASKS=False)
 )
 
 INPUT = dict(
-    MIN_SIZE_TRAIN=(360,),
-    MAX_SIZE_TRAIN=640,
-    MIN_SIZE_TEST=360,
-    MAX_SIZE_TEST=640,
+    MIN_SIZE_TRAIN=(600,),
+    MAX_SIZE_TRAIN=1000,
+    MIN_SIZE_TEST=600,
+    MAX_SIZE_TEST=1000,
     MULTISCALE_TRAIN=False,
     PRESERVE_ASPECT_RATIO=True,
     SIZE_DIVISOR=32)
@@ -68,7 +62,7 @@ TEST = dict(
     NMS_WITH_BIoU=True,
     NMS_WITH_MIoU=True)
 
-OUTPUT_DIR = 'weights/'
-NAME = 'r50_base_VIS'
+OUTPUT_DIR = 'weights/VID/'
+NAME = 'r50_base_VID'
 
 

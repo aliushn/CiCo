@@ -62,7 +62,7 @@ class PredictionModule(nn.Module):
 
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE else 1
 
-        kernel_size = [3, 3]
+        kernel_size = (3, 3)
         padding = [(kernel_size[0] - 1) // 2, (kernel_size[1] - 1) // 2]
         if parent is None:
 

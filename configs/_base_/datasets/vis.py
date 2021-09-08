@@ -85,7 +85,7 @@ class DatasetCatalog_vis(object):
 
     valid_YouTube_VOS2021_dataset = copy.deepcopy(dataset_base_vis)
     valid_YouTube_VOS2021_dataset['name'] = 'YTVIS2021_valid'
-    valid_YouTube_VOS2021_dataset['img_prefix'] = 'YouTube_VOS2019/valid/JPEGImages'
+    valid_YouTube_VOS2021_dataset['img_prefix'] = 'YouTube_VOS2021/valid/JPEGImages'
     valid_YouTube_VOS2021_dataset['ann_file'] = 'YouTube_VOS2021/valid/instances.json'
     valid_YouTube_VOS2021_dataset['has_gt'] = False
 

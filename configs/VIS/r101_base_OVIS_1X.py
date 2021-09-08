@@ -1,9 +1,10 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VIS/base_VIS.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/_base_/models/r101_base.yaml',
+          'configs/VIS/base_VIS.py']
 
 MODEL = dict(
     BACKBONE=dict(
-        CONV_BODY='ResNet50',
-        PATH='STMask_resnet50_coco_960_46_340000.pth')
+        CONV_BODY='ResNet101',
+        PATH='STMask_resnet101_coco_960_52_220000.pth')
 )
 
 DATASETS = dict(
@@ -15,6 +16,6 @@ DATASETS = dict(
     TEST='test_OVIS_dataset')
 
 OUTPUT_DIR = 'weights/OVIS/'
-NAME = 'r50_base_OVIS_1X'
+NAME = 'r101_base_OVIS_1X'
 
 

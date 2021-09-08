@@ -143,7 +143,7 @@ class STMask(nn.Module):
                                                sipmask_head=cfg.MODEL.MASK_HEADS.SIPMASK_HEAD)
 
         if cfg.MODEL.MASK_HEADS.TRAIN_MASKS and cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS:
-            sem_seg_head = [(in_channels, 3, {'padding': 1})]*2 + [(cfg.DATASETS.NUM_CLASSES, 1, {})]
+            sem_seg_head = [(in_channels, 3, 1)]*2 + [(cfg.DATASETS.NUM_CLASSES, 1, 0)]
             self.semantic_seg_conv, _ = make_net(in_channels, sem_seg_head, include_bn=True,
                                                  include_last_relu=False)
 
@@ -413,9 +413,10 @@ class STMask(nn.Module):
             with timer.env('track_by_Gaussian'):
                 pred_outs['track'] = self.track_conv(fpn_outs[0]).permute(0, 2, 3, 1).contiguous()
 
-        if self.cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS or not self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
-            with timer.env('sem_seg'):
-                pred_outs['sem_seg'] = self.semantic_seg_conv(fpn_outs[0]).permute(0, 2, 3, 1).contiguous()
+        if self.training:
+            if self.cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS or not self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
+                with timer.env('sem_seg'):
+                    pred_outs['sem_seg'] = self.semantic_seg_conv(fpn_outs[0]).permute(0, 2, 3, 1).contiguous()
 
         return fpn_outs, pred_outs
 

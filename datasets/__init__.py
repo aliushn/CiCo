@@ -7,14 +7,14 @@ from .augmentations_vis import BaseTransform_vis
 from .augmentations_vid import BaseTransform_vid
 from .augmentations_coco import SSDAugmentation, BaseTransform_coco, FastBaseTransform
 
-from .coco import COCODetection, get_label_map, detection_collate_coco, prepare_data_coco
+from .coco import COCODetection, detection_collate_coco, prepare_data_coco
 from .VID import VIDDataset, detection_collate_vid, prepare_data_vid
 from .CustomDataParallel import NetLoss, CustomDataParallel
 
 __all__ = [
     'COLORS', 'MEANS', 'STD',
     'detection_collate_coco', 'detection_collate_vis', 'get_dataset',
-    'YTVOSDataset', 'COCODetection', 'get_label_map',
+    'YTVOSDataset', 'COCODetection',
     'GroupSampler', 'DistributedGroupSampler', 'build_dataloader',
     'random_scale', 'show_ann', 'prepare_data_vis', 'ImageList_from_tensors', 'prepare_data_coco',
     'SSDAugmentation', 'BaseTransform_coco', 'FastBaseTransform', 'BaseTransform_vis',

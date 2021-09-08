@@ -11,12 +11,8 @@ from layers.utils import jaccard
 import torch
 
 
-def do_vid_evaluation(gt_annos, predictions, output_folder, logger=None, box_only=False, motion_specific=False):
-    # pred_boxlists = []
-    # gt_boxlists = []
-    # for gt_anno, prediction in zip(gt_annos, predictions):
-    #     pred_boxlists.append(prediction['box'])
-    #     gt_boxlists.append(gt_anno['boxes'])
+def do_vid_evaluation(gt_annos, predictions, output_path, logger=None, box_only=False, motion_specific=False):
+    output_name, output_ext = os.path.splitext(output_path)
     if box_only:
         result = eval_proposals_vid(
             pred_lists=predictions,
@@ -26,8 +22,7 @@ def do_vid_evaluation(gt_annos, predictions, output_folder, logger=None, box_onl
         result_str = "Recall: {:.4f}".format(result["recall"])
         if logger is not None:
             logger.info(result_str)
-        if output_folder:
-            with open(os.path.join(output_folder, "proposal_result.txt"), "w") as fid:
+            with open(output_name +'_proposal'+output_ext, "w") as fid:
                 fid.write(result_str)
         return
 
@@ -57,9 +52,8 @@ def do_vid_evaluation(gt_annos, predictions, output_folder, logger=None, box_onl
     if logger is not None:
         logger.info("\n" + result_str)
     print(result_str)
-    if output_folder:
-        with open(os.path.join(output_folder, "result.txt"), "w") as fid:
-            fid.write(result_str)
+    with open(output_path, "w") as fid:
+        fid.write(result_str)
 
     return result
 

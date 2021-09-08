@@ -6,17 +6,37 @@ import torch.utils.data as data
 import torch.nn.functional as F
 import cv2
 import numpy as np
-from .config import cfg
 from pycocotools import mask as maskUtils
 import random
-from .utils import ImageList_from_tensors
 
 
-def get_label_map():
-    if cfg.train_dataset.label_map is None:
-        return {x + 1: x + 1 for x in range(len(cfg.train_dataset.class_names))}
-    else:
-        return cfg.train_dataset.label_map
+COCO_CLASSES = ('person', 'bicycle', 'car', 'motorcycle', 'airplane',
+                'bus', 'train', 'truck', 'boat', 'traffic light',
+                'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird',
+                'cat', 'dog', 'horse', 'sheep', 'cow',
+                'elephant', 'bear', 'zebra', 'giraffe', 'backpack',
+                'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
+                'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat',
+                'baseball glove', 'skateboard', 'surfboard', 'tennis racket', 'bottle',
+                'wine glass', 'cup', 'fork', 'knife', 'spoon',
+                'bowl', 'banana', 'apple', 'sandwich', 'orange',
+                'broccoli', 'carrot', 'hot dog', 'pizza', 'donut',
+                'cake', 'chair', 'couch', 'potted plant', 'bed',
+                'dining table', 'toilet', 'tv', 'laptop', 'mouse',
+                'remote', 'keyboard', 'cell phone', 'microwave', 'oven',
+                'toaster', 'sink', 'refrigerator', 'book', 'clock',
+                'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush')
+
+COCO_LABEL_MAP = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8,
+                  9: 9, 10: 10, 11: 11, 13: 12, 14: 13, 15: 14, 16: 15, 17: 16,
+                  18: 17, 19: 18, 20: 19, 21: 20, 22: 21, 23: 22, 24: 23, 25: 24,
+                  27: 25, 28: 26, 31: 27, 32: 28, 33: 29, 34: 30, 35: 31, 36: 32,
+                  37: 33, 38: 34, 39: 35, 40: 36, 41: 37, 42: 38, 43: 39, 44: 40,
+                  46: 41, 47: 42, 48: 43, 49: 44, 50: 45, 51: 46, 52: 47, 53: 48,
+                  54: 49, 55: 50, 56: 51, 57: 52, 58: 53, 59: 54, 60: 55, 61: 56,
+                  62: 57, 63: 58, 64: 59, 65: 60, 67: 61, 70: 62, 72: 63, 73: 64,
+                  74: 65, 75: 66, 76: 67, 77: 68, 78: 69, 79: 70, 80: 71, 81: 72,
+                  82: 73, 84: 74, 85: 75, 86: 76, 87: 77, 88: 78, 89: 79, 90: 80}
 
 
 class COCOAnnotationTransform(object):
@@ -25,7 +45,7 @@ class COCOAnnotationTransform(object):
     """
 
     def __init__(self):
-        self.label_map = get_label_map()
+        self.label_map = COCO_LABEL_MAP
 
     def __call__(self, target, width, height):
         """
@@ -65,14 +85,10 @@ class COCODetection(data.Dataset):
         prep_crowds (bool): Whether or not to prepare crowds for the evaluation step.
     """
 
-    def __init__(self, image_path, info_file, transform=None,
-                 target_transform=None,
+    def __init__(self, image_path, info_file, transform=None, target_transform=None,
                  dataset_name='MS COCO', has_gt=True):
         # Do this here because we have too many things named COCO
         from pycocotools.coco import COCO
-
-        if target_transform is None:
-            target_transform = COCOAnnotationTransform()
 
         self.root = image_path
         self.coco = COCO(info_file)
@@ -87,6 +103,9 @@ class COCODetection(data.Dataset):
         self.name = dataset_name
         self.has_gt = has_gt
 
+        self.class_names = COCO_CLASSES
+        self.label_map = COCO_LABEL_MAP
+
     def __getitem__(self, index):
         """
         Args:
@@ -95,8 +114,7 @@ class COCODetection(data.Dataset):
             tuple: Tuple (image, (target, masks, num_crowds)).
                    target is the object returned by ``coco.loadAnns``.
         """
-        im, gt, masks, h, w, num_crowds = self.pull_item(index)
-        return im, (gt, masks, num_crowds), (h, w)
+        return self.pull_item(index)
 
     def __len__(self):
         return len(self.ids)
@@ -178,7 +196,12 @@ class COCODetection(data.Dataset):
             print('Warning: Augmentation output an example with no ground truth. Resampling...')
             return self.pull_item(random.randint(0, len(self.ids)-1))
 
-        return torch.from_numpy(img).permute(2, 0, 1), target, masks, height, width, num_crowds
+        img_meta = dict(
+            ori_shape=(height, width, 3),
+            img_shape=img.shape,
+            frame_id=index)
+
+        return torch.from_numpy(img).permute(2, 0, 1), (target, masks, num_crowds), img_meta
 
     def pull_image(self, index):
         '''Returns the original image object at index in PIL form
@@ -274,52 +297,59 @@ def detection_collate_coco(batch):
             2) (list<tensor>, list<tensor>, list<int>) annotations for a given image are stacked
                 on 0 dim. The output gt is a tuple of annotations and masks.
     """
-    targets = []
+    boxes, labels = [], []
     imgs = []
     masks = []
     num_crowds = []
-    ori_shape = []
+    img_metas = []
 
     for sample in batch:
         imgs.append(sample[0])
         if sample[1][0] is not None:
-            targets.append(torch.FloatTensor(sample[1][0]))
-            masks.append(torch.FloatTensor(sample[1][1]))
+            boxes.append(sample[1][0][:, :4])
+            labels.append(sample[1][0][:, -1])
+            masks.append(sample[1][1])
             num_crowds.append(sample[1][2])
-        ori_shape.append(sample[2])
-    imgs_batch = torch.stack(imgs, dim=0)
+        img_metas.append(sample[2])
 
-    if len(targets) > 0:
-        return imgs_batch, targets, masks, num_crowds, ori_shape
-    else:
-        return imgs_batch, ori_shape
+    from .utils import ImageList_from_tensors
+    imgs_batch = ImageList_from_tensors(imgs, size_divisibility=32)
+
+    return imgs_batch, boxes, labels, masks, num_crowds, img_metas
 
 
 def prepare_data_coco(data_batch, devices):
-    images, targets, masks, num_crowds, ori_shape = data_batch
+    images, boxes, labels, masks, num_crowds, img_metas = data_batch
+
+    from .utils import GtList_from_tensor
+    if len(masks) > 0:
+        pad_h, pad_w = images.size()[-2:]
+        masks, boxes, img_metas = GtList_from_tensor(pad_h, pad_w, masks, boxes, img_metas)
+
     if images.size(0) % len(devices) != 0:
         idx = [i % images.size(0) for i in range(len(devices))]
         remainder = len(devices) - images.size(0) % len(devices)
         images = torch.cat([images, images[idx[:remainder]]])
-        targets += [targets[i] for i in idx[:remainder]]
+        boxes += [boxes[i] for i in idx[:remainder]]
+        labels += [boxes[i] for i in idx[:remainder]]
         masks += [masks[i] for i in idx[:remainder]]
         num_crowds += [num_crowds[i] for i in idx[:remainder]]
-        ori_shape += [ori_shape[i] for i in idx[:remainder]]
+        img_metas += [img_metas[i] for i in idx[:remainder]]
     n = images.size(0) // len(devices)
 
     with torch.no_grad():
-        images_list, masks_list, bboxes_list, labels_list, obj_ids_list, num_crowds_list = [], [], [], [], [], []
-        ori_shape_list = []
+        images_list, masks_list, boxes_list, labels_list, obj_ids_list, num_crowds_list = [], [], [], [], [], []
+        img_metas_list = []
         for idx, device in enumerate(devices):
             images_list.append(gradinator(images[idx*n:(idx+1)*n].to(device)))
-            masks_list.append([gradinator(masks[jdx].to(device)) for jdx in range(idx*n, (idx+1)*n)])
-            bboxes_list.append([gradinator(targets[jdx][:, :4].to(device)) for jdx in range(idx*n, (idx+1)*n)])
-            labels_list.append([gradinator(targets[jdx][:, -1].to(device)) for jdx in range(idx*n, (idx+1)*n)])
+            masks_list.append([gradinator(torch.tensor(masks[jdx]).to(device)) for jdx in range(idx*n, (idx+1)*n)])
+            boxes_list.append([gradinator(torch.tensor(boxes[jdx]).to(device)) for jdx in range(idx*n, (idx+1)*n)])
+            labels_list.append([gradinator(torch.tensor(labels[jdx]).to(device)) for jdx in range(idx*n, (idx+1)*n)])
             obj_ids_list.append([None] * n)
             num_crowds_list.append(num_crowds[idx*n:(idx+1)*n])
-            ori_shape_list.append(ori_shape[idx*n:(idx+1)*n])
+            img_metas_list.append(img_metas[idx*n:(idx+1)*n])
 
-        return images_list, bboxes_list, labels_list, masks_list, obj_ids_list, num_crowds_list, ori_shape_list
+        return images_list, boxes_list, labels_list, masks_list, obj_ids_list, num_crowds_list, img_metas_list
 
 
 def gradinator(x):

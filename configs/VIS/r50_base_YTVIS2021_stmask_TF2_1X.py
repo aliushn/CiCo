@@ -1,4 +1,11 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VIS/r50_base_VIS.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/_base_/models/r101_base.yaml',
+          'configs/VIS/base_VIS.py']
+
+MODEL = dict(
+    BACKBONE=dict(
+        CONV_BODY='ResNet101',
+        PATH='STMask_resnet101_coco_960_52_220000.pth')
+)
 
 DATASETS = dict(
     TYPE='vis',
@@ -31,5 +38,5 @@ STMASK = dict(
 )
 
 OUTPUT_DIR = 'weights/YTVIS2021/'
-NAME = 'r50_base_YTVIS2021_stmask_TF2_1X'
+NAME = 'r101_base_YTVIS2021_stmask_TF2_1X'
 

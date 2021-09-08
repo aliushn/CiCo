@@ -1,4 +1,4 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VID/r50_base_VID.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VID/base_VID.py']
 
 MODEL = dict(
     BACKBONE=dict(
@@ -6,7 +6,7 @@ MODEL = dict(
         PATH='STMask_resnet50_coco_960_46_340000.pth'),
 
     TRACK_HEADS=dict(
-        TRAIN_TRACK=True)
+        TRAIN_TRACK=False)
 )
 
 DATASETS = dict(
@@ -15,7 +15,7 @@ DATASETS = dict(
     TRAIN='train_DET_dataset')
 
 SOLVER = dict(
-    IMS_PER_BATCH=6,
+    IMS_PER_BATCH=16,
     NUM_CLIP_FRAMES=1,
     LR=0.001,
     LR_STEPS=(12, 20),

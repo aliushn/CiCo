@@ -77,7 +77,7 @@ class MultiBoxLoss(nn.Module):
             self.clip_frames = self.cfg.SOLVER.NUM_CLIP_FRAMES
             predictions['priors'] = predictions['priors'].repeat(1, 1, self.clip_frames)
 
-        elif self.cfg.DATASETS.TYPE != 'coco':
+        elif self.cfg.DATASETS.TYPE not in {'coco', 'det'}:
             # In video domain, we load GT annotations as [n_objs, n_clip_frames, ...],
             # So we have to unfold them in the second dim to do frame-level detection or segmentation
             clip_frames = gt_boxes[0].size(1)
@@ -407,7 +407,7 @@ class MultiBoxLoss(nn.Module):
         sem_loss = 0
         # void out of memory so as to calcuate loss for a single image
         for idx in range(bs):
-            mask_t_downsample = F.interpolate(mask_t[idx].unsqueeze(0), (mask_h, mask_w),
+            mask_t_downsample = F.interpolate(mask_t[idx].float().unsqueeze(0), (mask_h, mask_w),
                                               mode=interpolation_mode, align_corners=False).squeeze(0).gt_(0.5)
 
             # prepare one-hat

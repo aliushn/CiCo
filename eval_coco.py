@@ -5,9 +5,7 @@ from layers.utils import jaccard, center_size, mask_iou, postprocess, undo_image
 from utils import timer
 from layers.visualization_temporal import get_color
 import pycocotools
-import torch.nn.functional as F
 import torch.utils.data as data
-
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
@@ -15,17 +13,16 @@ from torch.autograd import Variable
 import argparse
 import time
 import random
-import cProfile
 import pickle
 import json
 import os
 from collections import defaultdict
 from pathlib import Path
 from collections import OrderedDict
-from PIL import Image
 
 import matplotlib.pyplot as plt
 import cv2
+from configs.load_config import load_config
 
 
 def str2bool(v):
@@ -61,20 +58,12 @@ def parse_args(argv=None):
                         help='Whether or not to display scores in addition to classes')
     parser.add_argument('--display', dest='display', action='store_true',
                         help='Display qualitative results instead of quantitative ones.')
-    parser.add_argument('--ap_data_file', default='results/ap_data.pkl', type=str,
-                        help='In quantitative mode, the file to save detections before calculating mAP.')
     parser.add_argument('--resume', dest='resume', action='store_true',
                         help='If display not set, this resumes mAP calculations from the ap_data_file.')
     parser.add_argument('--max_images', default=-1, type=int,
                         help='The maximum number of images from the dataset to consider. Use -1 for all.')
     parser.add_argument('--output_coco_json', dest='output_coco_json', action='store_true',
                         help='If display is not set, instead of processing IoU values, this just dumps detections into the coco json file.')
-    parser.add_argument('--bbox_det_file', default='results/bbox_detections.json', type=str,
-                        help='The output file for coco bbox results if --coco_results is set.')
-    parser.add_argument('--mask_det_file', default='results/mask_detections.json', type=str,
-                        help='The output file for coco mask results if --coco_results is set.')
-    parser.add_argument('--save_path', default='weights/valid_metrics.txt',
-                        help='Directory for saving checkpoint models.')
     parser.add_argument('--config', default=None,
                         help='The config object to use.')
     parser.add_argument('--output_web_json', dest='output_web_json', action='store_true',
@@ -101,12 +90,8 @@ def parse_args(argv=None):
                         help='A path to a video to evaluate on. Passing in a number will use that index webcam.')
     parser.add_argument('--video_multiframe', default=1, type=int,
                         help='The number of frames to evaluate in parallel to make videos play at higher fps.')
-    parser.add_argument('--score_threshold', default=0, type=float,
-                        help='Detections with a score under this threshold will not be considered. This currently only works in display mode.')
     parser.add_argument('--dataset', default=None, type=str,
                         help='If specified, override the dataset specified in the config with this one (example: coco2017_dataset).')
-    parser.add_argument('--detect', default=False, dest='detect', action='store_true',
-                        help='Don\'t evauluate the mask branch at all and only do object detection. This only works for --display and --benchmark.')
     parser.add_argument('--display_fps', default=False, dest='display_fps', action='store_true',
                         help='When displaying / saving video, draw the FPS on the frame')
     parser.add_argument('--emulate_playback', default=False, dest='emulate_playback', action='store_true',
@@ -134,11 +119,13 @@ coco_cats_inv = {}
 color_cache = defaultdict(lambda: {})
 
 
-def prep_display(dets_out, img, ori_h, ori_w, img_h, img_w, img_ids, undo_transform=True, output_file=None,
+def prep_display(dets_out, img, img_meta, img_ids, undo_transform=True, output_file=None,
                  class_color=False, mask_alpha=0.45, fps_str=''):
     """
     Note: If undo_transform=False then im_h and im_w are allowed to be None.
     """
+    ori_h, ori_w = img_meta['ori_shape'][:2]
+    img_h, img_w = img_meta['img_shape'][:2]
     if undo_transform:
         img_numpy = undo_image_transformation(img, ori_h, ori_w, img_h, img_w)
         img_gpu = torch.Tensor(img_numpy).cuda()
@@ -245,8 +232,10 @@ def prep_display(dets_out, img, ori_h, ori_w, img_h, img_w, img_ids, undo_transf
     return img_numpy
 
 
-def prep_benchmark(dets_out, ori_h, ori_w, img_h, img_w, pad_h, pad_w, img_id):
+def prep_benchmark(dets_out, img_meta, pad_h, pad_w, img_id):
     with timer.env('Postprocess'):
+        ori_h, ori_w = img_meta['ori_shape'][:2]
+        img_h, img_w = img_meta['img_shape'][:2]
         s_h, s_w = img_h / pad_h, img_w / pad_w
         t = postprocess(dets_out, ori_h, ori_w, s_h, s_w, img_id, score_threshold=args.score_threshold)
 
@@ -358,15 +347,17 @@ class Detections:
             json.dump(output, f)
 
 
-def prep_metrics(ap_data, dets, gt, gt_masks, ori_h, ori_w, img_h, img_w, pad_h, pad_w, num_crowd, image_id,
-                 detections: Detections = None):
+def prep_metrics(ap_data, dets, gt_boxes, gt_labels, gt_masks, img_meta, num_crowd, image_id,
+                 score_threshold, detections: Detections = None):
     """ Returns a list of APs for this image, with each element being for a class  """
+    ori_h, ori_w = img_meta['ori_shape'][:2]
+    img_h, img_w = img_meta['img_shape'][:2]
+    pad_h, pad_w = img_meta['pad_shape'][:2]
     if not args.output_coco_json:
         with timer.env('Prepare gt'):
-            gt_boxes = gt[:, :4].cuda() if args.cuda else gt_masks
             gt_boxes[:, [0, 2]] *= ori_w
             gt_boxes[:, [1, 3]] *= ori_h
-            gt_classes = gt[:, 4].long().tolist()
+            gt_classes = gt_labels.long().tolist()
             gt_masks = gt_masks.cuda() if args.cuda else gt_masks
 
             if num_crowd > 0:
@@ -378,7 +369,7 @@ def prep_metrics(ap_data, dets, gt, gt_masks, ori_h, ori_w, img_h, img_w, pad_h,
     with timer.env('Postprocess'):
         s_h, s_w = img_h / pad_h, img_w / pad_w
         classes, scores, boxes, masks = postprocess(dets, ori_h, ori_w, s_h, s_w, image_id,
-                                                    score_threshold=args.score_threshold)
+                                                    score_threshold=score_threshold)
 
         if classes.size(0) == 0:
             return
@@ -577,7 +568,7 @@ def evalimage(net: STMask, path: str, save_path: str = None):
     batch = FastBaseTransform()(frame.unsqueeze(0))
     preds = net(batch)
 
-    img_numpy = prep_display(preds, frame, None, None, None, None, undo_transform=False)
+    img_numpy = prep_display(preds, frame, None, undo_transform=False)
 
     if save_path is None:
         img_numpy = img_numpy[:, :, (2, 1, 0)]
@@ -854,30 +845,8 @@ def evalvideo(net: STMask, path: str, out_path: str = None):
     cleanup_and_exit()
 
 
-def evaluate(net: STMask, dataset_config, train_mode=False, epoch=None, iteration=None):
-
-    # TODO Currently we do not support Fast Mask Re-scroing in evalimage, evalimages, and evalvideo
-    if args.image is not None:
-        if ':' in args.image:
-            inp, out = args.image.split(':')
-            evalimage(net, inp, out)
-        else:
-            evalimage(net, args.image)
-        return
-    elif args.images is not None:
-        inp, out = args.images.split(':')
-        evalimages(net, inp, out)
-        return
-    elif args.video is not None:
-        if ':' in args.video:
-            inp, out = args.video.split(':')
-            evalvideo(net, inp, out)
-        else:
-            evalvideo(net, args.video)
-        return
-
-    dataset = get_dataset('coco', dataset_config, cfg.backbone.transform, inference=True)
-
+def evaluate(cfg, net: STMask, train_mode=False, epoch=None, iteration=None):
+    dataset = get_dataset('coco', cfg.DATASETS.VALID, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES, inference=True)
     frame_times = MovingAverage()
     dataset_size = len(dataset) // args.batch_size if args.max_images < 0 else min(args.max_images, len(dataset))
     progress_bar = ProgressBar(30, dataset_size)
@@ -888,8 +857,8 @@ def evaluate(net: STMask, dataset_config, train_mode=False, epoch=None, iteratio
         # For each class and iou, stores tuples (score, isPositive)
         # Index ap_data[type][iouIdx][classIdx]
         ap_data = {
-            'box': [[APDataObject() for _ in cfg.train_dataset.class_names] for _ in iou_thresholds],
-            'mask': [[APDataObject() for _ in cfg.train_dataset.class_names] for _ in iou_thresholds]
+            'box': [[APDataObject() for _ in dataset.class_names] for _ in iou_thresholds],
+            'mask': [[APDataObject() for _ in dataset.class_names] for _ in iou_thresholds]
         }
         detections = Detections()
     else:
@@ -906,7 +875,10 @@ def evaluate(net: STMask, dataset_config, train_mode=False, epoch=None, iteratio
             timer.reset()
 
             with timer.env('Load Data'):
-                imgs, targets, gt_masks, num_crowds, ori_shapes = data_batch
+                imgs, gt_boxes, gt_labels, gt_masks, num_crowds, img_metas = data_batch
+                gt_boxes = [torch.from_numpy(boxes).cuda() for boxes in gt_boxes]
+                gt_labels = [torch.from_numpy(labels).cuda() for labels in gt_labels]
+                gt_masks = [torch.from_numpy(masks).cuda() for masks in gt_masks]
                 imgs = Variable(imgs)
                 if args.cuda:
                     imgs = imgs.cuda()
@@ -918,27 +890,20 @@ def evaluate(net: STMask, dataset_config, train_mode=False, epoch=None, iteratio
 
             for jdx in range(imgs.size(0)):
                 pad_h, pad_w = imgs[jdx].size()[-2:]
-                ori_h, ori_w = ori_shapes[jdx]
-                if dataset_config.preserve_aspect_ratio:
-                    if (ori_h / float(ori_w)) < (pad_h / float(pad_w)):
-                        img_w, img_h = pad_w, int(ori_h * (pad_w / ori_w))
-                    else:
-                        img_w, img_h = int(ori_w * (pad_h / ori_h)), pad_h
-                else:
-                    img_w, img_h = pad_w, pad_h
+                img_metas[jdx]['pad_shape'] = (pad_h, pad_w, 3)
 
                 # Perform the meat of the operation here depending on our mode.
                 if args.display:
-                    img_numpy = prep_display(preds[jdx], imgs[jdx], ori_h, ori_w, img_h, img_w, img_ids[jdx],
+                    img_numpy = prep_display(preds[jdx], imgs[jdx], img_metas[jdx], img_ids[jdx],
                                              output_file=args.mask_det_file[:-12])
                 elif args.benchmark:
-                    prep_benchmark(preds[jdx], ori_h, ori_w, img_h, img_w, img_ids[jdx])
+                    prep_benchmark(preds[jdx], img_metas[jdx], img_ids[jdx])
                 else:
-                    prep_metrics(ap_data, preds[jdx], targets[jdx], gt_masks[jdx], ori_h, ori_w,
-                                 img_h, img_w, pad_h, pad_w, num_crowds[jdx], img_ids[jdx], detections)
+                    prep_metrics(ap_data, preds[jdx], gt_boxes[jdx], gt_labels[jdx], gt_masks[jdx], img_metas[jdx],
+                                 num_crowds[jdx], img_ids[jdx], cfg.TEST.NMS_CONF_THRESH, detections)
 
                 if args.display:
-                    root_dir = os.path.join(args.mask_det_file[:-12], 'out')
+                    root_dir = os.path.join(cfg.OUTPUT_DIR, 'out')
                     if not os.path.exists(root_dir):
                         os.makedirs(root_dir)
 
@@ -974,10 +939,11 @@ def evaluate(net: STMask, dataset_config, train_mode=False, epoch=None, iteratio
             else:
                 if not train_mode:
                     print('Saving data...')
-                    with open(args.ap_data_file, 'wb') as f:
-                        pickle.dump(ap_data, f)
+                    # ap_data_file = os.path.join(cfg.OUTPUT_DIR, 'ap_data.pkl')
+                    # with open(ap_data_file, 'wb') as f:
+                    #     pickle.dump(ap_data, f)
 
-                return calc_map(ap_data, epoch, iteration)
+                return calc_map(ap_data, epoch, iteration, cfg.OUTPUT_DIR, class_names=dataset.class_names)
         elif args.benchmark:
             print()
             print()
@@ -990,11 +956,11 @@ def evaluate(net: STMask, dataset_config, train_mode=False, epoch=None, iteratio
         print('Stopping...')
 
 
-def calc_map(ap_data, epoch=None, iteration=None):
+def calc_map(ap_data, epoch=None, iteration=None, output_dir=None, class_names=None):
     print('Calculating mAP...')
     aps = [{'box': [], 'mask': []} for _ in iou_thresholds]
 
-    for _class in range(len(cfg.train_dataset.class_names)):
+    for _class in range(len(class_names)):
         for iou_idx in range(len(iou_thresholds)):
             for iou_type in ('box', 'mask'):
                 ap_obj = ap_data[iou_type][iou_idx][_class]
@@ -1012,14 +978,14 @@ def calc_map(ap_data, epoch=None, iteration=None):
             all_maps[iou_type][int(threshold * 100)] = mAP
         all_maps[iou_type]['all'] = (sum(all_maps[iou_type].values()) / (len(all_maps[iou_type].values()) - 1))
 
-    print_maps(all_maps, epoch, iteration)
+    print_maps(all_maps, epoch, iteration, output_dir)
 
     # Put in a prettier format so we can serialize it to json during training
     all_maps = {k: {j: round(u, 2) for j, u in v.items()} for k, v in all_maps.items()}
     return all_maps
 
 
-def print_maps(all_maps, epoch, iteration):
+def print_maps(all_maps, epoch, iteration, output_dir):
     # Warning: hacky
     make_row = lambda vals: (' %5s |' * len(vals)) % tuple(vals)
     make_sep = lambda n: ('-------+' * n)
@@ -1032,41 +998,31 @@ def print_maps(all_maps, epoch, iteration):
     print(make_sep(len(all_maps['box']) + 1))
     print()
 
-    if args.save_path is not None:
+    if output_dir is not None:
+        output_path = os.path.join(output_dir, 'metrics.txt')
         print()
-        print('epoch:', epoch, 'iteration:', iteration, file=open(args.save_path, "a"))
+        print('epoch:', epoch, 'iteration:', iteration, file=open(output_path, "a"))
         print(make_row([''] + [('.%d ' % x if isinstance(x, int) else x + ' ') for x in all_maps['box'].keys()]),
-              file=open(args.save_path, "a"))
-        print(make_sep(len(all_maps['box']) + 1), file=open(args.save_path, "a"))
+              file=open(output_path, "a"))
+        print(make_sep(len(all_maps['box']) + 1), file=open(output_path, "a"))
         for iou_type in ('box', 'mask'):
             print(make_row([iou_type] + ['%.2f' % x if x < 100 else '%.1f' % x for x in all_maps[iou_type].values()]),
-                  file=open(args.save_path, "a"))
-        print(make_sep(len(all_maps['box']) + 1), file=open(args.save_path, "a"))
+                  file=open(output_path, "a"))
+        print(make_sep(len(all_maps['box']) + 1), file=open(output_path, "a"))
 
 
 if __name__ == '__main__':
     parse_args()
 
     if args.config is not None:
-        set_cfg(args.config)
-
-    if args.trained_model == 'interrupt':
-        args.trained_model = SavePath.get_interrupt('weights/')
-    elif args.trained_model == 'latest':
-        args.trained_model = SavePath.get_latest('weights/', cfg.name)
-
-    if args.config is None:
+        cfg = load_config(args.config)
+    else:
         model_path = SavePath.from_str(args.trained_model)
         # TODO: Bad practice? Probably want to do a name lookup instead.
         args.config = model_path.model_name + '_config'
         print('Config not specified. Parsed %s from the file name.\n' % args.config)
-        set_cfg(args.config)
-
-    if args.detect:
-        cfg.eval_mask_branch = False
-
-    if args.dataset is not None:
-        set_dataset(args.dataset)
+        cfg = load_config(args.config)
+    cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, cfg.NAME)
 
     with torch.no_grad():
         if not os.path.exists('results'):
@@ -1085,7 +1041,7 @@ if __name__ == '__main__':
             exit()
 
         print('Loading model...', end='')
-        net = STMask()
+        net = STMask(cfg)
         net.load_weights(args.trained_model)
         net.eval()
         print(' Done.')
@@ -1093,7 +1049,25 @@ if __name__ == '__main__':
         if args.cuda:
             net = net.cuda()
 
-        if args.image is None and args.video is None and args.images is None:
-            evaluate(net, cfg.valid_dataset)
+        # TODO Currently we do not support Fast Mask Re-scroing in evalimage, evalimages, and evalvideo
+        if args.image is not None:
+            if ':' in args.image:
+                inp, out = args.image.split(':')
+                evalimage(net, inp, out)
+            else:
+                evalimage(net, args.image)
+
+        elif args.images is not None:
+            inp, out = args.images.split(':')
+            evalimages(net, inp, out)
+
+        elif args.video is not None:
+            if ':' in args.video:
+                inp, out = args.video.split(':')
+                evalvideo(net, inp, out)
+            else:
+                evalvideo(net, args.video)
+        else:
+            evaluate(cfg, net)
 
 

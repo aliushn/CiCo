@@ -1,0 +1,7 @@
+MODEL:
+  BACKBONE:
+    CONV_BODY: 'ResNet101'
+    PATH: 'resnet101_reducedfc.pth'
+    ARGS: ([3, 4, 23, 3], [0, 4, 23, 3], 3)
+
+NAME: 'r101_plus_base'
