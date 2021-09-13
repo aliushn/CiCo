@@ -208,6 +208,8 @@ class YTVOSDataset(data.Dataset):
 
             clip_masks = np.stack(clip_masks, axis=0)
             clip_boxes = np.stack(clip_boxes, axis=0)
+            clip_labels = np.array(clip_labels)
+            clip_obj_ids = np.array(clip_obj_ids)
 
             return imgs, img_meta, (clip_masks, clip_boxes, clip_labels, clip_obj_ids)
         else:
@@ -400,10 +402,10 @@ def prepare_data_vis(data_batch, devices):
         image_metas_list = []
         for idx, device in enumerate(devices):
             images_list.append(gradinator(images[idx * n:(idx + 1) * n].reshape(-1, 3, h, w).to(device)))
-            masks_list.append([gradinator(torch.tensor(masks[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
-            bboxes_list.append([gradinator(torch.tensor(bboxes[jdx], dtype=torch.float32).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
-            labels_list.append([gradinator(torch.tensor(labels[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
-            obj_ids_list.append([gradinator(torch.tensor(obj_ids[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            masks_list.append([gradinator(torch.from_numpy(masks[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            bboxes_list.append([gradinator(torch.from_numpy(bboxes[jdx]).float().to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            labels_list.append([gradinator(torch.from_numpy(labels[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            obj_ids_list.append([gradinator(torch.from_numpy(obj_ids[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
             num_crowds_list.append([0] * n)
             image_metas_list.append(image_metas[idx * n:(idx + 1) * n])
 

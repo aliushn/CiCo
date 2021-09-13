@@ -69,6 +69,10 @@ class PredictionModule(nn.Module):
             self.bbox_layer = nn.Conv2d(self.in_channels, self.num_priors*4*self.clip_frames,
                                         kernel_size=kernel_size, padding=padding)
 
+            if cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
+                self.circumscribed_bbox_layer = nn.Conv2d(self.in_channels, self.num_priors*4,
+                                                          kernel_size=kernel_size, padding=padding)
+
             if cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
                 if cfg.STMASK.FC.FCB_USE_DCN_CLASS:
                     self.conf_layer = FeatureAlign(self.in_channels,
@@ -146,6 +150,9 @@ class PredictionModule(nn.Module):
         bbox_x = src.bbox_extra(x)
         bbox = src.bbox_layer(bbox_x)
         preds['loc'] = bbox.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, 4*self.clip_frames)
+
+        if self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
+            preds['loc_cir'] = src.circumscribed_bbox_layer(bbox_x).permute(0, 2, 3, 1).contiguous().reshape(bs, -1, 4)
 
         # Classification
         if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:

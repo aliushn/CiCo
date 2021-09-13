@@ -1,12 +1,12 @@
 """ Contains functions used to sanitize and prepare the output of Yolact. """
 import torch
-import torch.nn as nn
+import cv2
 import torch.nn.functional as F
 import numpy as np
 
-from datasets import MEANS, STD, activation_func
+from datasets import MEANS, STD
 import os
-from ..utils import sanitize_coordinates, center_size, generate_single_mask, jaccard
+from ..utils import sanitize_coordinates, center_size, generate_single_mask, jaccard, point_form
 
 
 def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, train_masks=True, interpolation_mode='bilinear',
@@ -118,8 +118,15 @@ def postprocess_ytbvis(dets_output, img_meta, train_masks=True, mask_proto_coeff
     boxes[:, 1::2] /= s_h
     boxes[:, 0], boxes[:, 2] = sanitize_coordinates(boxes[:, 0], boxes[:, 2], ori_w, cast=False)
     boxes[:, 1], boxes[:, 3] = sanitize_coordinates(boxes[:, 1], boxes[:, 3], ori_h, cast=False)
-
     dets['box'] = boxes.long()
+
+    if 'priors' in dets.keys():
+        priors = point_form(dets['priors'])
+        priors[:, 0::2] /= s_w
+        priors[:, 1::2] /= s_h
+        priors[:, 0], priors[:, 2] = sanitize_coordinates(priors[:, 0], priors[:, 2], ori_w, cast=False)
+        priors[:, 1], priors[:, 3] = sanitize_coordinates(priors[:, 1], priors[:, 3], ori_h, cast=False)
+        dets['priors'] = priors.long()
 
     # Actually extract everything from dets now
     if train_masks:
@@ -165,17 +172,17 @@ def undo_image_transformation(img, ori_h, ori_w, img_h=None, img_w=None, interpo
     img = F.interpolate(img.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode,
                         align_corners=False).squeeze(0)
 
-    img_numpy = img.permute(1, 2, 0).cpu().numpy()
-    img_numpy = img_numpy[:, :, (2, 1, 0)]  # To BRG
+    img = img.permute(1, 2, 0).contiguous()
+    img = img[:, :, (2, 1, 0)]  # To BRG
 
     # TODO: If the backbone is not Resnet, please double check the image transformation according to backbone.py
     # if cfg.backbone.transform.normalize:
-    img_numpy = (img_numpy * np.array(STD) + np.array(MEANS)) / 255.0
+    img = (img * torch.tensor(STD) + torch.tensor(MEANS)) / 255.0
     # elif cfg.backbone.transform.subtract_means:
     #     img_numpy = (img_numpy / 255.0 + np.array(MEANS) / 255.0).astype(np.float32)
 
-    img_numpy = img_numpy[:, :, (2, 1, 0)]  # To RGB
-    img_numpy = np.clip(img_numpy, 0, 1)
+    img = img[:, :, (2, 1, 0)]  # To RGB
+    img_numpy = torch.clamp(img, 0, 1).cpu().numpy()
 
     return img_numpy
 

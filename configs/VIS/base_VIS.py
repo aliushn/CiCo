@@ -10,7 +10,7 @@ MODEL = dict(
         USE_DIoU=True,
         CUBIC_MODE=False,
         CUBIC_CORRELATION_MODE=False,
-        USE_PREDICTION_MATCHING=True),
+        USE_PREDICTION_MATCHING=False),
 
     BOX_HEADS=dict(
         TRAIN_BOXES=True,
@@ -26,7 +26,7 @@ MODEL = dict(
         TRAIN_TRACK=True,
         TRACK_DIM=64,
         LOSS_ALPHA=5,
-        MATCH_COEFF=[0, 1, 1, 0]),
+        MATCH_COEFF=[0, 0.5, 0.5, 0.3]),   # scores, mask_iou, box_iou, label
     
     MASK_HEADS=dict(
         TRAIN_MASKS=True,
@@ -48,12 +48,12 @@ INPUT = dict(
     SIZE_DIVISOR=32)
     
 SOLVER = dict(
-    IMS_PER_BATCH=8,
+    IMS_PER_BATCH=4,
     NUM_CLIP_FRAMES=2,
     LR=0.0001,
     LR_STEPS=(8, 10),
     MAX_EPOCH=12,
-    SAVE_INTERVAL=5000)
+    SAVE_INTERVAL=50)
     
 TEST = dict(
     IMS_PER_BATCH=1,

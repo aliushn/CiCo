@@ -1,6 +1,10 @@
 _base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VID/base_VID.py']
 
 MODEL = dict(
+    BACKBONE=dict(
+        CONV_BODY='ResNet50',
+        PATH='STMask_plus_resnet50_DET_960_22_50000.pth'),
+
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
         CUBIC_CORRELATION_MODE=False,

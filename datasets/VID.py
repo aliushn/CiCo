@@ -167,6 +167,8 @@ class VIDDataset(torch.utils.data.Dataset):
                     clip_boxes_occluded.append(np.stack(boxes_occluded_obj, axis=0))
                 clip_boxes = np.stack(clip_boxes, axis=0)
                 clip_boxes_occluded = np.stack(clip_boxes_occluded, axis=0)
+                clip_labels = np.array(clip_labels)
+                clip_obj_ids = np.array(clip_obj_ids)
                 return imgs, img_meta, (clip_boxes, clip_labels, clip_obj_ids, clip_boxes_occluded)
             else:
                 return imgs, img_meta, (boxes[0], labels[0], obj_ids, boxes_occluded)
@@ -477,10 +479,10 @@ def prepare_data_vid(data_batch, devices):
         for idx, device in enumerate(devices):
             images_list.append(gradinator(images[idx * n:(idx + 1) * n].reshape(-1, 3, h, w).to(device)))
             masks_list.append([None] * n)
-            bboxes_list.append([gradinator(torch.tensor(bboxes[jdx], dtype=torch.float32).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
-            labels_list.append([gradinator(torch.tensor(labels[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            bboxes_list.append([gradinator(torch.from_numpy(bboxes[jdx]).float().to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+            labels_list.append([gradinator(torch.from_numpy(labels[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
             if obj_ids is not None and len(obj_ids) > 0:
-                obj_ids_list.append([gradinator(torch.tensor(obj_ids[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
+                obj_ids_list.append([gradinator(torch.from_numpy(obj_ids[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
             else:
                 obj_ids_list.append([None] * n)
             num_crowds_list.append([0] * n)

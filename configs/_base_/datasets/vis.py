@@ -47,76 +47,89 @@ class DatasetCatalog_vis(object):
         # Whether or not to load GT. If this is False, eval.py quantitative evaluation won't work.
         'has_gt': True,
         'with_crowd': False,
+        'class_names': YouTube_VOS_CLASSES,
     }
 
     # YouTube 2019
     train_YouTube_VOS2019_dataset = copy.deepcopy(dataset_base_vis)
     train_YouTube_VOS2019_dataset['name'] = 'YTVIS2019_train'
     train_YouTube_VOS2019_dataset['img_prefix'] = 'YouTube_VOS2019/train/JPEGImages'
-    train_YouTube_VOS2019_dataset['ann_file'] = 'YouTube_VOS2019/annotations_instances/train.json'
+    train_YouTube_VOS2019_dataset['ann_file'] = 'YouTube_VOS2019/annotations_instances/valid_sub.json'
+    train_YouTube_VOS2019_dataset['class_names'] = YouTube_VOS_CLASSES
 
     valid_sub_YouTube_VOS2019_dataset = copy.deepcopy(dataset_base_vis)
     valid_sub_YouTube_VOS2019_dataset['name'] = 'YTVIS2019_valid_sub'
     valid_sub_YouTube_VOS2019_dataset['img_prefix'] = 'YouTube_VOS2019/train/JPEGImages'
     valid_sub_YouTube_VOS2019_dataset['ann_file'] = 'YouTube_VOS2019/annotations_instances/valid_sub.json'
+    valid_sub_YouTube_VOS2019_dataset['class_names'] = YouTube_VOS_CLASSES
 
     valid_YouTube_VOS2019_dataset = copy.deepcopy(dataset_base_vis)
     valid_YouTube_VOS2019_dataset['name'] = 'YTVIS2019_valid'
     valid_YouTube_VOS2019_dataset['img_prefix'] = 'YouTube_VOS2019/valid/JPEGImages'
     valid_YouTube_VOS2019_dataset['ann_file'] = 'YouTube_VOS2019/annotations_instances/valid.json'
     valid_YouTube_VOS2019_dataset['has_gt'] = False
+    valid_YouTube_VOS2019_dataset['class_names'] = YouTube_VOS_CLASSES
 
     test_YouTube_VOS2019_dataset = copy.deepcopy(dataset_base_vis)
     test_YouTube_VOS2019_dataset['name'] = 'YTVIS2019_test'
     test_YouTube_VOS2019_dataset['img_prefix'] = 'YouTube_VOS2019/test/JPEGImages'
     test_YouTube_VOS2019_dataset['ann_file'] = 'YouTube_VOS2019/annotations_instances/test.json'
     test_YouTube_VOS2019_dataset['has_gt'] = False
+    test_YouTube_VOS2019_dataset['class_names'] = YouTube_VOS_CLASSES
 
     # YouTube 2021
     train_YouTube_VOS2021_dataset = copy.deepcopy(dataset_base_vis)
     train_YouTube_VOS2021_dataset['name'] = 'YTVIS2021_train'
     train_YouTube_VOS2021_dataset['img_prefix'] = 'YouTube_VOS2021/train/JPEGImages'
-    train_YouTube_VOS2021_dataset['ann_file'] = 'YouTube_VOS2021/train/valid_sub_150.json'
+    train_YouTube_VOS2021_dataset['ann_file'] = 'YouTube_VOS2021/train/instances.json'
+    train_YouTube_VOS2021_dataset['class_names'] = YouTube_VOS2021_CLASSES
 
     valid_sub_YouTube_VOS2021_dataset = copy.deepcopy(dataset_base_vis)
     valid_sub_YouTube_VOS2021_dataset['name'] = 'YTVIS2021_valid_sub'
     valid_sub_YouTube_VOS2021_dataset['img_prefix'] = 'YouTube_VOS2021/train/JPEGImages'
     valid_sub_YouTube_VOS2021_dataset['ann_file'] = 'YouTube_VOS2021/train/valid_sub_150.json'
+    valid_sub_YouTube_VOS2021_dataset['class_names'] = YouTube_VOS2021_CLASSES
 
     valid_YouTube_VOS2021_dataset = copy.deepcopy(dataset_base_vis)
     valid_YouTube_VOS2021_dataset['name'] = 'YTVIS2021_valid'
     valid_YouTube_VOS2021_dataset['img_prefix'] = 'YouTube_VOS2021/valid/JPEGImages'
     valid_YouTube_VOS2021_dataset['ann_file'] = 'YouTube_VOS2021/valid/instances.json'
     valid_YouTube_VOS2021_dataset['has_gt'] = False
+    valid_YouTube_VOS2021_dataset['class_names'] = YouTube_VOS2021_CLASSES
 
     test_YouTube_VOS2021_dataset = copy.deepcopy(dataset_base_vis)
     test_YouTube_VOS2021_dataset['name'] = 'YTVIS2021_test'
     test_YouTube_VOS2021_dataset['img_prefix'] = 'YouTube_VOS2021/test/JPEGImages'
     test_YouTube_VOS2021_dataset['ann_file'] = 'YouTube_VOS2021/test/instances.json'
     test_YouTube_VOS2021_dataset['has_gt'] = False
+    test_YouTube_VOS2021_dataset['class_names'] = YouTube_VOS2021_CLASSES
 
     # OVIS 2021
     train_OVIS_dataset = copy.deepcopy(dataset_base_vis)
     train_OVIS_dataset['name'] = 'OVIS_train'
     train_OVIS_dataset['img_prefix'] = 'OVIS/train'
     train_OVIS_dataset['ann_file'] = 'OVIS/annotations_train.json'
+    train_OVIS_dataset['class_names'] = OVIS_CLASSES
 
     valid_sub_OVIS_dataset = copy.deepcopy(dataset_base_vis)
     valid_sub_OVIS_dataset['name'] = 'OVIS_valid_sub'
     valid_sub_OVIS_dataset['img_prefix'] = 'OVIS/train'
     valid_sub_OVIS_dataset['ann_file'] = 'OVIS/annotations_valid_sub.json'
+    valid_sub_OVIS_dataset['class_names'] = OVIS_CLASSES
 
     valid_OVIS_dataset = copy.deepcopy(dataset_base_vis)
     valid_OVIS_dataset['name'] = 'OVIS_valid'
     valid_OVIS_dataset['img_prefix'] = 'OVIS/valid'
     valid_OVIS_dataset['ann_file'] = 'OVIS/annotations_valid.json'
     valid_OVIS_dataset['has_gt'] = False
+    valid_OVIS_dataset['class_names'] = OVIS_CLASSES
 
     test_OVIS_dataset = copy.deepcopy(dataset_base_vis)
     test_OVIS_dataset['name'] = 'OVIS_test'
     test_OVIS_dataset['img_prefix'] = 'OVIS/test'
     test_OVIS_dataset['ann_file'] = 'OVIS/annotations_test.json'
     test_OVIS_dataset['has_gt'] = False
+    test_OVIS_dataset['class_names'] = OVIS_CLASSES
 
     DATASETS = {
         'train_YouTube_VOS2019_dataset': train_YouTube_VOS2019_dataset,

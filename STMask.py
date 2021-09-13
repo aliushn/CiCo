@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 from collections import defaultdict
 
-from layers.modules import PredictionModule_FC, PredictionModule, make_net, FPN, BiFPN, TemporalNet, DynamicMaskHead
+from layers.modules import PredictionModule_FC, PredictionModule, PredictionModule_3D, make_net, FPN, BiFPN, TemporalNet, DynamicMaskHead
 from layers.functions import Detect, Track, Track_TF, Track_TF_Clip
 from layers.utils import aligned_bilinear, correlate_operator
 from backbone import construct_backbone
@@ -33,28 +33,41 @@ class STMask(nn.Module):
         self.cfg = cfg
         self.backbone = construct_backbone(cfg.MODEL.BACKBONE)
         src_channels = self.backbone.channels
-        self.clip_frames = 1
+        in_channels = cfg.MODEL.FPN.NUM_FEATURES
+        self.clip_frames, self.reduced_scale = 1, 1
+        self.block_diagonal = True
 
         # Some hacky rewiring to accomodate the FPN
         self.fpn = FPN([src_channels[i] for i in cfg.MODEL.BACKBONE.SELECTED_LAYERS])
         self.selected_layers = list(range(len(cfg.MODEL.BACKBONE.SELECTED_LAYERS)+cfg.MODEL.FPN.NUM_DOWNSAMPLE))
         self.fpn_num_features = cfg.MODEL.FPN.NUM_FEATURES
         self.fpn_num_downsample = cfg.MODEL.FPN.NUM_DOWNSAMPLE
-        src_channels = [self.fpn_num_features] * len(self.selected_layers)
+        if cfg.MODEL.FPN.USE_BIFPN:
+            self.bifpn = nn.Sequential(*[BiFPN(self.fpn_num_features) for _ in range(cfg.num_bifpn)])
 
         if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
             self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-            if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_WITH_INITIALIZATION == 'reduced':
-                self.fpn_num_features //= self.clip_frames
+            self.init_cubic_mode = cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_WITH_INITIALIZATION
+            if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
+                if self.init_cubic_mode == 'reduced':
+                    self.reduced_scale = 2
+                    self.fpn_reduced_channels = nn.Sequential(*[
+                        nn.Conv2d(in_channels, in_channels//self.reduced_scale, kernel_size=1, padding=0),
+                        nn.ReLU(inplace=True)
+                    ])
 
+        # inflated channels in temporal direction
+        if cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
+            src_channels = [self.fpn_num_features] * len(self.selected_layers)
+        else:
+            src_channels = [self.clip_frames//self.reduced_scale*self.fpn_num_features] * len(self.selected_layers)
             if cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
                 self.correlation_patch_size = cfg.MODEL.PREDICTION_HEADS.CORRELATION_PATCH_SIZE
-                src_channels = [self.clip_frames*self.fpn_num_features+self.correlation_patch_size**2] * len(self.selected_layers)
-            else:
-                src_channels = [self.clip_frames*self.fpn_num_features] * len(self.selected_layers)
-
-        if cfg.MODEL.FPN.USE_BIFPN:
-            self.bifpn = nn.Sequential(*[BiFPN(self.fpn_num_features) for _ in range(cfg.num_bifpn)])
+                src_channels = [channels+self.correlation_patch_size**2 for channels in src_channels]
+                # Flag channels that not belong to correlation
+                self.flag_noncorr_channels = torch.ones(src_channels[0])
+                for c in range(1, self.clip_frames):
+                    self.flag_corr_channels[src_channels[c]-self.correlation_patch_size**2: src_channels[c]] = 0
 
         # ------------ build ProtoNet ------------
         self.train_masks = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
@@ -81,12 +94,6 @@ class STMask(nn.Module):
         self.pred_scales = cfg.MODEL.BACKBONE.PRED_SCALES
         self.pred_aspect_ratios = cfg.MODEL.BACKBONE.PRED_ASPECT_RATIOS
         self.num_priors = len(self.pred_scales[0]) * len(self.pred_aspect_ratios[0][0])
-        # reduced channels
-        if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_WITH_INITIALIZATION == 'reduced':
-            self.fpn_reduced_channels = nn.Sequential(*[
-                nn.Conv2d(in_channels, in_channels//self.clip_frames, kernel_size=1, padding=0),
-                nn.ReLU(inplace=True)
-            ])
         # prediction layers for loc, conf, mask, track
         self.prediction_layers = nn.ModuleList()
         for idx, layer_idx in enumerate(self.selected_layers):
@@ -95,24 +102,33 @@ class STMask(nn.Module):
             if cfg.MODEL.PREDICTION_HEADS.SHARE_PREDICTION_MODULE and idx > 0:
                 parent = self.prediction_layers[0]
 
-            if cfg.STMASK.FC.USE_FCA:
-                pred = PredictionModule_FC(cfg, src_channels[idx],
+            if cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
+                pred = PredictionModule_3D(cfg, src_channels[idx],
                                            deform_groups=1,
+                                           pred_aspect_ratios=self.pred_aspect_ratios[idx],
                                            pred_scales=self.pred_scales[idx],
                                            parent=parent)
             else:
-                pred = PredictionModule(cfg, src_channels[idx],
-                                        deform_groups=1,
-                                        pred_aspect_ratios=self.pred_aspect_ratios[idx],
-                                        pred_scales=self.pred_scales[idx],
-                                        parent=parent)
+                if cfg.STMASK.FC.USE_FCA:
+                    pred = PredictionModule_FC(cfg, src_channels[idx],
+                                               deform_groups=1,
+                                               pred_scales=self.pred_scales[idx],
+                                               parent=parent)
+                else:
+                    pred = PredictionModule(cfg, src_channels[idx],
+                                            deform_groups=1,
+                                            pred_aspect_ratios=self.pred_aspect_ratios[idx],
+                                            pred_scales=self.pred_scales[idx],
+                                            parent=parent)
 
             self.prediction_layers.append(pred)
 
         # ---------------- Build detection ----------------
         self.Detect = Detect(cfg.DATASETS.NUM_CLASSES, cfg.TEST.DETECTIONS_PER_IMG, cfg.TEST.NMS_CONF_THRESH,
                              nms_thresh=cfg.TEST.NMS_IoU_THRESH, train_masks=self.train_masks,
-                             nms_with_miou=cfg.TEST.NMS_WITH_MIoU, use_DIoU=cfg.MODEL.PREDICTION_HEADS.USE_DIoU)
+                             nms_with_miou=cfg.TEST.NMS_WITH_MIoU, use_DIoU=cfg.MODEL.PREDICTION_HEADS.USE_DIoU,
+                             cubic_mode=cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE,
+                             circumscribed_boxes=cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES)
 
         # ---------------- Build track head ----------------
         if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
@@ -185,9 +201,9 @@ class STMask(nn.Module):
         model_dict = self.state_dict()
 
         # Initialize the rest of the conv layers with xavier
-        print('init all weights by Xavier:')
+        print('Init all weights by Xavier:')
         for name, module in self.named_modules():
-            if isinstance(module, nn.Conv2d):
+            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Conv3d):
                 nn.init.xavier_uniform_(module.weight.data)
                 if module.bias is not None:
                     if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS and 'conf_layer' in name:
@@ -199,14 +215,7 @@ class STMask(nn.Module):
 
                 if name+'.weight' not in state_dict.keys():
                     print('parameters in current model but not in pre-trained model:', name)
-
-        # If use correlation to encode temporal information, we only inflated weights from 2D to 3D in some channels
-        if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE and self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
-            idx = []
-            idx += range(self.fpn_num_features)
-            for c in range(1, self.clip_frames):
-                left = c*(self.fpn_num_features+self.correlation_patch_size**2)
-                idx += range(left, left+self.fpn_num_features)
+        print('Finish init all weights by Xavier.')
 
         # only update same modules and layers between pre-trained model and our model
         for key in list(state_dict.keys()):
@@ -217,49 +226,67 @@ class STMask(nn.Module):
                     if 'conf_layer' in key:
                         continue
 
-                    # Inflated or reduced weights from 2D (single frame) to 3D (multi-frames)
-                    if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_WITH_INITIALIZATION == 'reduced':
-                        print('load parameters with reduced channels operation from pre-trained models:', key)
-                        if key.split('.')[-2] in {'bbox_layer', 'centerness_layer'}:
-                            if state_dict[key].dim() == 4:
-                                _, c_in, kh, kw = state_dict[key].shape
-                                init_weights = state_dict[key].reshape(self.num_priors, -1, c_in, kh, kw).repeat(1, self.clip_frames, 1, 1, 1).reshape(-1, c_in, kh, kw)
-                            else:
-                                init_weights = state_dict[key].reshape(self.num_priors, -1).repeat(1, self.clip_frames).reshape(-1)
+                    if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
+                        print('load 3D parameters with inflated operation from pre-trained models:', key)
+                        if key.split('.')[-2] in {'bbox_layer', 'centerness_layer', 'mask_layer'}:
+                            model_dict[key] = state_dict[key].unsqueeze(2).to(model_dict[key].device)
                         else:
-                            init_weights = state_dict[key]
+                            model_dict[key] = (state_dict[key].unsqueeze(2).repeat(1,1,3,1,1) / 3.).to(model_dict[key].device)
 
-                    elif self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_WITH_INITIALIZATION == 'inflated':
-                        print('load parameters with inflated operation from pre-trained models:', key)
-                        if key.split('.')[-2] in {'bbox_layer', 'centerness_layer'}:
-                            if state_dict[key].dim() == 4:
-                                _, c_in, kh, kw = state_dict[key].shape
-                                init_weights = state_dict[key].reshape(self.num_priors, -1, c_in, kh, kw).repeat(1, self.clip_frames, self.clip_frames, 1, 1).reshape(-1, self.clip_frames*c_in, kh, kw)
-                            else:
-                                init_weights = state_dict[key].reshape(self.num_priors, -1).repeat(1, self.clip_frames).reshape(-1)
-                        elif key.split('.')[-2] in {'mask_layer'}:
-                            init_weights = state_dict[key].repeat(1, self.clip_frames, 1, 1)
-                        else:
-                            init_weights = state_dict[key].repeat(self.clip_frames, self.clip_frames, 1, 1) \
-                                        if state_dict[key].dim() == 4 else state_dict[key].repeat(self.clip_frames)
-                        init_weights = (init_weights / float(self.clip_frames))
                     else:
-                        RuntimeError('cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_WITH_INITIALIZATION should be'
-                                     ' reduced or inflated')
+                        scale = self.clip_frames//self.reduced_scale
+                        if self.block_diagonal:
+                            print(key, state_dict[key].size(), model_dict[key].size())
+                            if state_dict[key].dim() == 1:
+                                if key.split('.')[-2] in {'bbox_layer', 'centerness_layer'}:
+                                    model_dict[key] = state_dict[key].repeat(self.clip_frames).to(model_dict[key].device)
+                                else:
+                                    model_dict[key] = state_dict[key].repeat(scale).to(model_dict[key].device)
+                            else:
+                                for c in range(scale):
+                                    if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
+                                        flag_channels = range(c*self.fpn_num_features, (c+1)*self.fpn_num_features)
+                                    else:
+                                        single = self.fpn_num_features+self.correlation_patch_size**2
+                                        flag_channels = range(c*single, (c+1)*single-self.correlation_patch_size**2)
+                                    if key.split('.')[-2] in {'bbox_layer', 'centerness_layer'}:
+                                        flag_channels_last = range(c*self.reduced_scale*state_dict[key].size(0),
+                                                                   (c+1)*self.reduced_scale*state_dict[key].size(0))
+                                        model_dict[key][flag_channels_last][:, flag_channels] = state_dict[key].repeat(self.reduced_scale,1,1,1).to(model_dict[key].device)
+                                    elif key.split('.')[-2] in {'mask_layer'}:
+                                        model_dict[key][:, flag_channels] = state_dict[key].to(model_dict[key].device)
+                                    else:
+                                        model_dict[key][flag_channels][:, flag_channels] = state_dict[key].to(model_dict[key].device)
 
-                    if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
-                        model_dict[key] = init_weights.to(model_dict[key].device)
-                    else:
-                        if 'extra' in key:
-                            if state_dict[key].dim() == 4:
-                                model_dict[key][idx][:, idx] = init_weights.to(model_dict[key].device)
-                            else:
-                                model_dict[key][idx] = init_weights.to(model_dict[key].device)
                         else:
-                            if state_dict[key].dim() == 4:
-                                model_dict[key][:, idx] = init_weights.to(model_dict[key].device)
+                            # Inflated or reduced weights from 2D (single frame) to 3D (multi-frames)
+                            print('load parameters with inflated/reduced operation from pre-trained models:', key)
+                            if key.split('.')[-2] in {'bbox_layer', 'centerness_layer'}:
+                                if state_dict[key].dim() == 4:
+                                    _, c_in, kh, kw = state_dict[key].shape
+                                    init_weights = state_dict[key].reshape(self.num_priors, -1, c_in, kh, kw).repeat(1, self.clip_frames, scale, 1, 1).reshape(-1, scale*c_in, kh, kw)
+                                else:
+                                    init_weights = state_dict[key].reshape(self.num_priors, -1).repeat(1, self.clip_frames).reshape(-1)
+                            elif key.split('.')[-2] in {'mask_layer'}:
+                                init_weights = state_dict[key].repeat(1, scale, 1, 1)
                             else:
+                                init_weights = state_dict[key].repeat(scale, scale, 1, 1) \
+                                            if state_dict[key].dim() == 4 else state_dict[key].repeat(scale)
+                            init_weights /= float(scale)
+
+                            if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
                                 model_dict[key] = init_weights.to(model_dict[key].device)
+                            else:
+                                if 'extra' in key:
+                                    if state_dict[key].dim() == 4:
+                                        model_dict[key][self.flag_corr_channels, self.flag_corr_channels] = init_weights.to(model_dict[key].device)
+                                    else:
+                                        model_dict[key][self.flag_corr_channels] = init_weights.to(model_dict[key].device)
+                                else:
+                                    if state_dict[key].dim() == 4:
+                                        model_dict[key][:, self.flag_corr_channels] = init_weights.to(model_dict[key].device)
+                                    else:
+                                        model_dict[key] = init_weights.to(model_dict[key].device)
                 else:
                     print('Size is different in pre-trained model and in current model:', key)
             else:
@@ -361,6 +388,8 @@ class STMask(nn.Module):
                 pred_outs['track'] = []
             if self.cfg.MODEL.BOX_HEADS.TRAIN_BOXES:
                 pred_outs['loc'] = []
+            if self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
+                pred_outs['loc_cir'] = []
             if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
                 pred_outs['centerness'] = []
             if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
@@ -376,25 +405,23 @@ class STMask(nn.Module):
                 if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
                     _, c, h, w = fpn_outs[idx].size()
                     fpn_outs_clip = fpn_outs[idx].reshape(-1, self.clip_frames, c, h, w)
-                    if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_WITH_INITIALIZATION == 'reduced':
-                        pred_x = [self.fpn_reduced_channels(fpn_outs_clip[:, 0])]
+                    if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
+                        pred_x = fpn_outs_clip.permute(0, 2, 1, 3, 4).contiguous()
                     else:
-                        pred_x = [fpn_outs_clip[:, 0]]
-                    for frame_idx in range(self.clip_frames-1):
-                        if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
-                            corr = correlate_operator(fpn_outs_clip[:, frame_idx].contiguous(),
-                                                      fpn_outs_clip[:, frame_idx+1].contiguous(),
-                                                      patch_size=self.correlation_patch_size,
-                                                      kernel_size=1)
-                            # if idx == 0:
-                            #     x_clip = x.reshape(-1, self.clip_frames, 3, x.size(-2), x.size(-1))
-                            #     display_correlation_map(corr, imgs=x_clip, img_meta=img_meta[-1], idx=idx)
-                            pred_x.append(corr)
-                        cur_fpn_x = self.fpn_reduced_channels(fpn_outs_clip[:, frame_idx+1]) \
-                            if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_WITH_INITIALIZATION == 'reduced' else fpn_outs_clip[:, frame_idx+1]
-                        pred_x.append(cur_fpn_x)
-
-                    pred_x = torch.cat(pred_x, dim=1)
+                        # stack frames in channels
+                        pred_x = [self.fpn_reduced_channels(fpn_outs_clip[:, 0])]  \
+                            if self.init_cubic_mode == 'reduced' else [fpn_outs_clip[:, 0]]
+                        for frame_idx in range(self.clip_frames-1):
+                            if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
+                                corr = correlate_operator(fpn_outs_clip[:, frame_idx].contiguous(),
+                                                          fpn_outs_clip[:, frame_idx+1].contiguous(),
+                                                          patch_size=self.correlation_patch_size,
+                                                          kernel_size=1)
+                                pred_x.append(corr)
+                            cur_fpn_x = self.fpn_reduced_channels(fpn_outs_clip[:, frame_idx+1]) \
+                                if self.init_cubic_mode == 'reduced' else fpn_outs_clip[:, frame_idx+1]
+                            pred_x.append(cur_fpn_x)
+                        pred_x = torch.cat(pred_x, dim=1)
                 else:
                     pred_x = fpn_outs[idx]
 
@@ -438,6 +465,7 @@ class STMask(nn.Module):
 
             pred_outs['conf'] = pred_outs['conf'].sigmoid() if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS \
                 else pred_outs['conf'].softmax(dim=-1)
+
             # Detection
             pred_outs_after_NMS = self.Detect(self, pred_outs)
 

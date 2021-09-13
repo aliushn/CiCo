@@ -3,8 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-from layers.utils import compute_DIoU, decode, jaccard, generate_mask, compute_kl_div, generate_track_gaussian, \
-    log_sum_exp
+from layers.utils import decode, jaccard, generate_mask, compute_kl_div, generate_track_gaussian, \
+    log_sum_exp, DIoU_loss
 from .match_samples import match, match_clip
 from .losses import LincombMaskLoss, T2SLoss
 from fvcore.nn import sigmoid_focal_loss_jit, giou_loss
@@ -104,6 +104,7 @@ class MultiBoxLoss(nn.Module):
     def multibox_loss(self, predictions, gt_boxes, gt_labels, gt_masks, gt_ids, num_crowds):
         # ----------------------------------  Prepare Data ----------------------------------
         loc_data = predictions['loc']
+        loc_cir_data = predictions['loc_cir'] if self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES else None
         centerness_data = predictions['centerness'] if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS else None
         conf_data = predictions['conf']
         mask_coeff, proto_data, segm_data = None, None, None
@@ -119,6 +120,8 @@ class MultiBoxLoss(nn.Module):
         # Match priors (default boxes) and ground truth boxes
         # These tensors will be created with the same device as loc_data
         loc_t = loc_data.new(loc_data.shape)
+        loc_cir_t = loc_data.new(batch_size, num_priors, 4) if loc_cir_data is not None else None
+        box_cir_t = loc_data.new(batch_size, num_priors, 4)            # circumscribed boxes
         conf_t = loc_data.new(batch_size, num_priors).long()
         idx_t = loc_data.new(batch_size, num_priors).long()
         ids_t = loc_data.new(batch_size, num_priors).long() if gt_ids is not None else None  # object ids for tracking
@@ -139,24 +142,30 @@ class MultiBoxLoss(nn.Module):
 
             if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
                 gt_boxes[idx] = match_clip(self.cfg, gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[idx], loc_data[idx],
-                                loc_t, conf_t, idx_t, ids_t, idx, self.pos_threshold, self.neg_threshold)
+                                           loc_t, loc_cir_t, box_cir_t, conf_t, idx_t, ids_t, idx,
+                                           self.pos_threshold, self.neg_threshold)
             else:
                 gt_ids_cur = gt_ids[idx] if gt_ids is not None else None
-                match(self.cfg, gt_boxes[idx], gt_labels[idx], gt_ids_cur, crowd_boxes, priors[idx],
-                      loc_data[idx], loc_t, conf_t, idx_t, ids_t, idx, self.pos_threshold, self.neg_threshold)
+                loc_cir_t = None
+                match(self.cfg, gt_boxes[idx], gt_labels[idx], gt_ids_cur, crowd_boxes, priors[idx], loc_data[idx],
+                      loc_t, box_cir_t, conf_t, idx_t, ids_t, idx, self.pos_threshold, self.neg_threshold)
 
         # wrap targets
         loc_t = Variable(loc_t, requires_grad=False)
+        box_cir_t = Variable(box_cir_t, requires_grad=False)
         conf_t = Variable(conf_t, requires_grad=False)
         idx_t = Variable(idx_t, requires_grad=False)
         if gt_ids is not None:
             ids_t = Variable(ids_t, requires_grad=False)
+        if loc_cir_t is not None:
+            loc_cir_t = Variable(loc_cir_t, requires_grad=False)
 
         pos = conf_t > 0
         losses = {}
         if pos.sum() > 0:
             # ---------------------------  Localization Loss (Smooth L1) -------------------------------------------
-            losses_loc, pred_boxes_p = self.loclization_loss(pos, priors, loc_data, loc_t, centerness_data)
+            losses_loc, pred_boxes_p = self.loclization_loss(pos, priors, loc_data, loc_t, loc_cir_data, loc_cir_t,
+                                                             centerness_data)
             losses.update(losses_loc)
             
             # Split positive samples frame-by-frame to form a list 
@@ -167,7 +176,7 @@ class MultiBoxLoss(nn.Module):
             # --------------------------------  Mask Loss  -----------------------------------------------------
             if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
                 loss_m = self.LincombMaskLoss(pos, idx_t, pred_boxes_p_split, mask_coeff, prior_levels,
-                                              proto_data, gt_masks, gt_boxes, gt_ids)
+                                              proto_data, gt_masks, box_cir_t, gt_ids)
                 losses.update(loss_m)
 
                 # These losses also don't depend on anchors
@@ -182,7 +191,7 @@ class MultiBoxLoss(nn.Module):
                 conf_t_unfold = conf_t.reshape(-1)
 
                 if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS:
-                    pos_inds = torch.nonzero((conf_t_unfold > 0).float())
+                    pos_inds = torch.nonzero(conf_t_unfold > 0, as_tuple=False)
                     # prepare one_hot
                     class_target = torch.zeros_like(conf_data_unfold)
                     class_target[pos_inds, conf_t_unfold[pos_inds] - 1] = 1
@@ -256,7 +265,7 @@ class MultiBoxLoss(nn.Module):
 
         return neg
     
-    def loclization_loss(self, pos, priors, loc_data, loc_t, centerness_data):
+    def loclization_loss(self, pos, priors, loc_data, loc_t, loc_cir_data, loc_cir_t, centerness_data):
         loc_p = loc_data[pos].reshape(-1, 4)
         loc_t = loc_t[pos].reshape(-1, 4)
         pos_priors = priors[pos].reshape(-1, 4)
@@ -266,7 +275,7 @@ class MultiBoxLoss(nn.Module):
         decoded_loc_p = decode(loc_p, pos_priors)
         decoded_loc_t = decode(loc_t, pos_priors)
         if self.cfg.MODEL.PREDICTION_HEADS.USE_DIoU:
-            IoU_loss = 1. - compute_DIoU(decoded_loc_p, decoded_loc_t).diag()
+            IoU_loss = DIoU_loss(decoded_loc_p, decoded_loc_t, reduction='none')
         else:
             IoU_loss = giou_loss(decoded_loc_p, decoded_loc_t, reduction='none')
         if self.cfg.MODEL.BOX_HEADS.USE_BOXIOU_LOSS:
@@ -277,6 +286,25 @@ class MultiBoxLoss(nn.Module):
                                              (1 - IoU_loss).detach(), reduction='mean')
             # loss_cn = F.smooth_l1_loss(centerness_data[pos].view(-1), DIoU, reduction='mean')
             losses['center'] = self.cfg.MODEL.BOX_HEADS.CENTERNESS_ALPHA * loss_cn
+
+        if loc_cir_data is not None:
+            # loss alpha is reduced as half
+            for k, v in losses.items():
+                losses[k] = 0.5 * v
+            loc_cir_p = loc_cir_data[pos]
+            loc_cir_t = loc_cir_t[pos]
+            pos_cir_priors = priors[pos][..., :4]
+            box_cir_loss = F.smooth_l1_loss(loc_cir_p, loc_cir_t, reduction='none').sum(dim=-1)
+            losses['B_cir'] = box_cir_loss.mean() * self.cfg.MODEL.BOX_HEADS.LOSS_ALPHA * 0.5
+
+            decoded_loc_cir_p = decode(loc_cir_p, pos_cir_priors)
+            decoded_loc_cir_t = decode(loc_cir_t, pos_cir_priors)
+            if self.cfg.MODEL.PREDICTION_HEADS.USE_DIoU:
+                IoU_loss_cir = DIoU_loss(decoded_loc_cir_p, decoded_loc_cir_t, reduction='none')
+            else:
+                IoU_loss_cir = giou_loss(decoded_loc_cir_p, decoded_loc_cir_t, reduction='none')
+            if self.cfg.MODEL.BOX_HEADS.USE_BOXIOU_LOSS:
+                losses['BIoU_cir'] = IoU_loss_cir.mean() * self.cfg.MODEL.BOX_HEADS.BIoU_ALPHA * 0.5
             
         return losses, decoded_loc_p
 

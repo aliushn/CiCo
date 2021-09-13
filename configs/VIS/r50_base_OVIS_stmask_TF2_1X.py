@@ -3,7 +3,10 @@ _base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VIS/base_VIS.py']
 MODEL = dict(
     BACKBONE=dict(
         CONV_BODY='ResNet50',
-        PATH='STMask_resnet50_coco_960_46_340000.pth')
+        PATH='STMask_resnet50_coco_960_46_340000.pth'),
+
+    TRACK_HEADS=dict(
+        MATCH_COEFF=[0, 1, 1, 0.3]),
 )
 
 DATASETS = dict(

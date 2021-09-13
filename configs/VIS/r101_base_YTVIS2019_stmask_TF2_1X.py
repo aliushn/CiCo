@@ -4,7 +4,10 @@ _base_ = ['configs/_base_/models/r50_base.yaml', 'configs/_base_/models/r101_bas
 MODEL = dict(
     BACKBONE=dict(
         CONV_BODY='ResNet101',
-        PATH='STMask_resnet101_coco_960_52_220000.pth')
+        PATH='STMask_resnet101_coco_960_52_220000.pth'),
+
+    TRACK_HEADS=dict(
+        MATCH_COEFF=[0, 1, 1, 0.3]),
 )
 
 DATASETS = dict(

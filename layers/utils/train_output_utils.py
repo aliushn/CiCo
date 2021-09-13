@@ -3,10 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from datasets import cfg, mask_type, MEANS, STD, activation_func
-from utils.augmentations import Resize
-from utils import timer
-from .box_utils import crop, sanitize_coordinates, center_size, decode
+from datasets import cfg
+from .box_utils import decode
 import eval as eval_script
 import matplotlib.pyplot as plt
 
@@ -21,8 +19,7 @@ def display_train_output(images, predictions, conf_t, pids_t, gt_bboxes, gt_labe
     priors = priors[0, :, :]
     match_score = predictions['track']
     ref_boxes_n = predictions['ref_boxes_n']
-    if cfg.mask_type == mask_type.lincomb:
-        proto_data = predictions['proto']
+    proto_data = predictions['proto']
 
     batch_size, _, h, w = images.size()
 
@@ -50,8 +47,7 @@ def display_train_output(images, predictions, conf_t, pids_t, gt_bboxes, gt_labe
         dets_out['pids'] = pids_t[batch_idx, idx_pos]
         dets_out['box'] = decode(loc_data[batch_idx, idx_pos, :], priors[idx_pos])
         dets_out['mask'] = mask_data[batch_idx, idx_pos, :]
-        if cfg.mask_type == mask_type.lincomb:
-            dets_out['proto'] = proto_data[batch_idx]
+        dets_out['proto'] = proto_data[batch_idx]
 
         img_numpy = eval_script.prep_display(dets_out, images[batch_idx], h, w, img_meta[batch_idx], display_mode='train')
 

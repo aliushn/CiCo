@@ -10,7 +10,7 @@ class LincombMaskLoss(object):
         self.net = net
     
     def __call__(self, pos, idx_t, pred_boxes, mask_coeff, prior_levels, proto_data,
-                 masks_gt, bboxes_gt, obj_ids_gt):
+                 masks_gt, bboxes_t_ext, obj_ids_gt):
         '''
         Compute instance segmentation loss proposed by YOLACT, which combines linearly mask coefficients and prototypes.
         Please link here https://github.com/dbolya/yolact for more information.
@@ -28,7 +28,7 @@ class LincombMaskLoss(object):
         '''
 
         h, w = proto_data.size()[1:3]
-        bs = len(bboxes_gt)
+        bs = len(masks_gt)
         loss, loss_m_occluded = torch.tensor(0., device=idx_t.device), torch.tensor(0., device=idx_t.device)
         loss_coeff_div = torch.tensor(0., device=idx_t.device)
     
@@ -43,8 +43,8 @@ class LincombMaskLoss(object):
                 # If the input is given frame by frame style, for example bboxes_gt [n_objs, 4],
                 # please expand them in temporal axis like: [n_objs, 1, 4] to better coding
                 masks_gt_cur_clip = masks_gt[i].unsqueeze(1) if masks_gt[i].dim() == 3 else masks_gt[i]
-                boxes_gt_cur_clip = bboxes_gt[i].unsqueeze(1) if bboxes_gt[i].dim() == 2 else bboxes_gt[i]
-                clip_frames = boxes_gt_cur_clip.size(1)
+                boxes_gt_cur_clip = bboxes_t_ext[i][pos_cur]
+                clip_frames =masks_gt_cur_clip.size(1)
                 loss_cur_clip = 0
                 for j in range(clip_frames):
                     # deal with the j-th frame of the i-th clip
@@ -75,17 +75,16 @@ class LincombMaskLoss(object):
     
                     if self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_LOSS:
                         instance_t = idx_t_cur_clip if obj_ids_gt[i] is None else obj_ids_gt[i][idx_t_cur_clip]
-                        loss_coeff_div += self.coeff_diversity_loss(mask_coeff_cur, instance_t,
-                                                                    boxes_gt_cur_clip[:, j][idx_t_cur_clip])
+                        loss_coeff_div += self.coeff_diversity_loss(mask_coeff_cur, instance_t, boxes_gt_cur_clip)
     
                     if self.cfg.MODEL.MASK_HEADS.PROTO_CROP or self.cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
                         # Note: this is in point-form
                         if self.cfg.MODEL.MASK_HEADS.PROTO_CROP_WITH_PRED_BOX:
                             pos_gt_box_t = pred_boxes[i][:, j].detach()
                         else:
-                            pos_gt_box_t = boxes_gt_cur_clip[:, j][idx_t_cur_clip]
+                            pos_gt_box_t = boxes_gt_cur_clip
                         pos_gt_box_t_c = center_size(pos_gt_box_t)
-                        pos_gt_box_t_c[:, 2:] *= 1.3
+                        pos_gt_box_t_c[:, 2:] *= 1.2
                         # for small objects, we set width and height of bounding boxes is 0.1
                         pos_gt_box_t_c[:, 2:] = torch.clamp(pos_gt_box_t_c[:, 2:], min=0.1)
                         pos_gt_box_t = point_form(pos_gt_box_t_c)

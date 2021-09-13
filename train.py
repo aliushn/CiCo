@@ -29,12 +29,12 @@ def parse_args():
         description='Training Script')
     parser.add_argument('--config', default='STMask_plus_base_config',
                         help='The config object to use.')
+    parser.add_argument('--is_distributed', dest='is_distributed', action='store_true',
+                        help='use distributed for training')
     parser.add_argument('--port', default=None, type=str,
                         help='port for dist')
     parser.add_argument('--local_rank', default=0, type=int,
                         help='local_rank for distributed training')
-    parser.add_argument('--is_distributed', dest='is_distributed', action='store_true',
-                        help='use distributed for training')
     parser.add_argument('--resume', default=None, type=str,
                         help='Checkpoint state_dict file to resume training from. If this is "interrupt"' \
                          ', the model will resume training from the interrupt file.')
@@ -58,7 +58,7 @@ def parse_args():
 
     return args
 
-loss_types = ['B', 'BIoU', 'center', 'Rep', 'C', 'C_focal', 'stuff', 'M_bce', 'M_dice', 'M_coeff',
+loss_types = ['B', 'BIoU', 'B_cir', 'BIoU_cir', 'center', 'Rep', 'C', 'C_focal', 'stuff', 'M_bce', 'M_dice', 'M_coeff',
               'T', 'B_shift', 'BIoU_shift', 'M_shift', 'P', 'D', 'S', 'I']
 
 
@@ -128,9 +128,11 @@ def train(cfg):
     train_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.TRAIN, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES)
 
     if args.is_distributed:
-        if cfg.SOLVER.IMS_PER_BATCH * cfg.SOLVER.NUM_CLIP_FRAMES < 8:
+        cfg.SOLVER.IMS_PER_BATCH //= torch.cuda.device_count()
+        imgs_per_gpu = cfg.SOLVER.IMS_PER_BATCH * cfg.SOLVER.NUM_CLIP_FRAMES
+        if imgs_per_gpu < 8:
             if args.local_rank == 0:
-                print('Batch size of each gpu is:', args.batch_size, 'turn on sync batchnorm for DDP')
+                print('Batch size of each gpu is:', imgs_per_gpu, 'turn on sync batchnorm for DDP')
             net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(net)
         net = torch.nn.parallel.DistributedDataParallel(net.to(device), device_ids=[args.local_rank])
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -217,7 +219,6 @@ def train(cfg):
 
                 cur_time = time.time()
                 elapsed = cur_time - last_time
-                last_time = cur_time
 
                 # Exclude graph setup from the timing information
                 if iteration != args.start_iter:
@@ -272,6 +273,7 @@ def train(cfg):
                                 compute_validation_map(net, valid_dataset)
 
                 iteration += 1
+                last_time = cur_time
 
     except KeyboardInterrupt:
         print('Stopping early. Saving network...')
@@ -299,25 +301,40 @@ def set_lr(optimizer, new_lr):
 
 def prepare_data_dist(data_type, data_batch, device):
     with torch.no_grad():
-        imgs, targets, masks, num_crowds = data_batch
-        imgs = imgs.cuda(device)
+        imgs, img_metas, anns = data_batch
+        h, w = imgs.size()[-2:]
+        imgs = imgs.reshape(-1, 3, h, w).cuda(device)
+        from datasets.utils import GtList_from_tensor
+
         if data_type == 'coco':
+            boxes, labels, masks, num_crowds = anns
             # padding images with different scales
-            masks_list = [mask.cuda(device) for mask in masks]
-            bboxes_list = [target[:, :4].cuda(device) for target in targets]
-            labels_list = [target[:, -1].cuda(device) for target in targets]
-            num_crowds = data_batch[3]
-            ids_list, images_meta_list = None, None
+            masks, boxes, img_metas = GtList_from_tensor(h, w, masks, boxes, img_metas)
+            boxes_list = [torch.tensor(box).cuda(device) for box in boxes]
+            labels_list = [torch.tensor(label).cuda(device) for label in labels]
+            masks_list = [torch.tensor(mask).cuda(device) for mask in masks]
+            ids_list = [None] * len(boxes)
 
         elif data_type == 'vis':
-            images_meta_list = data_batch[1]
-            bboxes_list = [box.cuda(device) for box in data_batch[2][0]]
-            labels_list = [label.cuda(device) for label in data_batch[2][1]]
-            masks_list = [mask.cuda(device) for mask in data_batch[2][2]]
-            ids_list = [id.cuda(device) for id in data_batch[2][3]]
-            num_crowds = None
+            boxes, labels, masks, obj_ids = anns
+            # padding images with different scales
+            masks, boxes, img_metas = GtList_from_tensor(h, w, masks, boxes, img_metas)
+            boxes_list = [torch.from_numpy(box).float().cuda(device) for box in boxes]
+            labels_list = [torch.from_numpy(label).cuda(device) for label in labels]
+            masks_list = [torch.from_numpy(mask).cuda(device) for mask in masks]
+            ids_list = [torch.from_numpy(id).cuda(device) for id in obj_ids]
+            num_crowds = [0] * len(boxes)
+        elif data_type == 'vid':
+            boxes, labels, obj_ids, occluded_boxes = anns
+            # padding images with different scales
+            _, boxes, img_metas = GtList_from_tensor(h, w, None, boxes, img_metas)
+            boxes_list = [torch.tensor(box).cuda(device) for box in boxes]
+            labels_list = [torch.tensor(label).cuda(device) for label in labels]
+            ids_list = [torch.tensor(id).cuda(device) for id in obj_ids]
+            num_crowds = [torch.tensor(occluded).cuda(device) for occluded in occluded_boxes]
+            masks_list = [None] * len(boxes)
 
-        return imgs, images_meta_list, bboxes_list, labels_list, masks_list, ids_list, num_crowds
+        return imgs, img_metas, boxes_list, labels_list, masks_list, ids_list, num_crowds
 
 
 def compute_validation_loss(net, data_loader, dataset_size):

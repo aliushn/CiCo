@@ -2,7 +2,7 @@ import torch
 from ..utils import point_form, decode, center_size, jaccard, compute_DIoU, encode
 
 
-def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t, ids_t, idx,
+def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, box_t_ext, conf_t, idx_t, ids_t, idx,
           pos_thresh=0.5, neg_thresh=0.3):
     """Match each prior box with the ground truth box of the highest jaccard
     overlap, encode the bounding boxes, then return the matched indices
@@ -28,6 +28,7 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
     keep = (bbox_c[:, 2] > 0) & (bbox_c[:, 3] > 0)
     valid_bbox = bbox[keep]
     valid_idx = torch.nonzero(keep).reshape(-1)
+    small_objs_idx = torch.nonzero(bbox_c[:, 2] * bbox_c[:, 3] < 0.01)
 
     # decoded_priors => [x1, y1, x2, y2]
     decoded_boxes = decode(loc_data, priors)
@@ -55,6 +56,10 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
     multiple_bbox = (overlaps > pos_thresh).sum(dim=0) > 1
     best_truth_overlap[multiple_bbox] = thresh
 
+    if small_objs_idx.nelement() > 0:
+        for i in small_objs_idx:
+            best_truth_overlap[best_truth_idx == i] *= 2
+
     # We want to ensure that each gt gets used at least once so that we don't
     # waste any training data. In order to do that, find the max overlap anchor
     # with each gt, and force that anchor to use that gt.
@@ -80,6 +85,9 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
 
     keep_pos = best_truth_overlap > pos_thresh
     keep_neg = best_truth_overlap < neg_thresh
+    # print(idx, keep_pos.sum())
+    # print('idx:', best_truth_idx[keep_pos])
+    # print('labels:', labels[best_truth_idx[keep_pos]])
 
     valid_best_truth_idx = valid_idx[best_truth_idx]
     matches = bbox[valid_best_truth_idx]            # Shape: [num_priors,4]  [x1, y1, x2, y2]
@@ -108,14 +116,15 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
         conf[nonvalid_loc_data] = -1
 
     loc_t[idx]  = loc                                            # [num_priors,4] encoded offsets to learn
+    box_t_ext[idx] = bbox[valid_best_truth_idx]
     conf_t[idx] = conf                                           # [num_priors] top class label for each prior
     idx_t[idx]  = valid_best_truth_idx.view(-1)     # [num_priors] indices for lookup
     if ids is not None:
         ids_t[idx] = ids[valid_best_truth_idx]
 
 
-def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t, idx_t, obj_ids_t, idx,
-               pos_thresh=0.5, neg_thresh=0.3):
+def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, loc_ext_t, box_ext_t, conf_t, idx_t,
+               obj_ids_t, idx, pos_thresh=0.5, neg_thresh=0.3):
     """Match each prior box with the ground truth box of the highest jaccard
     overlap, encode the bounding boxes, then return the matched indices
     corresponding to both confidence and location preds.
@@ -159,23 +168,56 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
                 supp_cdx = torch.abs(missed_cdx.reshape(-1, 1) - occur_cdx.reshape(1, -1)).min(dim=-1)[1]
                 gt_boxes[kdx, missed_cdx] = gt_boxes[kdx, occur_cdx[supp_cdx]]
 
-    # ------- Introducing external boxes of multiple boxes in the clip to define postive and negative samples
+    # compute iou for each object
+    iou = torch.stack([jaccard(gt_boxes[i], gt_boxes[i]) for i in range(n_objs)], dim=0).triu_(1)
+    divergence = iou.sum(dim=(1, 2)) / max(n_clip_frames-1, 1) / max(n_clip_frames-2, 1)
+
+    gt_boxes_c = center_size(gt_boxes.reshape(-1, 4)).reshape(n_objs, n_clip_frames, 4)
+    small_objs_idx = ((gt_boxes_c[..., 2] * gt_boxes_c[..., 3] < 0.01).sum(dim=1) >= n_clip_frames//2).float()
+    small_objs_idx = torch.nonzero(small_objs_idx, as_tuple=False)
+
+    # ------- Introducing smallest enclosing boxes of multiple boxes in the clip to define positive/negative samples
     gt_boxes_unfold = gt_boxes.reshape(n_objs, -1)
-    external_box = torch.stack([gt_boxes_unfold[:, ::2].min(-1)[0], gt_boxes_unfold[:, 1::2].min(-1)[0],
-                                gt_boxes_unfold[:, ::2].max(-1)[0], gt_boxes_unfold[:, 1::2].max(-1)[0]], dim=-1)
+    gt_external_box = torch.stack([gt_boxes_unfold[:, ::2].min(-1)[0], gt_boxes_unfold[:, 1::2].min(-1)[0],
+                                   gt_boxes_unfold[:, ::2].max(-1)[0], gt_boxes_unfold[:, 1::2].max(-1)[0]], dim=-1)
     if cfg.MODEL.PREDICTION_HEADS.USE_DIoU:
-        overlaps_clip_ext = compute_DIoU(external_box, decoded_priors)
+        overlaps_clip_ext = compute_DIoU(gt_external_box, decoded_priors)
     else:
-        overlaps_clip_ext = jaccard(external_box, decoded_priors)
+        overlaps_clip_ext = jaccard(gt_external_box, decoded_priors)
     best_truth_overlap_ext, best_truth_idx_ext = overlaps_clip_ext.max(dim=0)
-    # Define positive sample,  negative samples and neutral
+    for _ in range(n_objs):
+        # Find j, the gt with the highest overlap with a prior
+        # In effect, this will loop through overlaps.size(0) in a "smart" order,
+        # always choosing the highest overlap first.
+        best_prior_overlap_ext, best_prior_idx_ext = overlaps_clip_ext.max(1)
+        j = best_prior_overlap_ext.max(0)[1]
+
+        # Find i, the highest overlap anchor with this gt
+        i = best_prior_idx_ext[j]
+
+        # Set all other overlaps with i to be -1 so that no other gt uses it
+        overlaps_clip_ext[:, i] = -1
+        # Set all other overlaps with j to be -1 so that this loop never uses j again
+        overlaps_clip_ext[j, :] = -1
+
+        # Overwrite i's score to be 2 so it doesn't get thresholded ever
+        best_truth_overlap_ext[i] = 2
+        # Set the gt to be used for i to be j, overwriting whatever was there
+        best_truth_idx_ext[i] = j
+
+    if small_objs_idx.nelement() > 0:
+        for i in small_objs_idx:
+            best_truth_overlap_ext[best_truth_idx_ext == i] *= 1.3
+    # Define positive sample, negative samples and neutral
     keep_pos_ext = best_truth_overlap_ext > pos_thresh
     keep_neg_ext = best_truth_overlap_ext < neg_thresh
+    # print(keep_pos_ext.sum(), n_objs)
+    # print(divergence)
+    # print(best_truth_idx_ext[keep_pos_ext], best_truth_overlap_ext[keep_pos_ext])
 
     # ------ Mean of multiple boxes in the clip
     # Size [num_objects, num_priors]
     overlaps_frames = torch.zeros(n_clip_frames, n_objs, n_anchors)
-    # if cfg.use_change_matching:
     for cdx in range(n_clip_frames):
         if cfg.MODEL.PREDICTION_HEADS.USE_PREDICTION_MATCHING:
             if cfg.MODEL.PREDICTION_HEADS.USE_DIoU:
@@ -191,9 +233,9 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
     if cfg.MODEL.PREDICTION_HEADS.USE_DIoU:
         pos_thresh, neg_thresh = 0.85 * pos_thresh, 0.85 * neg_thresh
 
-    # if 1) the clip average of overlaps on an anchor is greater than pos_thresh,
-    #    2) each iou of anchor and boxes on frames of the clip is greater than 0.5 * pos,
-    # we assume the instance moves slowly between adjacent frames,
+    # if 1) average iou of the entire clip between ground truth boxes an predicted boxes should greater than pos_thresh,
+    #    2) each iou of ground truth and predicted boxes on a single frame should greater than 0.5 * pos,
+    # here we assume the instance moves slowly between adjacent frames,
     # which only needs an anchor to predict the regression of bounding boxes.
     overlaps_clip_ave = overlaps_frames.mean(dim=0)
     best_truth_overlap_ave, best_truth_idx_ave = overlaps_clip_ave.max(0)
@@ -203,28 +245,28 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
     # We want to ensure that each gt gets used at least once so that we don't
     # waste any training data. In order to do that, find the max overlap anchor
     # with each gt, and force that anchor to use that gt.
-    for _ in range(n_objs):
+    # for _ in range(n_objs):
         # Find j, the gt with the highest overlap with a prior
         # In effect, this will loop through overlaps.size(0) in a "smart" order,
         # always choosing the highest overlap first.
-        best_prior_overlap, best_prior_idx = overlaps_clip_ave.max(1)
-        j = best_prior_overlap.max(0)[1]
+        # best_prior_overlap, best_prior_idx = overlaps_clip_ave.max(1)
+        # j = best_prior_overlap.max(0)[1]
 
         # Find i, the highest overlap anchor with this gt
-        i = best_prior_idx[j]
+        # i = best_prior_idx[j]
 
         # Set all other overlaps with i to be -1 so that no other gt uses it
-        overlaps_clip_ave[:, i] = -1
+        # overlaps_clip_ave[:, i] = -1
         # Set all other overlaps with j to be -1 so that this loop never uses j again
-        overlaps_clip_ave[j, :] = -1
+        # overlaps_clip_ave[j, :] = -1
 
         # Set each box is greater than the half of pos threshold
-        keep_half_pos_ind[i] = 1
+        # keep_half_pos_ind[i] = 1
 
         # Overwrite i's score to be 2 so it doesn't get thresholded ever
-        best_truth_overlap_ave[i] = 2
+        # best_truth_overlap_ave[i] = 2
         # Set the gt to be used for i to be j, overwriting whatever was there
-        best_truth_idx_ave[i] = j
+        # best_truth_idx_ave[i] = j
 
     keep_pos_ave = (best_truth_overlap_ave > pos_thresh) & keep_half_pos_ind
     keep_neg_ind = (best_truth_overlap_ind < neg_thresh).sum(dim=0) >= n_clip_frames
@@ -235,6 +277,7 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
     keep_pos = keep_pos_ext | keep_pos_ave
     keep_neg = keep_neg_ext & keep_neg_ave
     # print(keep_pos.sum(), n_objs)
+    # print(best_truth_idx_ave[keep_pos_ave], best_truth_overlap_ave[keep_pos_ave])
 
     matches = gt_boxes_unfold[best_truth_idx]                         # [n_clip, num_priors, 4], [x1, y1, x2, y2]
     conf = loc_data.new_ones(n_anchors).long() * -1                   # label as neutral
@@ -256,8 +299,10 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
         print('Num of Inf or Nan in loc_data when matching samples:', len(torch.nonzero(keep)))
         conf[keep] = -1
 
-    loc_t[idx, keep_pos] = loc_pos                                   # [num_priors, 4*clip_frames] encoded offsets to learn
-    conf_t[idx] = conf                                               # [num_priors] top class label for each prior
+    loc_t[idx, keep_pos] = loc_pos                               # [num_priors, 4*clip_frames] encoded offsets to learn
+    loc_ext_t[idx, keep_pos] = encode(gt_external_box[best_truth_idx[keep_pos]], priors[keep_pos, :4])
+    box_ext_t[idx] = gt_external_box[best_truth_idx]
+    conf_t[idx] = conf                                           # [num_priors] top class label for each prior
     idx_t[idx] = best_truth_idx.view(-1)
     if gt_obj_ids is not None:
         obj_ids_t[idx] = gt_obj_ids[best_truth_idx]

@@ -15,6 +15,7 @@ import numpy as np
 import os
 import json
 from layers.utils.eval_utils import bbox2result_video, calc_metrics
+from configs._base_.datasets import get_dataset_config
 
 import matplotlib.pyplot as plt
 import cv2
@@ -110,11 +111,6 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
     if 'mask' in dets_out.keys():
         masks = dets_out['mask'][:args.top_k]
 
-    for j in range(num_dets_to_consider):
-        if scores[j] < args.score_threshold:
-            num_dets_to_consider = j
-            break
-
     if num_dets_to_consider == 0:
         # No detections found so just output the original image
         return (img_gpu * 255).byte().cpu().numpy()
@@ -151,18 +147,13 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
 
     if args.display_text or args.display_bboxes:
         for j in reversed(range(num_dets_to_consider)):
+            color = get_color(j, color_type)
             # get the bbox_idx to know box's layers (after FPN): p3-p7
-            # box_idx = dets_out['bbox_idx'][j]
-            # p_nums = [34560, 43200, 45360, 45900, 46035]
-            # p_nums = [11520, 14400, 15120, 15300, 15345]
-            # p = 0
-            # for i in range(len(p_nums)):
-            #     if box_idx < p_nums[i]:
-            #         p = i + 3
-            #         break
+            if 'priors' in dets_out.keys():
+                px1, py1, px2, py2 = dets_out['priors'][j, :]
+                draw_dotted_rectangle(img_numpy, px1, py1, px2, py2, color, 3, gap=10)
 
             x1, y1, x2, y2 = boxes[j, :]
-            color = get_color(j, color_type)
             score = scores[j]
             num_tracked_mask_j = num_tracked_mask[j] if num_tracked_mask is not None else None
 
@@ -176,12 +167,12 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
                 if classes[j] - 1 < 0:
                     _class = 'None'
                 else:
-                    _class = cfg.classes[classes[j] - 1]
+                    _class = class_names[classes[j] - 1]
 
                 if score is not None:
                     # if cfg.use_maskiou and not cfg.rescore_bbox:
                     if centerness is not None:
-                        rescore = centerness[j] * score
+                        rescore = centerness[j]
                         text_str = '%s: %.2f: %.2f: %s' % (_class, score, rescore, str(color_type[j].cpu().numpy())) \
                             if args.display_scores else _class
                     else:
@@ -224,13 +215,11 @@ def prep_display_single(dets_out, img, img_meta=None, undo_transform=True, mask_
     with timer.env('Postprocess'):
         dets_out = postprocess_ytbvis(dets_out, img_meta,
                                       visualize_lincomb=args.display_lincomb,
-                                      crop_masks=args.crop,
                                       output_file=args.mask_det_file[:-12])
         torch.cuda.synchronize()
         scores = dets_out['score'][:args.top_k].detach().cpu().numpy()
         boxes = dets_out['box'][:args.top_k].detach().cpu().numpy()
         masks = dets_out['mask'][:args.top_k]
-
 
     classes = dets_out['class'][:args.top_k].detach().cpu().numpy()
 
@@ -326,7 +315,7 @@ def prep_display_single(dets_out, img, img_meta=None, undo_transform=True, mask_
                 if classes[j] - 1 < 0:
                     _class = 'None'
                 else:
-                    _class = cfg.classes[classes[j] - 1]
+                    _class = class_names[classes[j] - 1]
 
                 if display_mode == 'test':
                     # if cfg.use_maskiou and not cfg.rescore_bbox:
@@ -545,6 +534,10 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', eval_clip_frames=1, out
                     if train_masks:
                         pred_frame['mask'] = pred_clip['mask'][..., batch_id]
                     pred_frame['box'] = pred_clip['box'][:, batch_id * 4:(batch_id + 1) * 4]
+                if 'priors' in pred_clip.keys():
+                    pred_frame['priors'] = pred_clip['priors'][:, batch_id * 4:(batch_id + 1) * 4]
+                if 'centerness' in pred_clip.keys():
+                    pred_frame['centerness'] = pred_clip['centerness'][:, batch_id]
 
                 if args.display:
                     root_dir = os.path.join(output_dir, 'out', str(vid))
@@ -651,10 +644,11 @@ def evaldatasets(net: STMask, val_dataset, data_type, output_dir, eval_clip_fram
                                eval_clip_frames=eval_clip_frames, output_dir=output_dir)
 
         if not args.display:
-            print('Save prediction into results.json file:')
+            print()
+            print('Save predictions into {} :'.format(json_path))
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(results, f)
-            print('Finish save results.json!')
+            print('Finish save!')
 
     if val_dataset.has_gt:
         print('Begin calculate metrics!')
@@ -683,6 +677,8 @@ if __name__ == '__main__':
         print('Config not specified. Parsed %s from the file name.\n' % args.config)
         cfg = load_config(args.config)
     cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, cfg.NAME)
+    global class_names
+    class_names = get_dataset_config(cfg.DATASETS.TRAIN, cfg.DATASETS.TYPE)['class_names']
 
     if args.image is None and args.images is None:
         print('Load dataset:', cfg.DATASETS, args.eval_data)

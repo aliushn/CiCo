@@ -15,8 +15,8 @@ class Detect(object):
     # TODO: conf without background, using sigmoid() !!!! Important
 
     def __init__(self, num_classes, top_k, conf_thresh, nms_thresh, use_focal_loss=True,
-                 train_masks=True, use_dynamic_mask=False, mask_coeff_occlusion=False,
-                 nms_with_miou=False, use_DIoU=True, track_by_Gaussian=False):
+                 train_masks=True, use_dynamic_mask=False, mask_coeff_occlusion=False, circumscribed_boxes=False,
+                 nms_with_miou=False, use_DIoU=True, track_by_Gaussian=False, cubic_mode=False):
         self.use_DIoU = use_DIoU
         self.train_masks = train_masks
         self.use_dynamic_mask = use_dynamic_mask
@@ -32,6 +32,9 @@ class Detect(object):
 
         self.use_cross_class_nms = True
         self.use_fast_nms = True
+        self.circumscribed_boxes = circumscribed_boxes
+        self.circumscribed_boxes_iou = True
+        self.cubic_mode = cubic_mode
         if track_by_Gaussian:
             self.img_level_keys = {'proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg', 'track'}
         else:
@@ -60,8 +63,6 @@ class Detect(object):
                 scores, scores_idx = torch.max(predictions['conf'][i], dim=1) if self.use_focal_loss else torch.max(predictions['conf'][i, :, 1:], dim=-1)
 
                 keep = scores > self.conf_thresh
-                # print(cfg.eval_conf_thresh, keep.sum())
-                # print(scores_idx[keep].unique())
                 for k, v in predictions.items():
                     if k in self.img_level_keys:
                         candidate_cur[k] = v[i*clip_frames:(i+1)*clip_frames]
@@ -80,8 +81,11 @@ class Detect(object):
             scores = scores[..., 1:]
 
         clip_frames = candidate['loc'].size(-1) // 4
-        boxes = decode(candidate['loc'].reshape(-1, 4), candidate['priors'].repeat(1, clip_frames).reshape(-1, 4))
+        loc_data = candidate['loc']
+        priors = candidate['priors'].repeat(1, clip_frames)
+        boxes = decode(loc_data.reshape(-1, 4), priors.reshape(-1, 4))
         boxes = boxes.reshape(-1, 4*clip_frames)
+        centerness = candidate['centerness'] if 'centerness' in candidate.keys() else None
         mask_coeff, proto_data = None, None
         if self.train_masks:
             mask_coeff = candidate['mask_coeff']
@@ -96,10 +100,16 @@ class Detect(object):
                 out_aft_nms['mask'] = torch.Tensor()
 
         else:
+            # smallest encolsing boxes
+            if not self.circumscribed_boxes:
+                boxes_external = torch.stack([boxes[:, ::2].min(-1)[0], boxes[:, 1::2].min(-1)[0],
+                                              boxes[:, ::2].max(-1)[0], boxes[:, 1::2].max(-1)[0]], dim=-1)
+            else:
+                boxes_external = decode(candidate['loc_cir'], candidate['priors'])
 
             if self.use_cross_class_nms:
-                out_aft_nms = self.cc_fast_nms(net, boxes, mask_coeff, proto_data, scores, track_data,
-                                               prior_levels, self.nms_thresh, self.top_k)
+                out_aft_nms = self.cc_fast_nms(net, boxes, boxes_external, mask_coeff, proto_data, scores, track_data,
+                                               centerness, prior_levels, priors, self.nms_thresh, self.top_k)
             else:
                 out_aft_nms = self.fast_nms(net, boxes, mask_coeff, proto_data, scores, track_data,
                                             prior_levels, self.nms_thresh, self.top_k)
@@ -110,12 +120,10 @@ class Detect(object):
 
         return out_aft_nms
 
-    def cc_fast_nms(self, net, boxes, masks_coeff, proto_data, scores, track_data, prior_levels,
+    def cc_fast_nms(self, net, boxes,  boxes_external, masks_coeff, proto_data, scores, track_data, centerness, prior_levels, priors,
                     iou_threshold: float = 0.5, top_k: int = 100):
         with timer.env('Detect'):
             clip_frames = boxes.size(-1) // 4
-            iou_threshold /= clip_frames
-
             if self.train_masks:
                 if self.use_dynamic_mask:
                     det_masks_soft = net.DynamicMaskHead(proto_data.permute(2, 0, 1).unsqueeze(0), masks_coeff, boxes)
@@ -129,20 +137,26 @@ class Detect(object):
                         det_masks_soft = det_masks_all[:, :, :, 1]
                         det_masks_soft_non_target = det_masks_all[:, :, :, -1]
                     else:
-                        det_masks_soft = [generate_mask(proto_data[cdx], masks_coeff, boxes[:, cdx*4:(cdx+1)*4]) for cdx in range(clip_frames)]
+                        det_masks_soft = [generate_mask(proto_data[cdx], masks_coeff, boxes_external) for cdx in range(clip_frames)]
                         det_masks_soft = torch.stack(det_masks_soft, dim=-1)
 
             # Remove bounding boxes whose center beyond images or mask = 0
             boxes_c = center_size(boxes.reshape(-1, 4))
-            keep = ((boxes_c[:, :2] > 0) & ((boxes_c[:, :2] < 1))).reshape(-1, 2*clip_frames).sum(dim=-1) == 2*clip_frames
+            keep = ((boxes_c[:, :2] > 0) & (boxes_c[:, :2] < 1)).reshape(-1, 2*clip_frames).sum(dim=-1) >= clip_frames
             if self.train_masks:
-                non_empty_mask = (det_masks_soft.gt(0.5).sum(dim=[1, 2]) > 5).sum(dim=-1) == clip_frames
+                non_empty_mask = (det_masks_soft.gt(0.5).sum(dim=[1, 2]) > 5).sum(dim=-1) > 0
                 keep = keep & non_empty_mask
             boxes = boxes[keep]
             scores = scores[keep]
             if self.train_masks:
                 masks_coeff = masks_coeff[keep]
                 det_masks_soft = det_masks_soft[keep]
+            if centerness is not None:
+                centerness = centerness[keep]
+            if priors is not None:
+                priors = priors[keep]
+            if track_data is not None:
+                track_data = track_data[keep]
 
             if boxes.nelement() == 0:
                 out_after_NMS = {'box': torch.Tensor(), 'class': torch.Tensor(), 'score': torch.Tensor()}
@@ -156,13 +170,18 @@ class Detect(object):
             _, idx = scores.sort(0, descending=True)
             idx = idx[:top_k]
 
-            # Compute the pairwise IoU between the boxes
-            boxes_idx = boxes[idx]
-            if self.use_DIoU:
-                box_iou = [compute_DIoU(boxes_idx[:, cdx*4:(cdx+1)*4], boxes_idx[:, cdx*4:(cdx+1)*4]) for cdx in range(clip_frames)]
+            if not self.circumscribed_boxes_iou:
+                # Compute the pairwise IoU between the boxes
+                boxes_idx = boxes[idx]
+                if self.use_DIoU:
+                    box_iou = [compute_DIoU(boxes_idx[:, cdx*4:(cdx+1)*4], boxes_idx[:, cdx*4:(cdx+1)*4]) for cdx in range(clip_frames)]
+                else:
+                    box_iou = [jaccard(boxes_idx[:, cdx*4:(cdx+1)*4], boxes_idx[:, cdx*4:(cdx+1)*4]) for cdx in range(clip_frames)]
+                iou = [torch.stack(box_iou, dim=-1).mean(dim=-1)]
             else:
-                box_iou = [jaccard(boxes_idx[:, cdx*4:(cdx+1)*4], boxes_idx[:, cdx*4:(cdx+1)*4]) for cdx in range(clip_frames)]
-            iou = [torch.stack(box_iou, dim=-1).mean(dim=-1)]
+                boxes_external_idx = boxes_external[idx]
+                iou = [compute_DIoU(boxes_external_idx, boxes_external_idx)] if self.use_DIoU else \
+                      [jaccard(boxes_external_idx, boxes_external_idx)]
 
             if self.train_masks and self.nms_with_miou:
                 det_masks_idx = det_masks_soft[idx].gt(0.5).float()
@@ -172,6 +191,11 @@ class Detect(object):
             # Zero out the lower triangle of the cosine similarity matrix and diagonal
             iou = torch.stack(iou, dim=0).mean(dim=0)
             iou = torch.triu(iou, diagonal=1)
+            if self.cubic_mode and track_data is not None:
+                track_data_idx = track_data[idx]
+                cos_sim = track_data_idx @ track_data_idx.t()      # [n_dets, n_prev], val in [-1, 1]
+                sim = (cos_sim + 1) / 2.  # [0, 1]
+                iou = 0.5*iou + 0.5*torch.triu(sim, diagonal=1)
 
             # Now that everything in the diagonal and below is zeroed out, if we take the max
             # of the IoU matrix along the columns, each column will represent the maximum IoU
@@ -187,11 +211,15 @@ class Detect(object):
             scores = scores[idx_out]
 
             out_after_NMS = {'box': boxes, 'class': classes, 'score': scores}
+            out_after_NMS['priors'] = priors[idx_out]
+            out_after_NMS['prior_levels'] = prior_levels[idx_out]
             if self.train_masks:
                 out_after_NMS['mask_coeff'] = masks_coeff[idx_out]
                 out_after_NMS['mask'] = det_masks_soft[idx_out] if det_masks_soft.size(-1) > 1 else det_masks_soft[idx_out].squeeze(-1)
             if track_data is not None:
                 out_after_NMS['track'] = track_data[idx_out]
+            if centerness is not None:
+                out_after_NMS['centerness'] = centerness[idx_out]
 
             return out_after_NMS
 

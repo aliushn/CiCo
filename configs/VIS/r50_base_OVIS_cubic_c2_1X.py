@@ -8,7 +8,7 @@ MODEL = dict(
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
         CUBIC_CORRELATION_MODE=False,
-        # INITIALIZATION=reduced or inflated
+        # INITIALIZATION=reduced (even 2,4,6,8) or inflated
         CUBIC_MODE_WITH_INITIALIZATION='inflated')
 )
 

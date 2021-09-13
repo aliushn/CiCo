@@ -1,7 +1,6 @@
 import torch
 import numpy as np
-from layers.utils import jaccard, mask_iou, generate_mask, compute_comp_scores, generate_rel_coord, \
-    generate_track_gaussian, compute_kl_div
+from layers.utils import jaccard, mask_iou, compute_comp_scores, generate_track_gaussian, compute_kl_div
 from utils import timer
 
 import pyximport
