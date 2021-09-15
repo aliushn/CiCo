@@ -141,7 +141,7 @@ class T2SLoss(nn.Module):
         :param boxes_ref: bs * List[torch.tensor], predicted positive bounding boxes in the reference frame
         :param idx_ref:  the index of matched ground-truth objects
         :param mask_coeff_ref: mask coefficients of matched samples in reference frame
-        :param prototypes_tar: prototypes of matched samples in target frame
+        :param prototypes_tar: [bs, h, w, 1, n_mask], prototypes of matched samples in target frame
         :param gt_boxes_tar: a list of ground-truth bounding boxes
         :param gt_masks_tar: a list of ground-truth masks
         :param interpolation_mode: 'bilinear'
@@ -179,7 +179,7 @@ class T2SLoss(nn.Module):
                 masks_tar_gt_cur = gt_masks_tar[i][idx_ref[i]]
                 # Generate masks between shifted mask coefficients and prototypes in the key frame
                 shift_mask_coeff_tar = 0.5*(mask_coeff_ref[i].detach() + shift_mask_coeff_reg)
-                pred_masks_tar = generate_mask(prototypes_tar[i], shift_mask_coeff_tar, boxes_tar_gt_cur)
+                pred_masks_tar = generate_mask(prototypes_tar[i], shift_mask_coeff_tar, boxes_tar_gt_cur).squeeze(1)
                 h, w = pred_masks_tar.size()[-2:]
                 ds_masks_tar_gt_atr = F.interpolate(masks_tar_gt_cur.unsqueeze(0).float(), (h, w),
                                                     mode=interpolation_mode,

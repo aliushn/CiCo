@@ -55,6 +55,8 @@ def parse_args(argv=None):
                         help='Whether or not to display masks over bounding boxes')
     parser.add_argument('--display_bboxes', default=True, type=str2bool,
                         help='Whether or not to display bboxes around masks')
+    parser.add_argument('--display_bboxes_cir', default=True, type=str2bool,
+                        help='Whether or not to display bboxes around masks')
     parser.add_argument('--display_text', default=True, type=str2bool,
                         help='Whether or not to display text (class [score])')
     parser.add_argument('--display_scores', default=True, type=str2bool,
@@ -108,6 +110,7 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
     color_type = dets_out['box_ids'].view(-1)
     centerness = dets_out['centerness'][:args.top_k].view(-1).detach().cpu().numpy() if 'centerness' in dets_out.keys() else None
     num_tracked_mask = dets_out['tracked_mask'] if 'tracked_mask' in dets_out.keys() else None
+    boxes_cir = dets_out['box_cir'] if 'box_cir' in dets_out.keys() else None
     if 'mask' in dets_out.keys():
         masks = dets_out['mask'][:args.top_k]
 
@@ -153,7 +156,10 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
                 px1, py1, px2, py2 = dets_out['priors'][j, :]
                 draw_dotted_rectangle(img_numpy, px1, py1, px2, py2, color, 3, gap=10)
 
-            x1, y1, x2, y2 = boxes[j, :]
+            if args.display_bboxes_cir and boxes_cir is not None:
+                x1, y1, x2, y2 = boxes_cir[j, :]
+            else:
+                x1, y1, x2, y2 = boxes[j, :]
             score = scores[j]
             num_tracked_mask_j = num_tracked_mask[j] if num_tracked_mask is not None else None
 
@@ -183,8 +189,8 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
                     text_str = '%s' % _class
 
                 font_face = cv2.FONT_HERSHEY_DUPLEX
-                font_scale = 2
-                font_thickness = 2
+                font_scale = 1
+                font_thickness = 1
 
                 text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
 
@@ -519,25 +525,31 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', eval_clip_frames=1, out
 
             pred_frame = dict()
             for k, v in pred_clip.items():
-                if k in {'score', 'class', 'mask_coeff', 'box_ids'} and v is not None:
+                if k in {'score', 'class', 'mask_coeff', 'box_ids', 'box_cir'} and v is not None:
                     pred_frame[k] = v
+            if 'priors' in pred_clip.keys():
+                pred_frame['priors'] = pred_clip['priors'][:, :4]
 
             for batch_id, frame_id in enumerate(clip_frame_ids[:n_newly_frames]):
                 img_id = (vid, frame_id)
                 if train_masks:
-                    pred_frame['proto'] = pred_clip['proto'][batch_id]
+                    pred_frame['proto'] = pred_clip['proto'][:, :, batch_id]
                 if pred_clip['box'].size(0) == 0:
                     if train_masks:
                         pred_frame['mask'] = torch.Tensor()
                     pred_frame['box'] = torch.Tensor()
                 else:
                     if train_masks:
-                        pred_frame['mask'] = pred_clip['mask'][..., batch_id]
-                    pred_frame['box'] = pred_clip['box'][:, batch_id * 4:(batch_id + 1) * 4]
-                if 'priors' in pred_clip.keys():
-                    pred_frame['priors'] = pred_clip['priors'][:, batch_id * 4:(batch_id + 1) * 4]
+                        pred_frame['mask'] = pred_clip['mask'][:, batch_id]
+                    if pred_clip['box'].size(-1) == 4:
+                        pred_frame['box'] = pred_clip['box']
+                    else:
+                        pred_frame['box'] = pred_clip['box'][:, batch_id*4:(batch_id+1)*4]
                 if 'centerness' in pred_clip.keys():
-                    pred_frame['centerness'] = pred_clip['centerness'][:, batch_id]
+                    if pred_clip['centerness'].size(-1) == 1:
+                        pred_frame['centerness'] = pred_clip['centerness']
+                    else:
+                        pred_frame['centerness'] = pred_clip['centerness'][:, batch_id]
 
                 if args.display:
                     root_dir = os.path.join(output_dir, 'out', str(vid))

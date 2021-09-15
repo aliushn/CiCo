@@ -22,6 +22,8 @@ class Track(object):
         self.track_by_Gaussian = track_by_Gaussian
         self.train_masks = train_masks
 
+        self.circumscribed_boxes_iou = True
+
     def __call__(self, pred_outs_after_NMS, img_meta, img=None):
         """
         Args:
@@ -57,6 +59,7 @@ class Track(object):
 
         # get bbox and class after NMS
         det_bbox = detection['box']
+        det_bbox_cir = detection['box_cir']
         det_labels = detection['class']  # class
         det_score = detection['score']
         if 'mask' in detection.keys():
@@ -75,7 +78,7 @@ class Track(object):
             # save bbox and features for later matching
             self.prev_detection = dict()
             for k, v in detection.items():
-                if k in {'box', 'mask', 'class', 'track', 'track_mu', 'track_var', 'score'}:
+                if k in {'box', 'box_cir', 'mask', 'class', 'track', 'track_mu', 'track_var', 'score'}:
                     self.prev_detection[k] = v.clone()
             detection['box_ids'] = torch.arange(det_bbox.size(0))
             return detection
@@ -98,7 +101,10 @@ class Track(object):
                 sim = (cos_sim + 1) / 2  # [0, 1]
 
             label_delta = (self.prev_detection['class'] == det_labels.view(-1, 1)).float()
-            bbox_ious = jaccard(det_bbox[:, :4], self.prev_detection['box'][:, -4:])
+            if self.circumscribed_boxes_iou:
+                bbox_ious = jaccard(det_bbox_cir, self.prev_detection['box_cir'])
+            else:
+                bbox_ious = jaccard(det_bbox[:, :4], self.prev_detection['box'][:, -4:])
             if self.train_masks:
                 if self.clip_frames > 1:
                     mask_ious = mask_iou(det_masks[..., 0], self.prev_detection['mask'].gt(0.5).float()[..., -1])

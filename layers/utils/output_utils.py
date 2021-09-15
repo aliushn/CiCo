@@ -120,6 +120,14 @@ def postprocess_ytbvis(dets_output, img_meta, train_masks=True, mask_proto_coeff
     boxes[:, 1], boxes[:, 3] = sanitize_coordinates(boxes[:, 1], boxes[:, 3], ori_h, cast=False)
     dets['box'] = boxes.long()
 
+    if 'box_cir' in dets.keys():
+        boxes_cir = dets['box_cir']
+        boxes_cir[:, 0::2] /= s_w
+        boxes_cir[:, 1::2] /= s_h
+        boxes_cir[:, 0], boxes_cir[:, 2] = sanitize_coordinates(boxes_cir[:, 0], boxes_cir[:, 2], ori_w, cast=False)
+        boxes_cir[:, 1], boxes_cir[:, 3] = sanitize_coordinates(boxes_cir[:, 1], boxes_cir[:, 3], ori_h, cast=False)
+        dets['box_cir'] = boxes_cir.long()
+
     if 'priors' in dets.keys():
         priors = point_form(dets['priors'])
         priors[:, 0::2] /= s_w

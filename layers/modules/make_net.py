@@ -2,13 +2,13 @@ import torch.nn as nn
 from layers.utils.interpolate import InterpolateModule
 
 
-def make_net(in_channels, conf, include_bn=False, include_last_relu=True):
+def make_net(in_channels, conf, use_3D=False, include_bn=False, include_last_relu=True):
     """
     A helper function to take a config setting and turn it into a network.
     Used by protonet and extrahead. Returns (network, out_channels)
     """
 
-    def make_layer(layer_cfg):
+    def make_layer(layer_cfg, use_3D=False):
         nonlocal in_channels
 
         # Possible patterns:
@@ -31,15 +31,25 @@ def make_net(in_channels, conf, include_bn=False, include_last_relu=True):
             kernel_size = layer_cfg[1]
 
             if kernel_size > 0:
-                layer1 = nn.Conv2d(in_channels, num_channels, kernel_size, padding=layer_cfg[2])
-                if include_bn:
-                    BN = nn.BatchNorm2d(num_channels)
-                    layer = [layer1, BN]
+                if use_3D:
+                    layer1 = nn.Conv3d(in_channels, num_channels, kernel_size, padding=layer_cfg[2])
+                    if include_bn:
+                        BN = nn.BatchNorm3d(num_channels)
+                        layer = [layer1, BN]
+                    else:
+                        layer = [layer1]
                 else:
-                    layer = [layer1]
+                    layer1 = nn.Conv2d(in_channels, num_channels, kernel_size, padding=layer_cfg[2])
+                    if include_bn:
+                        BN = nn.BatchNorm2d(num_channels)
+                        layer = [layer1, BN]
+                    else:
+                        layer = [layer1]
             else:
                 if num_channels is None:
-                    layer = [InterpolateModule(scale_factor=-kernel_size, mode='bilinear', align_corners=False)]
+                    up_mode = 'trilinear' if use_3D else 'bilinear'
+                    kernel_size = (1, -kernel_size, -kernel_size) if use_3D else (-kernel_size, -kernel_size)
+                    layer = [InterpolateModule(scale_factor=kernel_size, mode=up_mode, align_corners=True)]
                 else:
                     layer = [nn.ConvTranspose2d(in_channels, num_channels, -kernel_size, padding=layer_cfg[2])]
 
@@ -54,7 +64,7 @@ def make_net(in_channels, conf, include_bn=False, include_last_relu=True):
         return layer + [nn.ReLU(inplace=True)]
 
     # Use sum to concat together all the component layer lists
-    net = sum([make_layer(x) for x in conf], [])
+    net = sum([make_layer(x, use_3D) for x in conf], [])
     if not include_last_relu:
         if include_bn:
             net = net[:-2] if conf[-1][1] > 0 else net[:-1]

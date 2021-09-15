@@ -1,5 +1,4 @@
-
-import torch, torchvision
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -7,6 +6,8 @@ from .Featurealign import FeatureAlign
 from utils import timer
 from itertools import product
 from math import sqrt
+
+from ..visualization_temporal import display_cubic_weights
 
 
 class PredictionModule(nn.Module):
@@ -66,12 +67,16 @@ class PredictionModule(nn.Module):
         padding = [(kernel_size[0] - 1) // 2, (kernel_size[1] - 1) // 2]
         if parent is None:
 
-            self.bbox_layer = nn.Conv2d(self.in_channels, self.num_priors*4*self.clip_frames,
+            if cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES and cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
+                # only needs a circumscribed box of multiple frames for instance segmentation
+                self.boxes_dim = self.num_priors
+            else:
+                self.boxes_dim = self.num_priors*self.clip_frames
+            self.bbox_layer = nn.Conv2d(self.in_channels, self.boxes_dim*4,
                                         kernel_size=kernel_size, padding=padding)
-
-            if cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
-                self.circumscribed_bbox_layer = nn.Conv2d(self.in_channels, self.num_priors*4,
-                                                          kernel_size=kernel_size, padding=padding)
+            if cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
+                self.centerness_layer = nn.Conv2d(self.in_channels, self.boxes_dim,
+                                                  kernel_size=kernel_size, padding=padding)
 
             if cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
                 if cfg.STMASK.FC.FCB_USE_DCN_CLASS:
@@ -105,10 +110,6 @@ class PredictionModule(nn.Module):
                 else:
                     self.mask_layer = nn.Conv2d(self.in_channels, self.num_priors * self.mask_dim,
                                                 kernel_size=kernel_size, padding=padding)
-
-            if cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
-                self.centerness_layer = nn.Conv2d(self.in_channels, self.num_priors*self.clip_frames,
-                                                  kernel_size=kernel_size, padding=padding)
 
             # What is this ugly lambda doing in the middle of all this clean prediction module code?
             def make_extra(num_layers, in_channels):
@@ -148,22 +149,19 @@ class PredictionModule(nn.Module):
         preds = {'priors': priors, 'prior_levels': prior_levels}
 
         bbox_x = src.bbox_extra(x)
-        bbox = src.bbox_layer(bbox_x)
-        preds['loc'] = bbox.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, 4*self.clip_frames)
+        bbox = src.bbox_layer(bbox_x).permute(0, 2, 3, 1).contiguous()
+        preds['loc'] = bbox.reshape(bs, conv_h*conv_w*self.num_priors, -1)
 
-        if self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
-            preds['loc_cir'] = src.circumscribed_bbox_layer(bbox_x).permute(0, 2, 3, 1).contiguous().reshape(bs, -1, 4)
+        # Centerness for Boxes
+        if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
+            centerness = src.centerness_layer(bbox_x).permute(0, 2, 3, 1).contiguous()
+            preds['centerness'] = centerness.reshape(bs, conv_h*conv_w*self.num_priors, -1).sigmoid()
 
         # Classification
         if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
             conf_x = src.conf_extra(x)
             conf = src.conf_layer(conf_x, bbox.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_CLASS else src.conf_layer(conf_x)
             preds['conf'] = conf.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.num_classes)
-
-        # Centerness for Boxes
-        if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
-            centerness = src.centerness_layer(bbox_x).permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.clip_frames)
-            preds['centerness'] = torch.sigmoid(centerness)
 
         # Mask coefficients
         if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:

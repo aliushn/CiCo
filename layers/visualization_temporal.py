@@ -368,7 +368,6 @@ def display_shifted_masks(shifted_masks, img_meta=None):
         plt.savefig(path)
         plt.clf()
 
-
 def draw_dotted_rectangle(img, x0, y0, x1, y1, color, thickness=1, gap=20):
 
     draw_dotted_line(img, (x0, y0), (x0, y1), color, thickness, gap, vertical=True)
@@ -394,4 +393,34 @@ def draw_dotted_line(img, pt1, pt2, color, thickness=1, gap=20, vertical=False):
             cv2.line(img, p, (p[0] + int(gap//3), p[1]), color, thickness)
 
 
-
+def display_cubic_weights(weights, idx, img_meta=None, type=1):
+    path_dir = 'weights/YTVIS2019/r50_base_YTVIS2019_cubic_c4_reduced_cir_boxes_1X/'
+    if type == 1:
+        path_dir = os.path.join(path_dir, 'weights/')
+        if not os.path.exists(path_dir):
+            os.makedirs(path_dir)
+        c_out, c_in, h, w = weights.size()
+        for i in range(h):
+            for j in range(w):
+                data_numpy = weights[:16, ::4, i, j].detach().cpu().numpy()
+                plt.axis('off')
+                cm = plt.cm.get_cmap('rainbow')
+                plt.pcolormesh(data_numpy*10, cmap=cm)
+                plt.title(str(i)+'_'+str(j))
+                plt.savefig(path_dir+str(i)+'_'+str(j)+'.png')
+                plt.clf()
+    elif type == 2:
+        path_dir = os.path.join(path_dir, 'conf', str(img_meta[-1]['video_id']))
+        if not os.path.exists(path_dir):
+            os.makedirs(path_dir)
+        # weights: [bs, h*w*3, num_classes]
+        h, w = 48//2**idx, 80//2**idx
+        bs, _, num_classes = weights.size()
+        weights = weights.reshape(bs, h, w, -1, 10).sigmoid()
+        for i in range(bs):
+            data_numpy = weights[i].permute(2,0,3,1).reshape(-1, 10*w)
+            data_numpy = data_numpy.detach().cpu().numpy()
+            plt.axis('off')
+            plt.imshow(data_numpy)
+            plt.savefig(path_dir+'/conf_'+str(img_meta[-1]['frame_id'])+'_'+str(idx)+'.png')
+            plt.clf()

@@ -4,9 +4,11 @@ import torch.nn.functional as F
 import numpy as np
 from collections import defaultdict
 
-from layers.modules import PredictionModule_FC, PredictionModule, PredictionModule_3D, make_net, FPN, BiFPN, TemporalNet, DynamicMaskHead
+from layers.modules import PredictionModule_FC, PredictionModule, PredictionModule_3D, make_net, FPN, BiFPN, TemporalNet, \
+    ProtoNet, ProtoNet3D
 from layers.functions import Detect, Track, Track_TF, Track_TF_Clip
 from layers.utils import aligned_bilinear, correlate_operator
+from layers.visualization_temporal import display_cubic_weights
 from backbone import construct_backbone
 from utils import timer
 
@@ -73,22 +75,8 @@ class STMask(nn.Module):
         self.train_masks = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
         in_channels = cfg.MODEL.FPN.NUM_FEATURES
         if self.train_masks:
-            self.proto_src = cfg.MODEL.MASK_HEADS.PROTO_SRC
-            if self.proto_src is not None and len(self.proto_src) > 1:
-                self.mask_refine = nn.ModuleList([nn.Sequential(*[
-                    nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
-                    nn.BatchNorm2d(in_channels),
-                    nn.ReLU(inplace=True)
-                ]) for _ in range(len(self.proto_src))])
-
-            # The include_last_relu=false here is because we might want to change it to another function
-            self.proto_net, proto_channles = make_net(in_channels, cfg.MODEL.MASK_HEADS.PROTO_NET, include_bn=True,
-                                                      include_last_relu=True)
-            # the last two Conv layers for predicting prototypes
-            proto_arch = [(proto_channles, 3, 1), (cfg.MODEL.MASK_HEADS.MASK_DIM, 1, 0)]
-            self.proto_conv, _ = make_net(proto_channles, proto_arch, include_bn=True, include_last_relu=False)
-            if cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
-                self.DynamicMaskHead = DynamicMaskHead()
+            self.ProtoNet = ProtoNet(cfg, in_channels) if not cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE else \
+                ProtoNet3D(cfg, in_channels)
 
         # ------- Build multi-scales prediction head  ------------
         self.pred_scales = cfg.MODEL.BACKBONE.PRED_SCALES
@@ -127,8 +115,7 @@ class STMask(nn.Module):
         self.Detect = Detect(cfg.DATASETS.NUM_CLASSES, cfg.TEST.DETECTIONS_PER_IMG, cfg.TEST.NMS_CONF_THRESH,
                              nms_thresh=cfg.TEST.NMS_IoU_THRESH, train_masks=self.train_masks,
                              nms_with_miou=cfg.TEST.NMS_WITH_MIoU, use_DIoU=cfg.MODEL.PREDICTION_HEADS.USE_DIoU,
-                             cubic_mode=cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE,
-                             circumscribed_boxes=cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES)
+                             cubic_mode=cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE, clip_frames=self.clip_frames)
 
         # ---------------- Build track head ----------------
         if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
@@ -169,8 +156,10 @@ class STMask(nn.Module):
         model_dict = self.state_dict()
         for key in list(state_dict.keys()):
             if key.startswith('module.'):
-                state_dict[key[7:]] = state_dict[key]
-                del state_dict[key]
+                state_dict[key[7:]] = state_dict.pop(key)
+            if key.split('.')[0] in {'mask_refine', 'proto_net', 'proto_conv'}:
+                new_key = 'ProtoNet.'+key
+                state_dict[new_key] = state_dict.pop(key)
 
         # For backward compatability, remove these (the new variable is called layers)
         for key in list(state_dict.keys()):
@@ -197,9 +186,11 @@ class STMask(nn.Module):
         for key in list(state_dict.keys()):
             if key.startswith('module'):
                 state_dict[key[7:]] = state_dict.pop(key)
+            if key.split('.')[0] in {'mask_refine', 'proto_net', 'proto_conv'}:
+                new_key = 'ProtoNet.'+key
+                state_dict[new_key] = state_dict.pop(key)
 
         model_dict = self.state_dict()
-
         # Initialize the rest of the conv layers with xavier
         print('Init all weights by Xavier:')
         for name, module in self.named_modules():
@@ -222,71 +213,66 @@ class STMask(nn.Module):
             if key in model_dict.keys():
                 if model_dict[key].shape == state_dict[key].shape:
                     model_dict[key] = state_dict[key]
-                elif self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE and key.startswith('prediction_layers'):
+                elif self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
                     if 'conf_layer' in key:
                         continue
-
+                    # print(key, state_dict[key].size(), model_dict[key].size())
                     if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
                         print('load 3D parameters with inflated operation from pre-trained models:', key)
-                        if key.split('.')[-2] in {'bbox_layer', 'centerness_layer', 'mask_layer'}:
+                        if model_dict[key].size(2) == 1:
                             model_dict[key] = state_dict[key].unsqueeze(2).to(model_dict[key].device)
                         else:
-                            model_dict[key] = (state_dict[key].unsqueeze(2).repeat(1,1,3,1,1) / 3.).to(model_dict[key].device)
+                            model_dict[key][:,:,1] = state_dict[key].to(model_dict[key].device)
 
                     else:
-                        scale = self.clip_frames//self.reduced_scale
-                        if self.block_diagonal:
-                            print(key, state_dict[key].size(), model_dict[key].size())
-                            if state_dict[key].dim() == 1:
-                                if key.split('.')[-2] in {'bbox_layer', 'centerness_layer'}:
-                                    model_dict[key] = state_dict[key].repeat(self.clip_frames).to(model_dict[key].device)
-                                else:
-                                    model_dict[key] = state_dict[key].repeat(scale).to(model_dict[key].device)
+                        print('load parameters with inflated/reduced operation from pre-trained models:', key)
+                        if state_dict[key].dim() == 1:
+                            scale = model_dict[key].size(0)//state_dict[key].size(0)
+                            init_weights = state_dict[key].repeat(scale).to(model_dict[key].device)
+                            if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
+                                model_dict[key] = init_weights
                             else:
+                                model_dict[key][self.flag_corr_channels] = init_weights
+                        else:
+                            scale = self.clip_frames//self.reduced_scale
+                            c_out, c_in, kh, kw = model_dict[key].size()
+                            c_out_pre, c_in_pre = state_dict[key].size()[:2]
+                            if self.block_diagonal:
                                 for c in range(scale):
                                     if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
                                         flag_channels = range(c*self.fpn_num_features, (c+1)*self.fpn_num_features)
                                     else:
                                         single = self.fpn_num_features+self.correlation_patch_size**2
                                         flag_channels = range(c*single, (c+1)*single-self.correlation_patch_size**2)
-                                    if key.split('.')[-2] in {'bbox_layer', 'centerness_layer'}:
-                                        flag_channels_last = range(c*self.reduced_scale*state_dict[key].size(0),
-                                                                   (c+1)*self.reduced_scale*state_dict[key].size(0))
-                                        model_dict[key][flag_channels_last][:, flag_channels] = state_dict[key].repeat(self.reduced_scale,1,1,1).to(model_dict[key].device)
-                                    elif key.split('.')[-2] in {'mask_layer'}:
-                                        model_dict[key][:, flag_channels] = state_dict[key].to(model_dict[key].device)
+                                    if key.split('.')[-2][-5:] == 'layer':
+                                        if c_out != c_out_pre:
+                                            flag_channels_out = range(c*c_out_pre, (c+1)*c_out_pre)
+                                        else:
+                                            flag_channels_out = range(c_out_pre)
                                     else:
-                                        model_dict[key][flag_channels][:, flag_channels] = state_dict[key].to(model_dict[key].device)
+                                        flag_channels_out = flag_channels
+                                    model_dict[key][flag_channels_out][:, flag_channels] = state_dict[key].to(model_dict[key].device)
 
-                        else:
-                            # Inflated or reduced weights from 2D (single frame) to 3D (multi-frames)
-                            print('load parameters with inflated/reduced operation from pre-trained models:', key)
-                            if key.split('.')[-2] in {'bbox_layer', 'centerness_layer'}:
-                                if state_dict[key].dim() == 4:
-                                    _, c_in, kh, kw = state_dict[key].shape
-                                    init_weights = state_dict[key].reshape(self.num_priors, -1, c_in, kh, kw).repeat(1, self.clip_frames, scale, 1, 1).reshape(-1, scale*c_in, kh, kw)
+                            else:
+                                # Inflated or reduced weights from 2D (single frame) to 3D (multi-frames)
+                                if key.split('.')[-2][-5:] == 'layer':
+                                    if c_out != c_out_pre:
+                                        init_weights = state_dict[key].reshape(self.num_priors, -1, c_in, kh, kw)\
+                                            .repeat(1, self.clip_frames, scale, 1, 1).reshape(-1, scale*c_in, kh, kw)
+                                    else:
+                                        init_weights = state_dict[key].repeat(1, scale, 1, 1)
                                 else:
-                                    init_weights = state_dict[key].reshape(self.num_priors, -1).repeat(1, self.clip_frames).reshape(-1)
-                            elif key.split('.')[-2] in {'mask_layer'}:
-                                init_weights = state_dict[key].repeat(1, scale, 1, 1)
-                            else:
-                                init_weights = state_dict[key].repeat(scale, scale, 1, 1) \
-                                            if state_dict[key].dim() == 4 else state_dict[key].repeat(scale)
-                            init_weights /= float(scale)
+                                    init_weights = state_dict[key].repeat(scale, scale, 1, 1)
+                                init_weights /= float(scale)
 
-                            if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
-                                model_dict[key] = init_weights.to(model_dict[key].device)
-                            else:
-                                if 'extra' in key:
-                                    if state_dict[key].dim() == 4:
+                                if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
+                                    model_dict[key] = init_weights.to(model_dict[key].device)
+                                else:
+                                    if 'extra' in key:
                                         model_dict[key][self.flag_corr_channels, self.flag_corr_channels] = init_weights.to(model_dict[key].device)
                                     else:
-                                        model_dict[key][self.flag_corr_channels] = init_weights.to(model_dict[key].device)
-                                else:
-                                    if state_dict[key].dim() == 4:
                                         model_dict[key][:, self.flag_corr_channels] = init_weights.to(model_dict[key].device)
-                                    else:
-                                        model_dict[key] = init_weights.to(model_dict[key].device)
+
                 else:
                     print('Size is different in pre-trained model and in current model:', key)
             else:
@@ -342,7 +328,7 @@ class STMask(nn.Module):
     def train(self, mode=True):
         super().train(mode)
 
-    def forward_single(self, x):
+    def forward_single(self, x, img_meta=None):
         """ The input should be of size [batch_size, 3, img_h, img_w] """
 
         with timer.env('backbone'):
@@ -357,28 +343,7 @@ class STMask(nn.Module):
 
         if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
             with timer.env('proto '):
-                if self.proto_src is None:
-                    proto_x = x
-                else:
-                    if len(self.proto_src) == 1:
-                        proto_x = fpn_outs[self.proto_src[0]]
-                    else:
-                        for src_i, src in enumerate(self.proto_src):
-                            if src_i == 0:
-                                proto_x = self.mask_refine[src_i](fpn_outs[src])
-                            else:
-                                proto_x_p = self.mask_refine[src_i](fpn_outs[src])
-                                target_h, target_w = proto_x.size()[2:]
-                                h, w = proto_x_p.size()[2:]
-                                assert target_h % h == 0 and target_w % w == 0
-                                factor = target_h // h
-                                proto_x_p = aligned_bilinear(proto_x_p, factor)
-                                proto_x = proto_x + proto_x_p
-
-                proto_out_features = self.proto_net(proto_x)
-                # Activation function is RELU
-                # Move the features last so the multiplication is easy
-                prototypes = F.relu(self.proto_conv(proto_out_features)).permute(0, 2, 3, 1).contiguous()
+                prototypes = self.ProtoNet(x, fpn_outs)
 
         with timer.env('pred_heads'):
             pred_outs = {'priors': [], 'prior_levels': []}
@@ -388,8 +353,6 @@ class STMask(nn.Module):
                 pred_outs['track'] = []
             if self.cfg.MODEL.BOX_HEADS.TRAIN_BOXES:
                 pred_outs['loc'] = []
-            if self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
-                pred_outs['loc_cir'] = []
             if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
                 pred_outs['centerness'] = []
             if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
@@ -427,6 +390,8 @@ class STMask(nn.Module):
 
                 p = pred_layer(pred_x, idx)
 
+                # display_cubic_weights(p['conf'], idx, img_meta, type=2)
+
                 for k, v in p.items():
                     pred_outs[k].append(v)  # [batch_size, h*w*anchors, dim
 
@@ -449,7 +414,7 @@ class STMask(nn.Module):
 
     def forward(self, x, img_meta=None):
         batch_size, c, h, w = x.size()
-        fpn_outs, pred_outs = self.forward_single(x)
+        fpn_outs, pred_outs = self.forward_single(x, img_meta)
         # Expand data for nn.DataParallel
         pred_outs['priors'] = pred_outs['priors'].repeat(batch_size//self.clip_frames, 1, 1)
         pred_outs['prior_levels'] = pred_outs['prior_levels'].repeat(batch_size//self.clip_frames, 1)

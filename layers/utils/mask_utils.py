@@ -80,7 +80,8 @@ def plot_protos(protos, pred_masks, img_meta, num):
                          str(num), '.png']))
 
 
-def generate_mask(proto_data, mask_coeff, bbox=None, mask_dim=32, use_sipmask=False, proto_coeff_occlusion=False):
+def generate_mask(proto_data, mask_coeff, bbox=None, mask_dim=32, frame_wise=False,
+                  use_sipmask=False, proto_coeff_occlusion=False):
     '''
     Activation function of mask is sigmoid
     :param proto_data : [h, w, 32] or [n, h, w, 32]
@@ -103,7 +104,7 @@ def generate_mask(proto_data, mask_coeff, bbox=None, mask_dim=32, use_sipmask=Fa
     else:
 
         if not proto_coeff_occlusion:
-            pred_masks = generate_single_mask(proto_data, mask_coeff)
+            pred_masks = generate_single_mask(proto_data, mask_coeff, frame_wise)
 
         else:
             # background
@@ -115,26 +116,23 @@ def generate_mask(proto_data, mask_coeff, bbox=None, mask_dim=32, use_sipmask=Fa
             pred_masks = torch.stack([pred_masks_b, pred_masks_t, pred_masks_o], dim=-2)    # [h, w, 3, n]
         pred_masks = pred_masks.sigmoid()
         if bbox is not None:
-            pred_masks = crop(pred_masks, bbox)                                            # [h, w, n] or [h, w, 3, n]
+            pred_masks = crop(pred_masks, bbox)                                             # [h, w, T, n]
 
     if dim_proto == 3:
         pred_masks = pred_masks.permute(2, 0, 1).contiguous()                               # [n, h, w]
     else:
-        pred_masks = pred_masks.permute(3, 0, 1, 2).contiguous()                            # [n, h, w, 3]
+        pred_masks = pred_masks.permute(3, 2, 0, 1).contiguous()                            # [n, T, h, w]
 
     return pred_masks
 
 
-def generate_single_mask(proto_data, mask_coeff):
-    dim_proto = proto_data.dim()
-    if dim_proto == 3:
+def generate_single_mask(proto_data, mask_coeff, frame_wise=False):
+    if not frame_wise:
         pred_masks = proto_data @ mask_coeff.t()
-    elif dim_proto == 4:
+    else:
         # to generate masks for all objects in a video clip
         pred_masks = (proto_data * mask_coeff.unsqueeze(1).unsqueeze(2)).sum(dim=-1)
         pred_masks = pred_masks.permute(1, 2, 0).contiguous()
-    else:
-        RuntimeError('Please input the proto_data with size [h, w, c] or [n, h, w, c]!')
 
     return pred_masks
 
