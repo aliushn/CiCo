@@ -1,6 +1,6 @@
 
 _base_ = ['configs/_base_/models/r50_base.yaml', 'configs/_base_/models/r101_inter3_base.yaml',
-          'configs/VIS/base_VIS.py', 'configs/VIS/r101_base_YTVIS2019_1X.py']
+          'configs/VIS/base_VIS.py']
 
 MODEL = dict(
     BACKBONE=dict(

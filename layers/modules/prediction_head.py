@@ -48,6 +48,7 @@ class PredictionModule(nn.Module):
         self.pred_scales = pred_scales
         self.deform_groups = deform_groups
         self.parent = [parent]  # Don't include this in the state dict
+        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE else 1
 
         if cfg.MODEL.MASK_HEADS.USE_SIPMASK:
             self.mask_dim = self.mask_dim * cfg.MODEL.MASK_HEADS.SIPMASK_HEAD
@@ -60,8 +61,6 @@ class PredictionModule(nn.Module):
                 self.mask_dim += self.mask_dim * 2
         else:
             self.mask_dim = self.mask_dim
-
-        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE else 1
 
         kernel_size = (3, 3)
         padding = [(kernel_size[0] - 1) // 2, (kernel_size[1] - 1) // 2]

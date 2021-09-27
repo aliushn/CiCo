@@ -73,21 +73,20 @@ class MultiBoxLoss(nn.Module):
             * Only if mask_type == lincomb
         """
 
-        if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
-            self.clip_frames = self.cfg.SOLVER.NUM_CLIP_FRAMES
-            if not self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
-                predictions['priors'] = predictions['priors'].repeat(1, 1, self.clip_frames)
-
-        elif self.cfg.DATASETS.TYPE not in {'coco', 'det'}:
+        if self.cfg.DATASETS.TYPE not in {'coco', 'det'}:
             # In video domain, we load GT annotations as [n_objs, n_clip_frames, ...],
-            # So we have to unfold them in the second dim to do frame-level detection or segmentation
+            # So we have to unfold them in the temporal dim (2-th) to do frame-level detection or segmentation
             clip_frames = gt_boxes[0].size(1)
-            gt_boxes = sum([self._split(boxes, dim=1) for boxes in gt_boxes], [])
-            if None not in gt_masks:
-                gt_masks = sum([self._split(masks, dim=1) for masks in gt_masks], [])
-            gt_labels = sum([[labels]*clip_frames for labels in gt_labels], [])
-            gt_ids = sum([[ids]*clip_frames for ids in gt_ids], [])
-            num_crowds = sum([[num]*clip_frames for num in num_crowds], [])
+            if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
+                if not self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
+                    predictions['priors'] = predictions['priors'].repeat(1, 1, clip_frames)
+            else:
+                gt_boxes = sum([split_squeeze(boxes, dim=1) for boxes in gt_boxes], [])
+                if None not in gt_masks:
+                    gt_masks = sum([split_squeeze(masks, dim=1) for masks in gt_masks], [])
+                gt_labels = sum([[labels]*clip_frames for labels in gt_labels], [])
+                gt_ids = sum([[ids]*clip_frames for ids in gt_ids], [])
+                num_crowds = sum([[num]*clip_frames for num in num_crowds], [])
 
         losses, ids_t = self.multibox_loss(predictions, gt_boxes, gt_labels, gt_masks, gt_ids, num_crowds)
         for k, v in losses.items():
@@ -95,12 +94,6 @@ class MultiBoxLoss(nn.Module):
                 print(k)
 
         return losses
-
-    def _split(self, x, dim=-1):
-        x_list = list(torch.split(x, 1, dim=dim))
-        for i in range(len(x_list)):
-            x_list[i] = x_list[i].squeeze(dim)
-        return x_list
 
     def multibox_loss(self, predictions, gt_boxes, gt_labels, gt_masks, gt_ids, num_crowds):
         # ----------------------------------  Prepare Data ----------------------------------
@@ -110,6 +103,9 @@ class MultiBoxLoss(nn.Module):
         mask_coeff, proto_data, segm_data = None, None, None
         if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
             mask_coeff, proto_data = predictions['mask_coeff'], predictions['proto']
+            if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
+                proto_data = [list(torch.split(proto_data[cdx], 1, dim=-2)) for cdx in range(proto_data.size(0))]
+                proto_data = torch.stack(sum(proto_data, []), dim=0)
             if self.cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS:
                 segm_data = predictions['sem_seg']
         track_data = predictions['track'] if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK else None
@@ -200,11 +196,9 @@ class MultiBoxLoss(nn.Module):
                         reduction='sum')
                     losses['C_focal'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * class_loss / len(pos_inds)
                 else:
-                    neg = self.select_neg_bboxes(conf_data_unfold, conf_t_unfold, ratio=3, type='class')
+                    neg = self.select_neg_bboxes(conf_data_unfold, conf_t_unfold, ratio=3)
                     keep = (pos.reshape(-1) + neg).gt(0)
                     class_loss = F.cross_entropy(conf_data_unfold[keep], conf_t_unfold[keep], reduction='mean')
-                    # class_loss = F.binary_cross_entropy_with_logits(conf_data_unfold[keep], class_target[keep],
-                    # reduction='mean')
                     losses['C'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * class_loss
 
             # --------------------------------- Tracking loss ------------------------------------------------
@@ -218,15 +212,12 @@ class MultiBoxLoss(nn.Module):
 
             # ------------------------------- Track to segment -----------------------------------------------
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and self.cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
-                idx_t_split = torch.split(idx_t[pos].reshape(-1), num_objs_per_frame)
-                mask_coeff_split = torch.split(mask_coeff[pos].reshape(-1, mask_coeff.size(-1)), num_objs_per_frame)
-                losses_t2s = self.T2SLoss(predictions['fpn_feat'], gt_boxes, gt_masks, pred_boxes_p_split,
-                                          idx_t_split, mask_coeff_split, proto_data)
+                losses_t2s = self.T2SLoss(predictions['fpn_feat'], gt_boxes, gt_masks, proto_data)
                 losses.update(losses_t2s)
 
         return losses, ids_t
 
-    def select_neg_bboxes(self, conf_data, conf_t, ratio=3, type='class', use_most_confident=True):
+    def select_neg_bboxes(self, conf_data, conf_t, ratio=3, use_most_confident=True):
         '''
         :param conf_data: [n, num_classes]
         :param conf_t: [n, 1]
@@ -235,15 +226,12 @@ class MultiBoxLoss(nn.Module):
         '''
 
         # Compute max conf across batch for hard negative mining
-        if type == 'class':
-            if use_most_confident:
-                # i.e. max(softmax) along classes > 0
-                conf_data = F.softmax(conf_data, dim=1)
-                loss_c, _ = conf_data[:, 1:].max(dim=1)
-            else:
-                loss_c = log_sum_exp(conf_data) - conf_data[:, 0]
+        if use_most_confident:
+            # i.e. max(softmax) along classes > 0
+            conf_data = F.softmax(conf_data, dim=1)
+            loss_c, _ = conf_data[:, 1:].max(dim=1)
         else:
-            loss_c = torch.sigmoid(conf_data).view(-1)
+            loss_c = log_sum_exp(conf_data) - conf_data[:, 0]
 
         # Hard Negative Mining
         num_pos = (conf_t > 0).sum()
@@ -314,7 +302,7 @@ class MultiBoxLoss(nn.Module):
         return rep_loss / max(n, 1.)
 
     def track_loss(self, track_data, pos, ids_t=None):
-        clip_frames = 1 if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE else self.cfg.SOLVER.NUM_CLIP_FRAMES
+        clip_frames = pos.size(0) if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE else self.cfg.SOLVER.NUM_CLIP_FRAMES
         n_clips = pos.size(0) // clip_frames
 
         loss = torch.tensor(0., device=track_data.device)
@@ -439,3 +427,9 @@ class MultiBoxLoss(nn.Module):
 
         return sem_loss / float(bs) * self.cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS
 
+
+def split_squeeze(x, dim=-1):
+    x_list = list(torch.split(x, 1, dim=dim))
+    for i in range(len(x_list)):
+        x_list[i] = x_list[i].squeeze(dim)
+    return x_list

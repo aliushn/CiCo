@@ -104,24 +104,27 @@ def generate_mask(proto_data, mask_coeff, bbox=None, mask_dim=32, frame_wise=Fal
     else:
 
         if not proto_coeff_occlusion:
-            pred_masks = generate_single_mask(proto_data, mask_coeff, frame_wise)
+            pred_masks = torch.sigmoid(generate_single_mask(proto_data, mask_coeff, frame_wise))
+            if bbox is not None:
+                pred_masks = crop(pred_masks, bbox)                                         # [h, w, T, n]
 
         else:
-            # background
-            pred_masks_b = generate_single_mask(proto_data, mask_coeff[:, :mask_dim])
             # target objects
-            pred_masks_t = generate_single_mask(proto_data, mask_coeff[:, mask_dim:mask_dim*2])
+            pred_masks_t = torch.sigmoid(generate_single_mask(proto_data, mask_coeff[:, :mask_dim]))
             # parts from overlapped objects
-            pred_masks_o = generate_single_mask(proto_data, mask_coeff[:, mask_dim*2:])
-            pred_masks = torch.stack([pred_masks_b, pred_masks_t, pred_masks_o], dim=-2)    # [h, w, 3, n]
-        pred_masks = pred_masks.sigmoid()
-        if bbox is not None:
-            pred_masks = crop(pred_masks, bbox)                                             # [h, w, T, n]
+            pred_masks_o = torch.sigmoid(generate_single_mask(proto_data, mask_coeff[:, mask_dim:mask_dim*2]))
+            if bbox is not None:
+                pred_masks_t = crop(pred_masks_t, bbox)
+                pred_masks_o = crop(pred_masks_o, bbox)                                     # [h, w, T, n]
+            pred_masks = torch.stack([pred_masks_t, pred_masks_o], dim=-1)                  # [h, w, T, n, 2]
 
     if dim_proto == 3:
         pred_masks = pred_masks.permute(2, 0, 1).contiguous()                               # [n, h, w]
-    else:
-        pred_masks = pred_masks.permute(3, 2, 0, 1).contiguous()                            # [n, T, h, w]
+    elif dim_proto == 4:
+        if pred_masks.dim() == 4:
+            pred_masks = pred_masks.permute(3, 2, 0, 1).contiguous()                        # [n, T, h, w]
+        else:
+            pred_masks = pred_masks.permute(3, 4, 2, 0, 1).contiguous()                     # [n, 2, T, h, w]
 
     return pred_masks
 

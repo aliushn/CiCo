@@ -3,7 +3,10 @@ _base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VIS/base_VIS.py']
 MODEL = dict(
     BACKBONE=dict(
         CONV_BODY='ResNet50',
-        PATH='STMask_resnet50_coco_960_46_340000.pth')
+        PATH='STMask_resnet50_coco_960_46_340000.pth'),
+
+    CLASS_HEADS=dict(
+        USE_FOCAL_LOSS=False)
 )
 
 DATASETS = dict(
@@ -14,14 +17,11 @@ DATASETS = dict(
     VALID='valid_OVIS_dataset',
     TEST='test_OVIS_dataset')
 
-TEST = dict(
-    DETECTIONS_PER_IMG=200,
-    NMS_IoU_THRESH=0.4,
-    NMS_CONF_THRESH=0.2,
-    NMS_WITH_BIoU=True,
-    NMS_WITH_MIoU=True)
+SOLVER = dict(
+    LR_STEPS=(16, 20),
+    MAX_EPOCH=24)
 
 OUTPUT_DIR = 'weights/OVIS/'
-NAME = 'r50_base_OVIS_1X'
+NAME = 'r50_base_OVIS_ohem_2X'
 
 

@@ -22,7 +22,7 @@ DATASETS = dict(
     TEST='test_YouTube_VOS2019_dataset')
 
 SOLVER = dict(
-    IMS_PER_BATCH=2,
+    IMS_PER_BATCH=4,
     NUM_CLIP_FRAMES=3,
     LR_STEPS=(8, 10),
     MAX_EPOCH=12)
@@ -32,4 +32,4 @@ TEST = dict(
     NUM_CLIP_FRAMES=3)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c5_1X'
+NAME = 'r50_base_YTVIS2019_cubic_3D_c3_1X'

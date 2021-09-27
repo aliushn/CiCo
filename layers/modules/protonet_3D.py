@@ -17,14 +17,20 @@ class ProtoNet3D(nn.Module):
             ]) for _ in range(len(self.proto_src))])
 
         # The include_last_relu=false here is because we might want to change it to another function
-        self.proto_net, proto_channles = make_net(in_channels, cfg.MODEL.MASK_HEADS.PROTO_NET, use_3D=True,
+        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
+        if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE and cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_ON_PROTONET:
+            self.cubic_frames, self.use_3D = cfg.SOLVER.NUM_CLIP_FRAMES, True
+        else:
+            self.cubic_frames, self.use_3D = 1, False
+
+        self.proto_net, proto_channles = make_net(in_channels, cfg.MODEL.MASK_HEADS.PROTO_NET, use_3D=self.use_3D,
                                                   include_bn=True, include_last_relu=True)
         # the last two Conv layers for predicting prototypes
-        proto_arch = [(proto_channles, 3, 1), (cfg.MODEL.MASK_HEADS.MASK_DIM, 1, 0)]
-        self.proto_conv, _ = make_net(proto_channles, proto_arch, use_3D=True, include_bn=True, include_last_relu=False)
+        self.mask_dim = cfg.MODEL.MASK_HEADS.MASK_DIM
+        proto_arch = [(proto_channles, 3, 1), (self.mask_dim, 1, 0)]
+        self.proto_conv, _ = make_net(proto_channles, proto_arch, use_3D=self.use_3D, include_bn=True, include_last_relu=False)
         if cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
             self.DynamicMaskHead = DynamicMaskHead()
-        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE else 1
 
     def forward(self, x, fpn_outs):
         if self.proto_src is None:
@@ -45,12 +51,17 @@ class ProtoNet3D(nn.Module):
                         proto_x_p = aligned_bilinear(proto_x_p, factor)
                         proto_x = proto_x + proto_x_p
 
-        _, C, H, W = proto_x.size()
-        # Unfold inputs from 4D to 5D: [bs*T, C, H, W]=>[bs, C, T, H, W]
-        proto_x = proto_x.reshape(-1, self.clip_frames, C, H, W).permute(0, 2, 1, 3, 4).contiguous()
+        C_in, H_in, W_in = proto_x.size()[-3:]
+        if self.use_3D:
+            # Unfold inputs from 4D to 5D: [bs*T, C, H, W]=>[bs, C, T, H, W]
+            proto_x = proto_x.reshape(-1, self.cubic_frames, C_in, H_in, W_in).permute(0, 2, 1, 3, 4).contiguous()
         proto_out_features = self.proto_net(proto_x)
         # Activation function is Relu
         # Move the features last so the multiplication is easy
-        prototypes = F.relu(self.proto_conv(proto_out_features).permute(0, 3, 4, 2, 1).contiguous())
+        prototypes = F.relu(self.proto_conv(proto_out_features))
+        _, H_out, W_out = prototypes.size()[-3:]
+        if self.use_3D:
+            prototypes = prototypes.permute(0, 2, 1, 3, 4).contiguous().reshape(-1, self.mask_dim, H_out, W_out)
+        prototypes = prototypes.reshape(-1, self.clip_frames, self.mask_dim, H_out, W_out).permute(0, 3, 4, 1, 2).contiguous()
 
         return prototypes

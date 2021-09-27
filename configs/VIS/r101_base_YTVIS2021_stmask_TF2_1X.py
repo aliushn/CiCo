@@ -13,10 +13,10 @@ MODEL = dict(
 DATASETS = dict(
     TYPE='vis',
     NUM_CLASSES=40,
-    TRAIN='train_YouTube_VOS2019_dataset',
-    VALID_SUB='valid_sub_YouTube_VOS2019_dataset',
-    VALID='valid_YouTube_VOS2019_dataset',
-    TEST='test_YouTube_VOS2019_dataset')
+    TRAIN='train_YouTube_VOS2021_dataset',
+    VALID_SUB='valid_sub_YouTube_VOS2021_dataset',
+    VALID='valid_YouTube_VOS2021_dataset',
+    TEST='test_YouTube_VOS2021_dataset')
 
 STMASK = dict(
     FC=dict(
@@ -44,10 +44,10 @@ TEST = dict(
     NUM_CLIP_FRAMES=1,
     DETECTIONS_PER_IMG=200,
     NMS_IoU_THRESH=0.5,
-    NMS_CONF_THRESH=0.2,
+    NMS_CONF_THRESH=0.1,
     NMS_WITH_BIoU=True,
     NMS_WITH_MIoU=True)
 
-OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r101_base_YTVIS2019_stmask_TF2_1X'
+OUTPUT_DIR = 'weights/YTVIS2021/'
+NAME = 'r101_base_YTVIS2021_stmask_TF2_1X'
 

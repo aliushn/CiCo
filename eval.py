@@ -65,7 +65,7 @@ def parse_args(argv=None):
                         help='Whether or not to display outputs after fpn')
     parser.add_argument('--display', default=False, type=str2bool,
                         help='Display qualitative results instead of quantitative ones.')
-    parser.add_argument('--save_folder', default='results/', type=str,
+    parser.add_argument('--save_folder', default='weights/prototypes/', type=str,
                         help='The output file for coco bbox results if --coco_results is set.')
     parser.add_argument('--config', default=None,
                         help='The config object to use.')
@@ -108,7 +108,6 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
     classes = dets_out['class'][:args.top_k].view(-1).detach().cpu().numpy()
     num_dets_to_consider = min(args.top_k, classes.shape[0])
     color_type = dets_out['box_ids'].view(-1)
-    centerness = dets_out['centerness'][:args.top_k].view(-1).detach().cpu().numpy() if 'centerness' in dets_out.keys() else None
     num_tracked_mask = dets_out['tracked_mask'] if 'tracked_mask' in dets_out.keys() else None
     boxes_cir = dets_out['box_cir'] if 'box_cir' in dets_out.keys() else None
     if 'mask' in dets_out.keys():
@@ -176,21 +175,23 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
                     _class = class_names[classes[j] - 1]
 
                 if score is not None:
-                    # if cfg.use_maskiou and not cfg.rescore_bbox:
-                    if centerness is not None:
-                        rescore = centerness[j]
+                    if 'conf_3D' in dets_out.keys():
+                        rescore = dets_out['conf_3D'][:args.top_k].detach().cpu().numpy()[j, classes[j]-1]
+                        text_str = '%s: %.2f: %.2f: %s' % (_class, score, rescore, str(color_type[j].cpu().numpy())) \
+                            if args.display_scores else _class
+                    elif 'centerness' in dets_out.keys():
+                        rescore = dets_out['centerness'][:args.top_k].view(-1).detach().cpu().numpy()[j]
                         text_str = '%s: %.2f: %.2f: %s' % (_class, score, rescore, str(color_type[j].cpu().numpy())) \
                             if args.display_scores else _class
                     else:
-
                         text_str = '%s: %.2f: %s' % (
                             _class, score, str(color_type[j].cpu().numpy())) if args.display_scores else _class
                 else:
                     text_str = '%s' % _class
 
                 font_face = cv2.FONT_HERSHEY_DUPLEX
-                font_scale = 1
-                font_thickness = 1
+                font_scale = 0.8 * (max(img_numpy.shape) // 640)
+                font_thickness = 1 * (max(img_numpy.shape) // 640)
 
                 text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
 
@@ -351,7 +352,7 @@ def prep_display_single(dets_out, img, img_meta=None, undo_transform=True, mask_
     return img_numpy
 
 
-def evaluate(net: STMask, dataset, data_type='vis', eval_clip_frames=1, output_dir=None):
+def evaluate(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval_clip_frames=1, output_dir=None):
     '''
     :param net:
     :param dataset:
@@ -399,7 +400,7 @@ def evaluate(net: STMask, dataset, data_type='vis', eval_clip_frames=1, output_d
                     clip_frame_ids = range(left, min(left+eval_clip_frames, len_vid))
                 images, images_meta, targets = dataset.pull_clip_from_video(vid, clip_frame_ids)
                 images = [torch.from_numpy(img).permute(2, 0, 1) for img in images]
-                images = ImageList_from_tensors(images, size_divisibility=32).cuda()
+                images = ImageList_from_tensors(images, size_divisibility=32, pad_h=pad_h, pad_w=pad_w).cuda()
                 pad_shape = {'pad_shape': (images.size(-2), images.size(-1), 3)}
                 for k in range(len(images_meta)):
                     images_meta[k].update(pad_shape)
@@ -467,7 +468,7 @@ def evaluate(net: STMask, dataset, data_type='vis', eval_clip_frames=1, output_d
     return json_results
 
 
-def evaluate_clip(net: STMask, dataset, data_type='vis', eval_clip_frames=1, output_dir=None):
+def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval_clip_frames=1, output_dir=None):
     '''
     :param net:
     :param dataset:
@@ -511,45 +512,40 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', eval_clip_frames=1, out
                 # clip_frame_ids = range(cdx*clip_frames, min((cdx+1)*clip_frames, len_vid))
                 images, images_meta, targets = dataset.pull_clip_from_video(vid, clip_frame_ids)
                 images = [torch.from_numpy(img).permute(2, 0, 1) for img in images]
-                images = ImageList_from_tensors(images, size_divisibility=32).cuda()
+                images = ImageList_from_tensors(images, size_divisibility=32, pad_h=pad_h, pad_w=pad_w).cuda()
                 pad_shape = {'pad_shape': (images.size(-2), images.size(-1), 3)}
                 for k in range(len(images_meta)):
                     images_meta[k].update(pad_shape)
                 if images.size(0) < eval_clip_frames:
-                    images = torch.cat([images, images[:eval_clip_frames-images.size(0)]], dim=0)
-                    images_meta += images_meta[:eval_clip_frames-images.size(0)]
+                    images = images.repeat(eval_clip_frames, 1, 1, 1)[:eval_clip_frames]
+                    images_meta = (images_meta*eval_clip_frames)[:eval_clip_frames]
 
             with timer.env('Network Extra'):
                 preds_clip = net(images, img_meta=images_meta)
                 pred_clip = preds_clip[0]
 
+            temporal_dependent_keys = {'proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg', 'mask_coeff_3D', 'mask',
+                                       'track_3D', 'conf_3D'}
             pred_frame = dict()
             for k, v in pred_clip.items():
-                if k in {'score', 'class', 'mask_coeff', 'box_ids', 'box_cir'} and v is not None:
+                if k not in temporal_dependent_keys:
                     pred_frame[k] = v
             if 'priors' in pred_clip.keys():
                 pred_frame['priors'] = pred_clip['priors'][:, :4]
 
             for batch_id, frame_id in enumerate(clip_frame_ids[:n_newly_frames]):
                 img_id = (vid, frame_id)
-                if train_masks:
-                    pred_frame['proto'] = pred_clip['proto'][:, :, batch_id]
                 if pred_clip['box'].size(0) == 0:
                     if train_masks:
                         pred_frame['mask'] = torch.Tensor()
                     pred_frame['box'] = torch.Tensor()
                 else:
-                    if train_masks:
-                        pred_frame['mask'] = pred_clip['mask'][:, batch_id]
-                    if pred_clip['box'].size(-1) == 4:
-                        pred_frame['box'] = pred_clip['box']
-                    else:
-                        pred_frame['box'] = pred_clip['box'][:, batch_id*4:(batch_id+1)*4]
-                if 'centerness' in pred_clip.keys():
-                    if pred_clip['centerness'].size(-1) == 1:
-                        pred_frame['centerness'] = pred_clip['centerness']
-                    else:
-                        pred_frame['centerness'] = pred_clip['centerness'][:, batch_id]
+                    for k, v in pred_clip.items():
+                        if k in temporal_dependent_keys:
+                            if k == 'mask':
+                                pred_frame[k] = v[:, batch_id]
+                            else:
+                                pred_frame[k] = v[..., batch_id, :]
 
                 if args.display:
                     root_dir = os.path.join(output_dir, 'out', str(vid))
@@ -644,15 +640,19 @@ def evalvideo(net: STMask, input_folder: str, output_folder: str):
     return
 
 
-def evaldatasets(net: STMask, val_dataset, data_type, output_dir, eval_clip_frames=1, cubic_mode=False):
+def evaldatasets(net: STMask, val_dataset, data_type, output_dir, eval_clip_frames=1, cubic_mode=False, cfg_input=None):
+    if cfg_input is not None:
+        pad_h, pad_w = cfg_input.MIN_SIZE_TEST, cfg_input.MAX_SIZE_TEST
+    else:
+        pad_h, pad_w = None, None
     json_path = os.path.join(output_dir, 'results_' + str(args.epoch) + '.json')
     if args.eval:
         print('Begin Inference!')
         if cubic_mode:
-            results = evaluate_clip(net, val_dataset, data_type=data_type,
+            results = evaluate_clip(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,
                                     eval_clip_frames=eval_clip_frames, output_dir=output_dir)
         else:
-            results = evaluate(net, val_dataset, data_type=data_type,
+            results = evaluate(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,
                                eval_clip_frames=eval_clip_frames, output_dir=output_dir)
 
         if not args.display:
@@ -752,7 +752,7 @@ if __name__ == '__main__':
 
         else:
             evaldatasets(net, val_dataset, cfg.DATASETS.TYPE, cfg.OUTPUT_DIR, cfg.TEST.NUM_CLIP_FRAMES,
-                         cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE)
+                         cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE, cfg.INPUT)
 
 
 

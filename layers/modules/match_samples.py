@@ -50,15 +50,14 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
 
     # Size [num_priors] best ground truth for each prior
     best_truth_overlap, best_truth_idx = overlaps.max(0)
+    if small_objs_idx.nelement() > 0:
+        for i in small_objs_idx:
+            best_truth_overlap[best_truth_idx == i] *= 1.1
 
     # if a bbox is matched with two or more groundtruth boxes, this bbox will be assigned as -1
     thresh = 0.5 * (pos_thresh + neg_thresh)
     multiple_bbox = (overlaps > pos_thresh).sum(dim=0) > 1
     best_truth_overlap[multiple_bbox] = thresh
-
-    if small_objs_idx.nelement() > 0:
-        for i in small_objs_idx:
-            best_truth_overlap[best_truth_idx == i] *= 2
 
     # We want to ensure that each gt gets used at least once so that we don't
     # waste any training data. In order to do that, find the max overlap anchor
@@ -117,7 +116,7 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
 
     loc_t[idx]  = loc                                            # [num_priors,4] encoded offsets to learn
     conf_t[idx] = conf                                           # [num_priors] top class label for each prior
-    idx_t[idx]  = valid_best_truth_idx.view(-1)     # [num_priors] indices for lookup
+    idx_t[idx]  = valid_best_truth_idx.view(-1)                  # [num_priors] indices for lookup
     if ids is not None:
         ids_t[idx] = ids[valid_best_truth_idx]
 
@@ -153,19 +152,25 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
     # When clip_frames=1, pos_clip (clip-level) is same as pos_frames (frame-level)
     # if the object disappears in the clip due to occlusion or other cases, the box is supplemented
     # from the most adjacent frames
-    missed_flag = ((gt_boxes[:, :, 2:]-gt_boxes[:, :, :2]) <= 0).sum(dim=-1) > 0
+    missed_flag = ((gt_boxes[:, :, 2:]-gt_boxes[:, :, :2]) <= 0).sum(dim=-1) > 1
     exist_missed_objects = missed_flag.sum(dim=-1) > 0
     if exist_missed_objects.sum() > 0:
         for kdx, missed in enumerate(exist_missed_objects):
             if missed:
                 missed_cdx = torch.arange(n_clip_frames)[missed_flag[kdx, :] == 1]
                 occur_cdx = torch.arange(n_clip_frames)[missed_flag[kdx, :] == 0]
-                supp_cdx = torch.abs(missed_cdx.reshape(-1, 1) - occur_cdx.reshape(1, -1)).min(dim=-1)[1]
-                gt_boxes[kdx, missed_cdx] = gt_boxes[kdx, occur_cdx[supp_cdx]]
+                if occur_cdx.nelement() > 0:
+                    supp_cdx = torch.abs(missed_cdx.reshape(-1, 1) - occur_cdx.reshape(1, -1)).min(dim=-1)[1]
+                    gt_boxes[kdx, missed_cdx] = gt_boxes[kdx, occur_cdx[supp_cdx]]
 
     # ------- Introducing smallest enclosing boxes of multiple boxes in the clip to define positive/negative samples
-    gt_boxes_unfold = gt_boxes.reshape(n_objs, -1)
-    gt_circumscribed_box = circum_boxes(gt_boxes_unfold)
+    # if the number of frames is odd, use the central 3 frames as target frames, else 2 frames
+    if n_clip_frames % 2 == 0:
+        gt_boxes_central_unfold = gt_boxes[:, n_clip_frames//2-1:n_clip_frames//2+1].reshape(n_objs, -1)
+    else:
+        gt_boxes_central_unfold = gt_boxes[:, n_clip_frames//2-1:n_clip_frames//2+2].reshape(n_objs, -1)
+
+    gt_circumscribed_box = circum_boxes(gt_boxes_central_unfold)
 
     # compute iou for each object
     # iou = torch.stack([jaccard(gt_boxes[i], gt_boxes[i]) for i in range(n_objs)], dim=0).triu_(1)
@@ -207,7 +212,7 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
     small_objs_idx = torch.nonzero(small_objs_idx, as_tuple=False)
     if small_objs_idx.nelement() > 0:
         for i in small_objs_idx:
-            best_truth_overlap_cir[best_truth_idx_cir == i] *= 1.05
+            best_truth_overlap_cir[best_truth_idx_cir == i] *= 1.1
     # Define positive sample, negative samples and neutral
     keep_pos_cir = best_truth_overlap_cir > pos_thresh
     keep_neg_cir = best_truth_overlap_cir < neg_thresh
@@ -261,7 +266,7 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
 
     if not circumscribed_boxes:
         # [n_anchors, 4*n_clip_frames]
-        matches = gt_boxes_unfold[best_truth_idx]                         # [n_clip, num_priors, 4], [x1, y1, x2, y2]
+        matches = gt_boxes.reshape(n_objs, -1)[best_truth_idx]                         # [n_clip, num_priors, 4], [x1, y1, x2, y2]
         loc_pos = encode(matches[keep_pos].reshape(-1, 4), priors[keep_pos].reshape(-1, 4)).reshape(-1, 4*n_clip_frames)
     else:
         matches = gt_circumscribed_box[best_truth_idx]
@@ -269,7 +274,6 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
     # triple check to avoid Nan and Inf
     keep = (torch.isinf(loc_pos).sum(-1) + torch.isnan(loc_pos).sum(-1)) > 0
     if keep.sum() > 0:
-        print(gt_boxes_unfold)
         print('Inf or Nan occur in loc_t when matching samples:', loc_pos[keep])
         pos_ind = torch.arange(n_anchors)[keep_pos]
         conf[pos_ind[keep]] = -1

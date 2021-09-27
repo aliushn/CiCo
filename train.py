@@ -13,7 +13,6 @@ import argparse
 import datetime
 import torch.distributed as dist
 from configs.load_config import load_config
-from configs._base_.datasets import get_dataset_config
 
 # Oof
 import eval as eval_script

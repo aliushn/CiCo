@@ -34,7 +34,6 @@ STMASK = dict(
         BOXSHIFT_ALPHA=1,
         TRAIN_MASKSHIFT=True,
         MASKSHIFT_ALPHA=6.125,
-        SHIFT_WITH_PRED_BOX=False,
         FORWARD_FLOW=True,
         BACKWARD_FLOW=False)
 )

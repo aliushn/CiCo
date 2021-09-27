@@ -8,6 +8,7 @@ from .augmentations_vis import BaseTransform_vis
 from .augmentations_coco import BaseTransform_coco
 from .augmentations_vid import BaseTransform_vid
 import torch.nn.functional as F
+from .config import MEANS, STD
 
 
 def random_scale(img_scales, mode='range'):
@@ -98,7 +99,7 @@ def GtList_from_tensor(height, width, masks=None, boxes=None, img_metas=None):
 
 # modify from detectron2.structures.image_list
 def ImageList_from_tensors(
-        tensors: List[torch.Tensor], size_divisibility: int = 0, pad_value: float = 0.0):
+        tensors: List[torch.Tensor], size_divisibility: int = 0, pad_value: float = 0.0, pad_h=None, pad_w=None):
     """
     Args:
         tensors: a tuple or list of `torch.Tensor`, each of shape (Hi, Wi) or
@@ -118,9 +119,12 @@ def ImageList_from_tensors(
         assert isinstance(t, torch.Tensor), type(t)
         assert t.shape[:-2] == tensors[0].shape[:-2], print('Mismatch size:', t.shape, tensors[0].shape)
 
+
     image_sizes_h = [im.shape[-2] for im in tensors]
     image_sizes_w = [im.shape[-1] for im in tensors]
     max_size_h, max_size_w = max(image_sizes_h), max(image_sizes_w)
+    if pad_h is not None and pad_w is not None:
+        max_size_h, max_size_w = max(pad_h, max_size_h), max(pad_w, max_size_w)
 
     if size_divisibility > 1:
         # the last two dims are H,W, both subject to divisibility requirement
@@ -152,9 +156,11 @@ def get_dataset(data_type, data_name, input, num_clip_frame, inference=False):
     if not inference:
         flip, MS_train = True, input.MULTISCALE_TRAIN
         resize_gt, pad_gt = True, True
+        min_size, max_size = input.MIN_SIZE_TRAIN, input.MAX_SIZE_TRAIN
     else:
         flip, MS_train = False, False
         resize_gt, pad_gt = False, False
+        min_size, max_size = input.MIN_SIZE_TEST, input.MAX_SIZE_TEST
 
     backbone_transform = {
         'channel_order': 'RGB',
@@ -173,8 +179,8 @@ def get_dataset(data_type, data_name, input, num_clip_frame, inference=False):
                                clip_frames=num_clip_frame,
                                size_divisor=input.SIZE_DIVISOR,
                                transform=BaseTransform_vis(
-                                    min_size=input.MIN_SIZE_TRAIN,
-                                    max_size=input.MAX_SIZE_TRAIN,
+                                    min_size=min_size,
+                                    max_size=max_size,
                                     Flip=flip,
                                     MS_train=MS_train,
                                     backbone_transform=backbone_transform,
@@ -189,8 +195,8 @@ def get_dataset(data_type, data_name, input, num_clip_frame, inference=False):
                              clip_frames=num_clip_frame,
                              size_divisor=input.SIZE_DIVISOR,
                              transform=BaseTransform_vid(
-                                   min_size=input.MIN_SIZE_TRAIN,
-                                   max_size=input.MAX_SIZE_TRAIN,
+                                   min_size=min_size,
+                                   max_size=max_size,
                                    Flip=flip,
                                    MS_train=MS_train,
                                    backbone_transform=backbone_transform,
@@ -201,8 +207,8 @@ def get_dataset(data_type, data_name, input, num_clip_frame, inference=False):
         dataset = COCODetection(image_path=dataset_config['img_prefix'],
                                 info_file=dataset_config['ann_file'],
                                 transform=BaseTransform_coco(
-                                    min_size=input.MIN_SIZE_TRAIN,
-                                    max_size=input.MAX_SIZE_TRAIN,
+                                    min_size=min_size,
+                                    max_size=max_size,
                                     Flip=flip,
                                     MS_train=MS_train,
                                     backbone_transform=backbone_transform,

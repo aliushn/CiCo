@@ -152,12 +152,13 @@ def postprocess_ytbvis(dets_output, img_meta, train_masks=True, mask_proto_coeff
             display_lincomb(proto, masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))],
                             mask_coeff, img_ids, output_file, masks_non_target)
 
-        # Undo padding for masks
-        masks = masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
         # Scale masks up to the full image
-        masks = masks.squeeze(-1) if masks.dim() == 4 else masks
-        masks = F.interpolate(masks.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode,
-                              align_corners=False).squeeze(0)
+        mask_dim = masks.dim()
+        masks = masks.unsqueeze(1) if mask_dim == 3 else masks
+        # Undo padding for masks
+        masks = masks[..., :int(s_h*masks.size(-2)), :int(s_w*masks.size(-1))]
+        masks = F.interpolate(masks, (ori_h, ori_w), mode=interpolation_mode,
+                              align_corners=False).squeeze(1)
         # Binarize the masks
         masks.gt_(0.5)
         dets['mask'] = masks

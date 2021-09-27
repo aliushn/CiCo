@@ -61,15 +61,32 @@ class PredictionModule_3D(nn.Module):
         else:
             self.mask_dim = self.mask_dim
 
+        if cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES and cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
+            # only needs a circumscribed box of multiple frames for instance segmentation
+            loc_kernel_size = (self.clip_frames, 3, 3)
+        else:
+            loc_kernel_size = (1, 3, 3)
+
         kernel_size = (1, 3, 3)
         padding = [0, (kernel_size[1] - 1) // 2, (kernel_size[2] - 1) // 2]
         if parent is None:
             self.bbox_layer = nn.Conv3d(self.in_channels, self.num_priors*4,
-                                        kernel_size=kernel_size, padding=padding)
+                                        kernel_size=loc_kernel_size, padding=padding)
+
+            if cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
+                self.centerness_layer = nn.Conv3d(self.in_channels, self.num_priors,
+                                                  kernel_size=loc_kernel_size, padding=padding)
 
             if cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
-                self.conf_layer = nn.Conv3d(self.in_channels, self.num_priors*self.num_classes,
-                                            kernel_size=kernel_size, padding=padding)
+                if cfg.STMASK.FC.FCB_USE_DCN_CLASS:
+                    self.conf_layer.append(FeatureAlign(self.in_channels,
+                                                        self.num_priors * self.num_classes,
+                                                        kernel_size=kernel_size,
+                                                        deformable_groups=self.deform_groups,
+                                                        use_pred_offset=cfg.STMASK.FC.FCB_USE_PRED_OFFSET))
+                else:
+                    self.conf_layer = nn.Conv3d(self.in_channels, self.num_priors*self.num_classes,
+                                                kernel_size=kernel_size, padding=padding)
 
             if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
                 self.track_layer = nn.Conv3d(self.in_channels, self.num_priors*self.track_dim,
@@ -78,10 +95,6 @@ class PredictionModule_3D(nn.Module):
             if cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
                 self.mask_layer = nn.Conv3d(self.in_channels, self.num_priors*self.mask_dim,
                                             kernel_size=kernel_size, padding=padding)
-
-            if cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
-                self.centerness_layer = nn.Conv3d(self.in_channels, self.num_priors,
-                                                  kernel_size=kernel_size, padding=padding)
 
             # What is this ugly lambda doing in the middle of all this clean prediction module code?
             def make_extra(num_layers, in_channels):
@@ -120,17 +133,17 @@ class PredictionModule_3D(nn.Module):
 
         bbox_x = src.bbox_extra(x)
         bbox = src.bbox_layer(bbox_x)
-        preds['loc'] = bbox.permute(0, 3, 4, 2, 1).contiguous().reshape(bs, -1, T*4)
+        preds['loc'] = bbox.permute(0, 3, 4, 2, 1).contiguous().reshape(bs, conv_h*conv_w*self.num_priors, -1)
+
+        # Centerness for Boxes
+        if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
+            centerness = src.centerness_layer(bbox_x).permute(0, 3, 4, 2, 1).contiguous()
+            preds['centerness'] = torch.sigmoid(centerness.reshape(bs, conv_h*conv_w*self.num_priors, -1))
 
         # Classification
         if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
             conf = src.conf_layer(src.conf_extra(x))
             preds['conf'] = conf.permute(0, 3, 4, 2, 1).contiguous().reshape(bs, -1, T, self.num_classes).mean(dim=-2)
-
-        # Centerness for Boxes
-        if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
-            centerness = src.centerness_layer(bbox_x).permute(0, 3, 4, 2, 1).contiguous().reshape(bs, -1, T)
-            preds['centerness'] = torch.sigmoid(centerness)
 
         # Mask coefficients
         if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:

@@ -52,18 +52,16 @@ class Resize(object):
     def __call__(self, image, masks, boxes, labels=None):
         n_f = len(image)
         img_h, img_w, _ = image[0].shape
-        min_size = self.min_size[np.random.randint(len(self.min_size))] if self.MS_train else self.min_size[-1]
+        if isinstance(self.min_size, int):
+            min_size = self.min_size
+        else:
+            min_size = self.min_size[np.random.randint(len(self.min_size))] if self.MS_train else self.min_size[-1]
+        scale_img, scale = img_h / img_w, min_size / self.max_size
         # resize short edges
-        if img_h > img_w:
-            width, height = min_size, int(img_h * (min_size / img_w))
-            if height > self.max_size:
-                width = int(min_size * (self.max_size / height))
-                height = self.max_size
+        if scale_img < scale:
+            width, height = self.max_size, int(img_h * (self.max_size / img_w))
         else:
             width, height = int(img_w * (min_size / img_h)), min_size
-            if width > self.max_size:
-                height = int(min_size*(self.max_size/height))
-                width = self.max_size
 
         # the input of cv2.resize() should be 3-dimention with (h, w, c)
         image = [cv2.resize(image[i], (width, height)) for i in range(n_f)]
@@ -91,7 +89,9 @@ class Pad(object):
 
     Note: this expects im_w <= width and im_h <= height
     """
-    def __init__(self, mean=MEANS, pad_gt=True):
+    def __init__(self, min_size, max_size, mean=MEANS, pad_gt=True):
+        self.min_size = min_size
+        self.max_size = max_size
         self.mean = mean
         self.divisibility = 32
         self.pad_gt = pad_gt
@@ -100,8 +100,8 @@ class Pad(object):
         n_f = len(image)
         im_h, im_w, depth = image[0].shape
 
-        width = ((im_w-1)//self.divisibility+1)*self.divisibility
-        height = ((im_h-1)//self.divisibility+1)*self.divisibility
+        width = ((self.max_size-1)//self.divisibility+1)*self.divisibility
+        height = ((self.min_size-1)//self.divisibility+1)*self.divisibility
         if im_h != height or width != im_w:
             for i in range(n_f):
                 expand_image = np.zeros((height, width, depth), dtype=image[i].dtype)
@@ -167,7 +167,7 @@ class BaseTransform_vis(object):
             ToPercentCoords(),
             enable_if(Flip, RandomFlip()),
             Resize(min_size, max_size, MS_train=MS_train, resize_gt=resize_gt),
-            # Pad(mean, pad_gt=pad_gt),
+            # Pad(min_size, max_size, mean, pad_gt=pad_gt),
             BackboneTransform(backbone_transform, mean, std, 'BGR')
         ])
 

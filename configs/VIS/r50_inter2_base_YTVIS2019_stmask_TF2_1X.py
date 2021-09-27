@@ -6,9 +6,6 @@ MODEL = dict(
     BACKBONE=dict(
         CONV_BODY='ResNet50',
         PATH='STMask_plus_resnet50_coco_960_53_260000.pth'),
-
-    TRACK_HEADS=dict(
-        MATCH_COEFF=[0, 1, 1, 0.3]),
 )
 
 NAME = 'r50_inter2_base_YTVIS2019_stmask_TF2_1X'

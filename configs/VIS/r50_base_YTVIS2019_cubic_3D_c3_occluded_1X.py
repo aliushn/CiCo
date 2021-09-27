@@ -9,11 +9,16 @@ MODEL = dict(
         CUBIC_MODE=True,
         CUBIC_MODE_ON_PROTONET=True,
         CUBIC_CORRELATION_MODE=False,
+        CUBIC_SPATIOTEMPORAL_BLOCK=False,
         CUBIC_3D_MODE=True,
         # INITIALIZATION=reduced or inflated
         CUBIC_MODE_WITH_INITIALIZATION='inflated',
         CIRCUMSCRIBED_BOXES=True,
-    )
+    ),
+
+    MASK_HEADS=dict(
+        PROTO_COEFF_OCCLUSION=True)
+
 )
 
 DATASETS = dict(
@@ -35,4 +40,4 @@ TEST = dict(
     NUM_CLIP_FRAMES=3)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c3_only_cir_boxes_1X'
+NAME = 'r50_base_YTVIS2019_cubic_3D_c3_occluded_1X'

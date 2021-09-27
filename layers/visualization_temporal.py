@@ -65,7 +65,7 @@ def display_pos_smaples(pos, img_gpu, decoded_priors, bbox):
 
 
 def display_box_shift(box, box_shift, img_meta, img_gpu=None, conf=None):
-    save_dir = 'weights/OVIS/weights_r152_m32_yolact_dice_DIoU_012_768_960_randomclip_c5/box_shift/'
+    save_dir = 'weights/YTVIS2021/r50_inter2_base_YTVIS2021_stmask_TF2_1X/box_shift/'
     save_dir = os.path.join(save_dir, str(img_meta['video_id']))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
@@ -74,16 +74,14 @@ def display_box_shift(box, box_shift, img_meta, img_gpu=None, conf=None):
     # Make empty black image
     if img_gpu is None:
         h, w = 384, 640
-        image = np.ones((h, w, 3), np.uint8) * 255
+        img_numpy = np.ones((h, w, 3), np.uint8) * 255
     else:
         h, w = img_gpu.size()[1:]
-        img_numpy = img_gpu.squeeze(0).permute(1, 2, 0).cpu().numpy()
-        img_numpy = img_numpy[:, :, (2, 1, 0)]  # To BRG
-        img_numpy = (img_numpy * np.array(STD) + np.array(MEANS)) / 255.0
-        # img_numpy = img_numpy[:, :, (2, 1, 0)]  # To RGB
-        img_numpy = np.clip(img_numpy, 0, 1)
-        img_gpu = torch.Tensor(img_numpy).cuda()
-        image = (img_gpu * 255).byte().cpu().numpy()
+        img_gpu = img_gpu.squeeze(0).permute(1, 2, 0).contiguous()
+        img_gpu = img_gpu[:, :, (2, 1, 0)]  # To BRG
+        img_gpu = img_gpu * torch.tensor(STD) + torch.tensor(MEANS)
+        # img_gpu = img_gpu[:, :, (2, 1, 0)]  # To RGB
+        img_numpy = torch.clamp(img_gpu, 0, 255).cpu().numpy()
 
     if conf is not None:
         scores, classes = conf[:, 1:].max(dim=1)
@@ -92,9 +90,9 @@ def display_box_shift(box, box_shift, img_meta, img_gpu=None, conf=None):
     color_type = range(box.size(0))
     for i in range(box.size(0)):
         color = get_color(i, color_type)
-        cv2.rectangle(image, (box[i, 0]*w, box[i, 1]*h), (box[i, 2]*w, box[i, 3]*h), color, 2)
+        cv2.rectangle(img_numpy, (box[i, 0]*w, box[i, 1]*h), (box[i, 2]*w, box[i, 3]*h), color, 2)
 
-        draw_dotted_rectangle(image, box_shift[i, 0] * w, box_shift[i, 1] * h,
+        draw_dotted_rectangle(img_numpy, box_shift[i, 0] * w, box_shift[i, 1] * h,
                               box_shift[i, 2] * w, box_shift[i, 3] * h, color, 2, gap=10)
 
         if conf is not None:
@@ -105,8 +103,8 @@ def display_box_shift(box, box_shift, img_meta, img_gpu=None, conf=None):
             font_thickness = 1
             text_pt = (box_shift[i, 0]*w, box_shift[i, 1]*h - 3)
             text_color = [255, 255, 255]
-            cv2.putText(image, text_str, text_pt, font_face, font_scale, text_color, font_thickness, cv2.LINE_AA)
-    cv2.imwrite(path, image)
+            cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness, cv2.LINE_AA)
+    cv2.imwrite(path, img_numpy)
 
 
 def display_feature_align_dcn(detection, offset, loc_data, img_gpu=None, img_meta=None, use_yolo_regressors=False):
@@ -193,7 +191,7 @@ def display_correlation_map_patch(x_corr, img_meta=None):
     else:
         video_id, frame_id = 0, 0
 
-    save_dir = 'weights/OVIS/weights_r152_plus_m32_yolact_bce_012_960_clip_track_loss/box_shift/'
+    save_dir = 'weights/YTVIS2021/r50_inter2_base_YTVIS2021_stmask_TF2_1X/corr_map/'
     save_dir = os.path.join(save_dir, str(video_id))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
@@ -204,14 +202,13 @@ def display_correlation_map_patch(x_corr, img_meta=None):
         x_corr_cur = x_corr[i]
         x_corr_cur = (x_corr_cur - x_corr_cur.min()) / x_corr_cur.max()
         x_show = x_corr_cur.view(r, r, h, w)
-
         x_show = x_show.permute(0, 2, 1, 3).contiguous().view(h*r, r*w)
-        x_numpy = x_show.detach().cpu().numpy()
 
-        #         path_max = ''.join([save_dir, '/', str(frame_id), '_', str(i), '_max_corr_patch.png'])
-        #         max_corr = x_corr_cur.max(dim=0)[0].detach().cpu().numpy()
-        #         plt.imshow(max_corr)
-        #         plt.savefig(path_max)
+        # x_show = x_corr.new_zeros(h*r, r*w)
+        # for j in range(ch):
+        #     row, col = j // r, j % r
+        #     x_show[row*h:(row+1)*h, col*w:(col+1)*w] = (x_corr_cur[j] - x_corr_cur[j].min()) / x_corr_cur[j].max()
+        x_numpy = x_show.detach().cpu().numpy()
 
         path = ''.join([save_dir, '/', str(frame_id), '_', str(i), '_corr_patch.png'])
         plt.imshow(x_numpy)
@@ -235,7 +232,7 @@ def display_correlation_map(x_corr, imgs=None, img_meta=None, idx=0):
         video_id, frame_id = 0, 0
         s_h, s_w = 1, 1
 
-    save_dir = 'weights/OVIS/weights_plus_r50_m32_yolact_clip_prediction_w_corr_a6_768_ext_box_focal/out/'
+    save_dir = 'weights/YTVIS2021/r50_inter2_base_YTVIS2021_stmask_TF2_1X/corr_map/'
     save_dir = os.path.join(save_dir, str(video_id))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
@@ -320,35 +317,27 @@ def display_correlation_map(x_corr, imgs=None, img_meta=None, idx=0):
                 # plt.clf()
 
 
-def display_embedding_map(matching_map_all, idx, img_meta=None):
-    if img_meta is not None:
-        path = ''.join(['results/results_1227_1/embedding_map/', str(img_meta['video_id']), '_',
-                        str(img_meta['frame_id']), '_', str(idx), '.png'])
-        path2 = ''.join(['results/results_1227_1/embedding_map/', str(img_meta['video_id']), '_',
-                         str(img_meta['frame_id']), '_', str(idx), '_m.png'])
+def display_feature_map(feature_maps, type='spatio'):
+    save_dir = 'weights/YTVIS2019/r50_base_YTVIS2019_cubic_3D_c3_spatiotemporal_block_1X/feature_maps/'
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    for i in range(feature_maps.size(0)):
+        for t in range(feature_maps.size(2)):
+            feature_maps_cur = feature_maps[i, :, t]
+            C_in, H, W = feature_maps_cur.size()
+            r = int(sqrt(C_in))
 
-    else:
-        path = 'results/results_1227_1/embedding_map/0.png'
-        path2 = 'results/results_1227_1/embedding_map/0_m.png'
+            # matching_map_mean = matching_map_all.view(r**2, h, w).mean(0)
+            feature_maps_cur_max, _ = feature_maps_cur.reshape(C_in, -1).max(1)
+            feature_maps_cur_min = feature_maps_cur.reshape(C_in, -1).min(1)[0].reshape(-1, 1, 1)
+            x_show = (feature_maps_cur-feature_maps_cur_min) / feature_maps_cur_max.reshape(-1, 1, 1)
+            x_show = x_show.reshape(r, r, H, W).permute(0,2,1,3).contiguous().reshape(r*H, r*W)
+            x_numpy = x_show[:5*H, :5*W].cpu().numpy()
 
-    matching_map_all = matching_map_all.squeeze(0)
-    r, r, h, w = matching_map_all.size()
-    # matching_map_mean = matching_map_all.view(r**2, h, w).mean(0)  # / (r**2)
-    matching_map, _ = matching_map_all.view(r ** 2, h, w).max(0)  # / (r**2)
-    x_show = matching_map_all.permute(0, 2, 1, 3).contiguous()
-    x_show = x_show.view(h * r, r * w)
-    x_numpy = (x_show[h*2:h*10, w*2:w*10]).cpu().numpy()
-
-    plt.axis('off')
-    plt.pcolormesh(mmcv.imflip(x_numpy, direction='vertical'))
-    plt.savefig(path)
-    plt.clf()
-
-    matching_map_numpy = matching_map.squeeze(0).cpu().numpy()
-    plt.axis('off')
-    plt.imshow(matching_map_numpy)
-    plt.savefig(path2)
-    plt.clf()
+            plt.axis('off')
+            plt.imshow(x_numpy)
+            plt.savefig(save_dir+str(i)+'_frames'+str(t)+'_'+type+'.png')
+            plt.clf()
 
 
 def display_shifted_masks(shifted_masks, img_meta=None):

@@ -112,10 +112,7 @@ class STMask(nn.Module):
             self.prediction_layers.append(pred)
 
         # ---------------- Build detection ----------------
-        self.Detect = Detect(cfg.DATASETS.NUM_CLASSES, cfg.TEST.DETECTIONS_PER_IMG, cfg.TEST.NMS_CONF_THRESH,
-                             nms_thresh=cfg.TEST.NMS_IoU_THRESH, train_masks=self.train_masks,
-                             nms_with_miou=cfg.TEST.NMS_WITH_MIoU, use_DIoU=cfg.MODEL.PREDICTION_HEADS.USE_DIoU,
-                             cubic_mode=cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE, clip_frames=self.clip_frames)
+        self.Detect = Detect(cfg)
 
         # ---------------- Build track head ----------------
         if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
@@ -123,27 +120,30 @@ class STMask(nn.Module):
                 track_arch = [(in_channels, 3, {'padding': 1})] * 2 + [(cfg.track_dim, 1, {})]
                 self.track_conv, _ = make_net(in_channels, track_arch, include_bn=True, include_last_relu=False)
 
-            if not cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
+            if not cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE and not cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
                 # Track objects frame-by-frame
                 self.Track = Track(cfg.MODEL.TRACK_HEADS.MATCH_COEFF, self.clip_frames, train_masks=self.train_masks,
                                    track_by_Gaussian=cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN)
             else:
-                if cfg.TEST.NUM_CLIP_FRAMES > 1:
+                if cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE and cfg.TEST.NUM_CLIP_FRAMES > 1:
                     self.Track = Track_TF_Clip(self, cfg.MODEL.TRACK_HEADS.MATCH_COEFF)
                 else:
                     self.Track = Track_TF(self, cfg.MODEL.TRACK_HEADS.MATCH_COEFF,
                                           cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE,
                                           train_maskshift=cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT,
                                           conf_thresh=cfg.TEST.NMS_CONF_THRESH, train_masks=self.train_masks,
-                                          track_by_Gaussian=cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN)
+                                          track_by_Gaussian=cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN,
+                                          use_stmask_TF=cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE,
+                                          proto_coeff_occlusion=cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION)
 
-                # A Temporal Fusion built on two adjacent frames for tracking
-                self.TF_correlation_selected_layer = cfg.STMASK.T2S_HEADS.CORRELATION_SELECTED_LAYER
-                corr_channels = 2*in_channels + cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE**2
-                self.TemporalNet = TemporalNet(corr_channels, cfg.MODEL.MASK_HEADS.MASK_DIM,
-                                               maskshift_loss=cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT,
-                                               use_sipmask=cfg.MODEL.MASK_HEADS.USE_SIPMASK,
-                                               sipmask_head=cfg.MODEL.MASK_HEADS.SIPMASK_HEAD)
+                if cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
+                    # A Temporal Fusion built on two adjacent frames for tracking
+                    self.TF_correlation_selected_layer = cfg.STMASK.T2S_HEADS.CORRELATION_SELECTED_LAYER
+                    corr_channels = 2*in_channels + cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE**2
+                    self.TemporalNet = TemporalNet(corr_channels, cfg.MODEL.MASK_HEADS.MASK_DIM,
+                                                   maskshift_loss=cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT,
+                                                   use_sipmask=cfg.MODEL.MASK_HEADS.USE_SIPMASK,
+                                                   sipmask_head=cfg.MODEL.MASK_HEADS.SIPMASK_HEAD)
 
         if cfg.MODEL.MASK_HEADS.TRAIN_MASKS and cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS:
             sem_seg_head = [(in_channels, 3, 1)]*2 + [(cfg.DATASETS.NUM_CLASSES, 1, 0)]
@@ -189,6 +189,9 @@ class STMask(nn.Module):
             if key.split('.')[0] in {'mask_refine', 'proto_net', 'proto_conv'}:
                 new_key = 'ProtoNet.'+key
                 state_dict[new_key] = state_dict.pop(key)
+            elif key.split('.')[2] in {'bbox_extra', 'conf_extra', 'track_extra'}:
+                new_key = '.'.join(key.split('.')[:-1]) + '.temporal.' + key.split('.')[-1]
+                state_dict[new_key] = state_dict.pop(key)
 
         model_dict = self.state_dict()
         # Initialize the rest of the conv layers with xavier
@@ -207,6 +210,7 @@ class STMask(nn.Module):
                 if name+'.weight' not in state_dict.keys():
                     print('parameters in current model but not in pre-trained model:', name)
         print('Finish init all weights by Xavier.')
+        print()
 
         # only update same modules and layers between pre-trained model and our model
         for key in list(state_dict.keys()):
@@ -219,13 +223,17 @@ class STMask(nn.Module):
                     # print(key, state_dict[key].size(), model_dict[key].size())
                     if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
                         print('load 3D parameters with inflated operation from pre-trained models:', key)
-                        if model_dict[key].size(2) == 1:
-                            model_dict[key] = state_dict[key].unsqueeze(2).to(model_dict[key].device)
+                        scale = model_dict[key].size(0)//state_dict[key].size(0)
+                        if state_dict[key].dim() == 1:
+                            model_dict[key] = state_dict[key].repeat(scale).to(model_dict[key].device)
                         else:
-                            model_dict[key][:,:,1] = state_dict[key].to(model_dict[key].device)
+                            if model_dict[key].size(2) == 1:
+                                model_dict[key] = state_dict[key].repeat(scale,1,1,1).unsqueeze(2).to(model_dict[key].device)
+                            else:
+                                model_dict[key][:,:,1] = state_dict[key].repeat(scale,1,1,1).to(model_dict[key].device)
 
                     else:
-                        print('load parameters with inflated/reduced operation from pre-trained models:', key)
+                        print('load parameters with inflated / reduced operation from pre-trained models:', key)
                         if state_dict[key].dim() == 1:
                             scale = model_dict[key].size(0)//state_dict[key].size(0)
                             init_weights = state_dict[key].repeat(scale).to(model_dict[key].device)
@@ -244,7 +252,7 @@ class STMask(nn.Module):
                                     else:
                                         single = self.fpn_num_features+self.correlation_patch_size**2
                                         flag_channels = range(c*single, (c+1)*single-self.correlation_patch_size**2)
-                                    if key.split('.')[-2][-5:] == 'layer':
+                                    if key.split('.')[-2][-5:] == 'layer' or (kh == 1 and kw == 1):
                                         if c_out != c_out_pre:
                                             flag_channels_out = range(c*c_out_pre, (c+1)*c_out_pre)
                                         else:
@@ -357,8 +365,6 @@ class STMask(nn.Module):
                 pred_outs['centerness'] = []
             if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
                 pred_outs['conf'] = []
-            else:
-                pred_outs['stuff'] = []
 
             for idx, pred_layer in zip(self.selected_layers, self.prediction_layers):
                 # A hack for the way dataparallel works
@@ -389,8 +395,6 @@ class STMask(nn.Module):
                     pred_x = fpn_outs[idx]
 
                 p = pred_layer(pred_x, idx)
-
-                # display_cubic_weights(p['conf'], idx, img_meta, type=2)
 
                 for k, v in p.items():
                     pred_outs[k].append(v)  # [batch_size, h*w*anchors, dim
@@ -430,6 +434,8 @@ class STMask(nn.Module):
 
             pred_outs['conf'] = pred_outs['conf'].sigmoid() if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS \
                 else pred_outs['conf'].softmax(dim=-1)
+            # pred_outs['conf_3D'] = pred_outs['conf_3D'].sigmoid() if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS \
+            #     else pred_outs['conf_3D'].softmax(dim=-1)
 
             # Detection
             pred_outs_after_NMS = self.Detect(self, pred_outs)

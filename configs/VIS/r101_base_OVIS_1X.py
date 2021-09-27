@@ -15,6 +15,13 @@ DATASETS = dict(
     VALID='valid_OVIS_dataset',
     TEST='test_OVIS_dataset')
 
+TEST = dict(
+    DETECTIONS_PER_IMG=200,
+    NMS_IoU_THRESH=0.4,
+    NMS_CONF_THRESH=0.2,
+    NMS_WITH_BIoU=True,
+    NMS_WITH_MIoU=True)
+
 OUTPUT_DIR = 'weights/OVIS/'
 NAME = 'r101_base_OVIS_1X'
 

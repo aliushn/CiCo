@@ -4,9 +4,6 @@ MODEL = dict(
     BACKBONE=dict(
         CONV_BODY='ResNet50',
         PATH='STMask_resnet50_coco_960_46_340000.pth'),
-
-    TRACK_HEADS=dict(
-        MATCH_COEFF=[0, 1, 1, 0.3]),
 )
 
 DATASETS = dict(
@@ -28,16 +25,20 @@ STMASK = dict(
         FCB_USE_DCN_MASK=False),
     T2S_HEADS=dict(
         TEMPORAL_FUSION_MODULE=True,
-        CORRELATION_PATCH_SIZE=5,
+        CORRELATION_PATCH_SIZE=11,
         CORRELATION_SELECTED_LAYER=1,
         TRAIN_BOXSHIFT=True,
         BOXSHIFT_ALPHA=1,
         TRAIN_MASKSHIFT=True,
         MASKSHIFT_ALPHA=6.125,
-        SHIFT_WITH_PRED_BOX=False,
         FORWARD_FLOW=True,
         BACKWARD_FLOW=False)
 )
+
+TEST = dict(
+    NMS_IoU_THRESH=0.5,
+    NMS_CONF_THRESH=0.2)
+
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
 NAME = 'r50_base_YTVIS2019_stmask_TF2_1X'

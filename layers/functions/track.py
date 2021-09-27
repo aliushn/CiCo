@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from layers.utils import jaccard, mask_iou, compute_comp_scores, generate_track_gaussian, compute_kl_div
+from layers.utils import jaccard, mask_iou, compute_comp_scores, generate_track_gaussian, compute_kl_div, generate_mask
 from utils import timer
 
 import pyximport
@@ -53,40 +53,38 @@ class Track(object):
         if is_first:
             self.prev_detection = None
 
-        if detection['class'].nelement() == 0:
-            detection['box_ids'] = torch.tensor([], dtype=torch.int64)
+        if detection['box'].nelement() == 0:
+            detection['box_ids'] = torch.Tensor()
             return detection
-
-        # get bbox and class after NMS
-        det_bbox = detection['box']
-        det_bbox_cir = detection['box_cir']
-        det_labels = detection['class']  # class
-        det_score = detection['score']
-        if 'mask' in detection.keys():
-            det_masks_soft = detection['mask']
-            det_masks = det_masks_soft.gt(0.5).float()
-        else:
-            det_masks_soft, det_masks = None, None
-
-        if self.track_by_Gaussian:
-            detection['track_mu'], detection['track_var'] = generate_track_gaussian(detection['track'].squeeze(0),
-                                                                                    det_masks_soft, det_bbox)
-            del detection['track']
 
         # compared bboxes in current frame with bboxes in previous frame to achieve tracking
         if is_first or (not is_first and self.prev_detection is None):
+            detection['box_ids'] = torch.arange(detection['box'].size(0))
             # save bbox and features for later matching
             self.prev_detection = dict()
             for k, v in detection.items():
                 if k in {'box', 'box_cir', 'mask', 'class', 'track', 'track_mu', 'track_var', 'score'}:
                     self.prev_detection[k] = v.clone()
-            detection['box_ids'] = torch.arange(det_bbox.size(0))
-            return detection
 
         else:
 
             assert self.prev_detection is not None
+            if 'mask' in detection.keys():
+                det_masks_soft = detection['mask']
+                det_masks = det_masks_soft.gt(0.5).float()
+            else:
+                det_masks_soft, det_masks = None, None
+            # get bbox and class after NMS
+            det_bbox = detection['box']
+            det_bbox_cir = detection['box_cir']
+            det_labels = detection['class']  # class
+            det_score = detection['score']
             n_dets = det_bbox.size(0)
+            if self.track_by_Gaussian:
+                detection['track_mu'], detection['track_var'] = generate_track_gaussian(detection['track'].squeeze(0),
+                                                                                        det_masks_soft, det_bbox)
+                del detection['track']
+
             n_prev = self.prev_detection['box'].size(0)
             # only support one image at a time
             if self.track_by_Gaussian:
@@ -106,10 +104,7 @@ class Track(object):
             else:
                 bbox_ious = jaccard(det_bbox[:, :4], self.prev_detection['box'][:, -4:])
             if self.train_masks:
-                if self.clip_frames > 1:
-                    mask_ious = mask_iou(det_masks[..., 0], self.prev_detection['mask'].gt(0.5).float()[..., -1])
-                else:
-                    mask_ious = mask_iou(det_masks, self.prev_detection['mask'].gt(0.5).float())
+                mask_ious = mask_iou(det_masks[:, 0], self.prev_detection['mask'].gt(0.5).float()[:, -1])
             else:
                 mask_ious = torch.zeros_like(bbox_ious)
                 self.match_coeff[1] = 0
@@ -121,7 +116,7 @@ class Track(object):
                                               mask_ious,
                                               label_delta,
                                               add_bbox_dummy=True,
-                                              bbox_dummy_iou=0.3,
+                                              bbox_dummy_iou=0.2,
                                               match_coeff=self.match_coeff)
 
             match_likelihood, match_ids = torch.max(comp_scores, dim=1)
