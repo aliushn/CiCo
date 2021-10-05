@@ -65,7 +65,7 @@ def display_pos_smaples(pos, img_gpu, decoded_priors, bbox):
 
 
 def display_box_shift(box, box_shift, img_meta, img_gpu=None, conf=None):
-    save_dir = 'weights/YTVIS2021/r50_inter2_base_YTVIS2021_stmask_TF2_1X/box_shift/'
+    save_dir = 'weights/YTVIS2019/r50_base_YTVIS2019_stmask_TF2_1X/box_shift/'
     save_dir = os.path.join(save_dir, str(img_meta['video_id']))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
@@ -191,7 +191,7 @@ def display_correlation_map_patch(x_corr, img_meta=None):
     else:
         video_id, frame_id = 0, 0
 
-    save_dir = 'weights/YTVIS2021/r50_inter2_base_YTVIS2021_stmask_TF2_1X/corr_map/'
+    save_dir = 'weights/YTVIS2019/r50_base_YTVIS2019_stmask_TF2_1X/corr_map/'
     save_dir = os.path.join(save_dir, str(video_id))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
@@ -357,6 +357,7 @@ def display_shifted_masks(shifted_masks, img_meta=None):
         plt.savefig(path)
         plt.clf()
 
+
 def draw_dotted_rectangle(img, x0, y0, x1, y1, color, thickness=1, gap=20):
 
     draw_dotted_line(img, (x0, y0), (x0, y1), color, thickness, gap, vertical=True)
@@ -382,34 +383,43 @@ def draw_dotted_line(img, pt1, pt2, color, thickness=1, gap=20, vertical=False):
             cv2.line(img, p, (p[0] + int(gap//3), p[1]), color, thickness)
 
 
-def display_cubic_weights(weights, idx, img_meta=None, type=1):
-    path_dir = 'weights/YTVIS2019/r50_base_YTVIS2019_cubic_c4_reduced_cir_boxes_1X/'
+def display_cubic_weights(weights, idx, type=1, name='None', img_meta=None):
+    path_dir = 'weights/YTVIS2019/r50_base_YTVIS2019_cubic_3D_c3_spatiotemporal_block_1X/'
     if type == 1:
         path_dir = os.path.join(path_dir, 'weights/')
         if not os.path.exists(path_dir):
             os.makedirs(path_dir)
-        c_out, c_in, h, w = weights.size()
-        for i in range(h):
-            for j in range(w):
-                data_numpy = weights[:16, ::4, i, j].detach().cpu().numpy()
-                plt.axis('off')
-                cm = plt.cm.get_cmap('rainbow')
-                plt.pcolormesh(data_numpy*10, cmap=cm)
-                plt.title(str(i)+'_'+str(j))
-                plt.savefig(path_dir+str(i)+'_'+str(j)+'.png')
-                plt.clf()
+        c_out, c_in, T, h, w = weights.size()
+        weights_temp = weights.reshape(c_out, c_in, T, -1)
+        # weights = weights - torch.min(weights_temp, dim=-1)[0].reshape(c_out, c_in,T,1,1)
+        if T == 3:
+            data_numpy = weights[:25, :75, :, :, :].permute(1,3,0,2,4).contiguous().reshape(75*h,-1).detach()
+        else:
+            data_numpy = weights[:4, :25, :, :, :].permute(1,3,0,2,4).contiguous().reshape(25*h,-1).detach()
+        data_numpy = data_numpy.cpu().numpy()
+        plt.axis('off')
+        plt.imshow(data_numpy)
+        plt.savefig(path_dir+name+str(idx)+'.png')
+        plt.clf()
     elif type == 2:
-        path_dir = os.path.join(path_dir, 'conf', str(img_meta[-1]['video_id']))
+        if img_meta is not None:
+            path_dir = os.path.join(path_dir, 'feature_maps/', str(img_meta[0]['video_id']))
+        else:
+            path_dir = os.path.join(path_dir, 'feature_maps/')
         if not os.path.exists(path_dir):
             os.makedirs(path_dir)
-        # weights: [bs, h*w*3, num_classes]
-        h, w = 48//2**idx, 80//2**idx
-        bs, _, num_classes = weights.size()
-        weights = weights.reshape(bs, h, w, -1, 10).sigmoid()
-        for i in range(bs):
-            data_numpy = weights[i].permute(2,0,3,1).reshape(-1, 10*w)
-            data_numpy = data_numpy.detach().cpu().numpy()
-            plt.axis('off')
-            plt.imshow(data_numpy)
-            plt.savefig(path_dir+'/conf_'+str(img_meta[-1]['frame_id'])+'_'+str(idx)+'.png')
-            plt.clf()
+        bs, C, T, h, w = weights.size()
+        weights_temp = weights.reshape(bs, C, T, -1)
+        weights = (weights - torch.min(weights_temp, dim=-1)[0].reshape(bs,C,T,1,1)) / torch.clamp(weights_temp.max(-1)[0].reshape(bs,C,T,1,1), min=1e-10)
+        data_numpy = []
+        for i in range(3):
+            data_numpy.append(weights[:, 10*i:10*(i+1), :, :, :].permute(1,3,0,2,4).contiguous().reshape(10*h, -1))
+        data_numpy = torch.cat(data_numpy, dim=-1)
+        data_numpy = data_numpy.detach().cpu().numpy()
+        plt.axis('off')
+        plt.imshow(data_numpy)
+        if img_meta is not None:
+            plt.savefig(path_dir+'/'+str(img_meta[0]['frame_id'])+'_'+name+str(idx)+'.png')
+        else:
+            plt.savefig(path_dir+'/'+name+str(idx)+'.png')
+        plt.clf()

@@ -12,7 +12,11 @@ MODEL = dict(
         CUBIC_3D_MODE=True,
         CIRCUMSCRIBED_BOXES=True,
         # INITIALIZATION=reduced or inflated
-        CUBIC_MODE_WITH_INITIALIZATION='inflated')
+        CUBIC_MODE_WITH_INITIALIZATION='inflated'),
+
+    MASK_HEADS=dict(
+        PROTO_CROP=False,
+    )
 )
 
 DATASETS = dict(
@@ -24,14 +28,15 @@ DATASETS = dict(
     TEST='test_YouTube_VOS2019_dataset')
 
 SOLVER = dict(
-    IMS_PER_BATCH=4,
-    NUM_CLIP_FRAMES=3,
+    IMS_PER_BATCH=2,
+    NUM_CLIP_FRAMES=7,
     LR_STEPS=(8, 10),
     MAX_EPOCH=12)
 
 TEST = dict(
     IMS_PER_BATCH=1,
-    NUM_CLIP_FRAMES=3)
+    NUM_CLIP_FRAMES=7,
+    NMS_CONF_THRESH=0.1)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c3_1X'
+NAME = 'r50_base_YTVIS2019_cubic_3D_c7_sparse_wocrop_1X'

@@ -166,8 +166,8 @@ class MultiBoxLoss(nn.Module):
 
             # --------------------------------  Mask Loss  -----------------------------------------------------
             if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-                loss_m = self.LincombMaskLoss(pos, idx_t, pred_boxes_p_split, mask_coeff, prior_levels,
-                                              proto_data, gt_masks, gt_boxes_p_split, gt_ids)
+                loss_m = self.LincombMaskLoss(pos, idx_t, pred_boxes_p_split, gt_boxes_p_split, mask_coeff, prior_levels,
+                                              proto_data, gt_masks, gt_boxes, gt_ids)
                 losses.update(loss_m)
 
                 # These losses also don't depend on anchors

@@ -55,7 +55,7 @@ def parse_args(argv=None):
                         help='Whether or not to display masks over bounding boxes')
     parser.add_argument('--display_bboxes', default=True, type=str2bool,
                         help='Whether or not to display bboxes around masks')
-    parser.add_argument('--display_bboxes_cir', default=True, type=str2bool,
+    parser.add_argument('--display_bboxes_cir', default=False, type=str2bool,
                         help='Whether or not to display bboxes around masks')
     parser.add_argument('--display_text', default=True, type=str2bool,
                         help='Whether or not to display text (class [score])')
@@ -375,6 +375,10 @@ def evaluate(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval
         print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
         results_video = {}
 
+        # reverse order
+        if args.display:
+            vdx = -vdx-1
+            vid = dataset.vid_ids[vdx]
         if data_type == 'vis':
             len_vid = dataset.vid_infos[vdx]['length']
             train_masks, use_vid_metric = True, False
@@ -382,9 +386,9 @@ def evaluate(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval
             len_vid = len(dataset.vid_infos[vdx])
             train_masks, use_vid_metric = False, True
         if eval_clip_frames == 1:
-            len_clips = (len_vid + args.batch_size//2) // args.batch_size
+            len_clips = (len_vid + args.batch_size-1) // args.batch_size
         else:
-            len_clips = (len_vid + n_overlapped_frames) // n_newly_frames
+            len_clips = (len_vid + n_newly_frames-1) // n_newly_frames
         progress_bar_clip = ProgressBar(len_clips, len_clips)
         for cdx in range(len_clips):
             progress_clip = (cdx + 1) / len_clips * 100
@@ -398,6 +402,9 @@ def evaluate(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval
                 else:
                     left = cdx * n_newly_frames
                     clip_frame_ids = range(left, min(left+eval_clip_frames, len_vid))
+                if cdx == len_clips-1:
+                    assert clip_frame_ids[-1] == len_vid-1, \
+                        'The last clip should include the last frame! Please double check!'
                 images, images_meta, targets = dataset.pull_clip_from_video(vid, clip_frame_ids)
                 images = [torch.from_numpy(img).permute(2, 0, 1) for img in images]
                 images = ImageList_from_tensors(images, size_divisibility=32, pad_h=pad_h, pad_w=pad_w).cuda()
@@ -490,6 +497,10 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
         print()
         print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
 
+        # reverse order
+        if args.display:
+            vdx = -vdx-1
+            vid = dataset.vid_ids[vdx]
         vid_objs = {}
         if data_type == 'vis':
             len_vid = dataset.vid_infos[vdx]['length']
@@ -498,7 +509,7 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
             len_vid = len(dataset.vid_infos[vdx])
             train_masks, use_vid_metric = False, True
 
-        len_clips = (len_vid + n_newly_frames//2) // n_newly_frames
+        len_clips = (len_vid + n_newly_frames-1) // n_newly_frames
         progress_bar_clip = ProgressBar(len_clips, len_clips)
         for cdx in range(len_clips):
             progress_clip = (cdx + 1) / len_clips * 100
@@ -509,9 +520,11 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
             with timer.env('Load Data'):
                 left = cdx * n_newly_frames
                 clip_frame_ids = range(left, min(left+eval_clip_frames, len_vid))
-                # clip_frame_ids = range(cdx*clip_frames, min((cdx+1)*clip_frames, len_vid))
+                if cdx == len_clips-1:
+                    assert clip_frame_ids[-1] == len_vid-1, \
+                        'The last clip should include the last frame! Please double check!'
                 images, images_meta, targets = dataset.pull_clip_from_video(vid, clip_frame_ids)
-                images = [torch.from_numpy(img).permute(2, 0, 1) for img in images]
+                images = [torch.from_numpy(img).permute(2, 0, 1).contiguous() for img in images]
                 images = ImageList_from_tensors(images, size_divisibility=32, pad_h=pad_h, pad_w=pad_w).cuda()
                 pad_shape = {'pad_shape': (images.size(-2), images.size(-1), 3)}
                 for k in range(len(images_meta)):
@@ -533,13 +546,15 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
             if 'priors' in pred_clip.keys():
                 pred_frame['priors'] = pred_clip['priors'][:, :4]
 
-            for batch_id, frame_id in enumerate(clip_frame_ids[:n_newly_frames]):
+            for batch_id, frame_id in enumerate(clip_frame_ids[:min(n_newly_frames, len_vid-left)]):
                 img_id = (vid, frame_id)
                 if pred_clip['box'].size(0) == 0:
                     if train_masks:
                         pred_frame['mask'] = torch.Tensor()
                     pred_frame['box'] = torch.Tensor()
                 else:
+                    if pred_clip['box'].size(-1) != 4:
+                        pred_frame['box'] = pred_clip['box'][:, batch_id*4:(batch_id+1)*4]
                     for k, v in pred_clip.items():
                         if k in temporal_dependent_keys:
                             if k == 'mask':
@@ -641,6 +656,7 @@ def evalvideo(net: STMask, input_folder: str, output_folder: str):
 
 
 def evaldatasets(net: STMask, val_dataset, data_type, output_dir, eval_clip_frames=1, cubic_mode=False, cfg_input=None):
+    args.save_folder = output_dir
     if cfg_input is not None:
         pad_h, pad_w = cfg_input.MIN_SIZE_TEST, cfg_input.MAX_SIZE_TEST
     else:

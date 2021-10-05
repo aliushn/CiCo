@@ -57,9 +57,6 @@ def parse_args():
 
     return args
 
-loss_types = ['B', 'BIoU', 'B_cir', 'BIoU_cir', 'center', 'Rep', 'C', 'C_focal', 'stuff', 'M_bce', 'M_dice', 'M_coeff',
-              'T', 'B_shift', 'BIoU_shift', 'M_shift', 'P', 'D', 'S', 'I']
-
 
 def train(cfg):
     if args.is_distributed:
@@ -173,6 +170,8 @@ def train(cfg):
     time_avg = MovingAverage()
 
     global loss_types  # Forms the print order
+    loss_types = ['B', 'BIoU', 'B_cir', 'BIoU_cir', 'center', 'Rep', 'C', 'C_focal', 'stuff', 'M_bce', 'M_dice', 'M_coeff',
+                  'M_sparse', 'T', 'B_shift', 'BIoU_shift', 'M_shift', 'P', 'D', 'S', 'I']
     loss_avgs = {k: MovingAverage(100) for k in loss_types}
 
     if args.local_rank == 0:
@@ -379,7 +378,7 @@ def compute_validation_map(net, dataset):
         print()
         print("Computing validation mAP (this may take a while)...", flush=True)
         eval_script.evaldatasets(net, dataset, cfg.DATASETS.TYPE, cfg.OUTPUT_DIR, cfg.TEST.NUM_CLIP_FRAMES,
-                                 cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE)
+                                 cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE, cfg.INPUT)
         net.train()
 
 

@@ -39,7 +39,7 @@ class CandidateShift(object):
             feat_h, feat_w = fpn_feat_ref.size()[2:]
             box_ref = ref_candidate['box'].clone()
             box_ref_c = center_size(box_ref)
-            box_ref_c[:, 2:] *= 1.2
+            box_ref_c[:, 2:] *= 1.5
             bbox_feat_input = bbox_feat_extractor(concat_features, torch.clamp(point_form(box_ref_c), 0, 1),
                                                   feat_h, feat_w, 7)
 
@@ -50,7 +50,7 @@ class CandidateShift(object):
 
             if self.train_masks and self.train_maskshift:
                 loc_ref_shift, mask_coeff_shift = self.net.TemporalNet(bbox_feat_input)
-                ref_candidate['mask_coeff'] = mask_coeff_shift
+                # ref_candidate['mask_coeff'] = mask_coeff_shift
             else:
                 loc_ref_shift = self.net.TemporalNet(bbox_feat_input)
             ref_candidate['box'] = decode(loc_ref_shift, center_size(box_ref))

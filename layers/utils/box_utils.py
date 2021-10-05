@@ -175,8 +175,8 @@ def circum_boxes(boxes):
     :param boxes: [n, 4*T], [x1^t,y1^t,x2^t,y2^t,x1^(t+1), y1^(t+1), x2^(t+1), y2^(t+1)]
     :return: [n, 4]
     '''
-    cir_boxes = torch.stack([boxes[:, ::2].min(-1)[0], boxes[:, 1::2].min(-1)[0],
-                             boxes[:, ::2].max(-1)[0], boxes[:, 1::2].max(-1)[0]], dim=-1)
+    cir_boxes = torch.stack([boxes[..., ::2].min(-1)[0], boxes[..., 1::2].min(-1)[0],
+                             boxes[..., ::2].max(-1)[0], boxes[..., 1::2].max(-1)[0]], dim=-1)
     return cir_boxes
 
 

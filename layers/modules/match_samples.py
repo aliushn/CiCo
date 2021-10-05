@@ -165,11 +165,12 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
 
     # ------- Introducing smallest enclosing boxes of multiple boxes in the clip to define positive/negative samples
     # if the number of frames is odd, use the central 3 frames as target frames, else 2 frames
-    if n_clip_frames % 2 == 0:
-        gt_boxes_central_unfold = gt_boxes[:, n_clip_frames//2-1:n_clip_frames//2+1].reshape(n_objs, -1)
-    else:
-        gt_boxes_central_unfold = gt_boxes[:, n_clip_frames//2-1:n_clip_frames//2+2].reshape(n_objs, -1)
+    # if n_clip_frames % 2 == 0:
+    #     gt_boxes_central_unfold = gt_boxes[:, n_clip_frames//2-1:n_clip_frames//2+1].reshape(n_objs, -1)
+    # else:
+    #     gt_boxes_central_unfold = gt_boxes[:, n_clip_frames//2-1:n_clip_frames//2+2].reshape(n_objs, -1)
 
+    gt_boxes_central_unfold = gt_boxes.reshape(n_objs, -1)
     gt_circumscribed_box = circum_boxes(gt_boxes_central_unfold)
 
     # compute iou for each object
@@ -217,7 +218,6 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
     keep_pos_cir = best_truth_overlap_cir > pos_thresh
     keep_neg_cir = best_truth_overlap_cir < neg_thresh
     # print(keep_pos_cir.sum(), n_objs)
-    # print(divergence)
     # print(best_truth_idx_cir[keep_pos_cir], best_truth_overlap_cir[keep_pos_cir])
 
     if not circumscribed_boxes:

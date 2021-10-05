@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from layers.utils import jaccard, mask_iou, crop, generate_mask, compute_DIoU, center_size, decode, circum_boxes
 from utils import timer
 
@@ -18,7 +19,7 @@ class Detect(object):
         self.use_DIoU = cfg.MODEL.PREDICTION_HEADS.USE_DIoU
         self.train_masks = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
         self.use_dynamic_mask = cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK
-        self.mask_coeff_pcclusion = cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION
+        self.mask_coeff_occlusion = cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION
         self.nms_with_miou = cfg.TEST.NMS_WITH_MIoU
         self.use_focal_loss = cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS
         self.num_classes = cfg.DATASETS.NUM_CLASSES
@@ -32,7 +33,6 @@ class Detect(object):
         self.use_fast_nms = True
         self.circumscribed_boxes_iou = True
         self.cubic_mode = cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE
-        self.nms_with_track = False
         if cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
             self.img_level_keys = {'proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg', 'track'}
         else:
@@ -57,8 +57,8 @@ class Detect(object):
                 candidate_cur = dict()
                 scores, scores_idx = torch.max(predictions['conf'][i], dim=1) if self.use_focal_loss else \
                     torch.max(predictions['conf'][i, :, 1:], dim=-1)
-                if 'centerness' in predictions.keys():
-                    scores = scores * predictions['centerness'][i].reshape(-1)
+                if 'centerness' in predictions. keys():
+                    scores = scores * predictions['centerness'][i].mean(-1).reshape(-1)
 
                 # Remove proposals whose confidences are lower than the threshold
                 keep = scores > self.conf_thresh
@@ -87,11 +87,11 @@ class Detect(object):
                         else:
                             if self.cfg.MODEL.MASK_HEADS.PROTO_CROP:
                                 det_masks_all = generate_mask(proto_data, masks_coeff, boxes_cir,
-                                                              proto_coeff_occlusion=self.mask_coeff_pcclusion)
+                                                              proto_coeff_occlusion=self.mask_coeff_occlusion)
                             else:
                                 det_masks_all = generate_mask(proto_data, masks_coeff,
-                                                              proto_coeff_occlusion=self.mask_coeff_pcclusion)
-                            if self.mask_coeff_pcclusion:
+                                                              proto_coeff_occlusion=self.mask_coeff_occlusion)
+                            if self.mask_coeff_occlusion:
                                 candidate_cur['mask'] = det_masks_all[:, 0] - det_masks_all[:, 1]
                             else:
                                 # [n_objs, T, H, W]
@@ -159,7 +159,7 @@ class Detect(object):
             scores = candidate['conf']
             if not self.use_focal_loss:
                 scores = scores[..., 1:]
-            rescores = candidate['centerness'].reshape(-1, 1) * scores if 'centerness' in candidate.keys() else scores
+            rescores = candidate['centerness'].mean(-1).reshape(-1, 1) * scores if 'centerness' in candidate.keys() else scores
             rescores, classes = rescores.max(dim=1)
             _, idx = rescores.sort(0, descending=True)
             idx = idx[:top_k]
@@ -175,20 +175,17 @@ class Detect(object):
             else:
                 boxes_cir_idx = candidate['box_cir'][idx]
                 iou = compute_DIoU(boxes_cir_idx, boxes_cir_idx) if self.use_DIoU else jaccard(boxes_cir_idx, boxes_cir_idx)
-                # masks_coeff_idx = F.normalize(masks_coeff[idx], dim=-1)
-                # iou = masks_coeff_idx @ masks_coeff_idx.t()
 
             if self.train_masks and self.nms_with_miou:
                 masks_idx = candidate['mask'][idx].gt(0.5).float()
-                flag = masks_idx.gt(0.5).sum(dim=[-1, -2]) > 0
+                flag = masks_idx.gt(0.5).sum(dim=[-1, -2]) > 5
                 m_iou = torch.stack([mask_iou(masks_idx[:, cdx], masks_idx[:, cdx]) for cdx in range(masks_idx.size(1))], dim=1)
-                iou = 0.5*iou + 0.5*m_iou.sum(dim=1)/flag.sum(dim=-1)
-
-            if 'track' in candidate.keys() and self.nms_with_track:
-                track_data_idx = candidate['track'][idx]
-                cos_sim = track_data_idx @ track_data_idx.t()
-                cos_sim = (cos_sim+1)/2.
-                iou = 0.8*iou + 0.2*cos_sim
+                m_iou = m_iou.sum(dim=1)/flag.sum(dim=-1)
+                # Calculate similarity of mask coefficients
+                masks_coeff_idx = F.normalize(candidate['mask_coeff'][idx], dim=-1)
+                sim = masks_coeff_idx @ masks_coeff_idx.t()
+                iou = 0.4*iou + 0.4*m_iou + 0.2*sim if self.cubic_mode else 0.5*iou + 0.5*m_iou
+                # iou = 0.8*m_iou + 0.2*sim if self.cubic_mode else m_iou
 
             # Zero out the lower triangle of the cosine similarity matrix and diagonal
             iou = torch.triu(iou, diagonal=1)

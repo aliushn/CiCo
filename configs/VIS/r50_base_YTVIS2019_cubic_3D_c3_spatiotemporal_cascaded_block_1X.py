@@ -7,12 +7,15 @@ MODEL = dict(
 
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
-        CUBIC_CORRELATION_MODE=False,
         CUBIC_MODE_ON_PROTONET=True,
+        CUBIC_SPATIOTEMPORAL_BLOCK=True,
+        CUBIC_SPATIOTEMPORAL_CASCADED_BLOCK=True,
+        CUBIC_CORRELATION_MODE=False,
         CUBIC_3D_MODE=True,
-        CIRCUMSCRIBED_BOXES=True,
         # INITIALIZATION=reduced or inflated
-        CUBIC_MODE_WITH_INITIALIZATION='inflated')
+        CUBIC_MODE_WITH_INITIALIZATION='inflated',
+        CIRCUMSCRIBED_BOXES=True,
+    )
 )
 
 DATASETS = dict(
@@ -24,7 +27,7 @@ DATASETS = dict(
     TEST='test_YouTube_VOS2019_dataset')
 
 SOLVER = dict(
-    IMS_PER_BATCH=4,
+    IMS_PER_BATCH=2,
     NUM_CLIP_FRAMES=3,
     LR_STEPS=(8, 10),
     MAX_EPOCH=12)
@@ -34,4 +37,4 @@ TEST = dict(
     NUM_CLIP_FRAMES=3)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c3_1X'
+NAME = 'r50_base_YTVIS2019_cubic_3D_c3_spatiotemporal_block_1X'

@@ -6,7 +6,8 @@ import numpy as np
 
 from datasets import MEANS, STD
 import os
-from ..utils import sanitize_coordinates, center_size, generate_single_mask, jaccard, point_form
+from ..utils import sanitize_coordinates, center_size, generate_mask, jaccard, point_form
+import matplotlib.pyplot as plt
 
 
 def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, train_masks=True, interpolation_mode='bilinear',
@@ -65,7 +66,6 @@ def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, train_masks=True, interpol
             display_lincomb(proto_data, masks, masks_coeff, img_ids=[img_id], output_file=output_file)
 
         masks = F.interpolate(masks.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode, align_corners=False).squeeze(0)
-
         # Binarize the masks
         masks.gt_(0.5)
 
@@ -146,13 +146,15 @@ def postprocess_ytbvis(dets_output, img_meta, train_masks=True, mask_proto_coeff
         else:
             masks_non_target = None
 
+        proto = dets['proto'][:int(s_h*masks.size(-2)), :int(s_w*masks.size(-1))]
         if visualize_lincomb:
             img_ids = (img_meta['video_id'], img_meta['frame_id'])
-            proto = dets['proto'][:int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
-            display_lincomb(proto, masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))],
-                            mask_coeff, img_ids, output_file, masks_non_target)
+            display_lincomb(proto, mask_coeff, img_ids, output_file, masks_non_target)
 
         # Scale masks up to the full image
+        # proto = F.interpolate(proto.permute(2,0,1).unsqueeze(1), (ori_h, ori_w), mode=interpolation_mode,
+        #                       align_corners=False).squeeze(1)
+        # masks = (proto.permute(1,2,0).contiguous() @ mask_coeff.t()).permute(2,0,1).contiguous()
         mask_dim = masks.dim()
         masks = masks.unsqueeze(1) if mask_dim == 3 else masks
         # Undo padding for masks
@@ -196,19 +198,24 @@ def undo_image_transformation(img, ori_h, ori_w, img_h=None, img_w=None, interpo
     return img_numpy
 
 
-def display_lincomb(protos_data, out_masks, masks_coeff=None, img_ids=None, output_file=None, masks_non_target=None):
+def display_lincomb(protos_data, masks_coeff=None, img_ids=None, output_file=None, masks_non_target=None):
 
-    bs = 1 if protos_data.dim() == 3 else protos_data.size(0)
-
-    out_masks_pos = generate_single_mask(protos_data, torch.clamp(masks_coeff, min=0))
-    out_masks_neg = generate_single_mask(protos_data, torch.clamp(masks_coeff, max=0))
-    out_masks_temp = (out_masks_pos + out_masks_neg).sigmoid()
-    out_masks_pos = out_masks_pos.sigmoid()
-    out_masks_neg = (-out_masks_neg).sigmoid()
+    if protos_data.dim() == 3:
+        protos_data = protos_data.unsqueeze(-2)
+        out_masks = generate_mask(protos_data, masks_coeff)
+    else:
+        out_masks = generate_mask(protos_data, masks_coeff)
+    protos_data = protos_data.permute(2,0,1,3).contiguous()
+    bs = protos_data.size(0)
+    # masks_coeff[torch.abs(masks_coeff) < 0.25] = 0
+    root_dir = os.path.join(output_file, 'protos')
+    if len(img_ids) > 1:
+        root_dir = ''.join([root_dir, '/', str(img_ids[0]), '/'])
+    if not os.path.exists(root_dir):
+        os.makedirs(root_dir)
 
     for kdx in range(bs):
-        import matplotlib.pyplot as plt
-        proto_data = protos_data if protos_data.dim() == 3 else protos_data[kdx]
+        proto_data = protos_data[kdx]
 
         arr_h, arr_w = (4, 8)
         proto_h, proto_w, _ = proto_data.size()
@@ -233,47 +240,37 @@ def display_lincomb(protos_data, out_masks, masks_coeff=None, img_ids=None, outp
                             running_total_nonlin > 0.5).astype(np.float)
         plt.imshow(arr_img)
         plt.axis('off')
-        root_dir = ''.join([output_file, 'out/'])
-        if len(img_ids) > 1:
-            root_dir = ''.join([root_dir, str(img_ids[0]), '/'])
-
-        if not os.path.exists(root_dir):
-            os.makedirs(root_dir)
-
         plt.title(str(img_ids[-1]))
-        plt.savefig(''.join([root_dir, str(img_ids[-1]), '_protos.png']))
+        plt.savefig(''.join([root_dir, str(img_ids[-1]), '_sparse.png']))
         plt.clf()
-        # plt.show()
-        # plt.imshow(arr_run)
-        # plt.show()
-        # plt.imshow(test)
-        # plt.show()
 
-    for jdx in range(out_masks.size(0)):
-        # plot mask coeffs
-        y = masks_coeff[jdx].cpu().numpy()
-        x = torch.arange(len(y)).cpu().numpy()
-        y0 = torch.zeros(len(y)).cpu().numpy()
-        plt.plot(x, y, 'r+--', x, y0)
+        x = torch.arange(len(masks_coeff[0])).cpu().numpy()
+        y0 = torch.zeros(len(masks_coeff[0])).cpu().numpy()
+        plt.plot(x, y0, 'b')
+        for jdx in range(masks_coeff.size(0)):
+            # plot mask coeff
+            y = masks_coeff[jdx].cpu().numpy()
+            plt.plot(x, y, '+--')
         plt.ylim(-1, 1)
         plt.title(str(img_ids[-1]))
-        # plt.savefig(''.join([root_dir, str(img_ids[-1]), '_', str(jdx), '_mask_coeff.png']))
+        plt.savefig(''.join([root_dir, str(img_ids[-1]), '_mask_coeff_sparse.png']))
         plt.clf()
 
-        # plot single mask
-        plt.imshow(out_masks[jdx].cpu().numpy())
-        plt.axis('off')
-        plt.title(str(img_ids[-1]))
-        # plt.savefig(''.join([root_dir, str(img_ids[-1]), '_', str(jdx), '_mask.png']))
-        plt.clf()
+        for jdx in range(masks_coeff.size(0)):
+            # plot single mask
+            plt.imshow(out_masks[jdx, kdx].cpu().numpy())
+            plt.axis('off')
+            plt.title(str(img_ids[-1]))
+            plt.savefig(''.join([root_dir, str(img_ids[-1]), '_', str(jdx), '_mask_sparse.png']))
+            plt.clf()
 
-        # plt masks with non-target objects
-        if masks_non_target is not None:
-            plt.imshow(masks_non_target[jdx].cpu().numpy())
-            if img_ids is not None:
-                plt.title(str(img_ids))
-                plt.savefig(''.join([root_dir, str(img_ids[1]), '_', str(jdx), '_mask_non_target.png']))
-                plt.clf()
+            # plt masks with non-target objects
+            if masks_non_target is not None:
+                plt.imshow(masks_non_target[jdx].cpu().numpy())
+                if img_ids is not None:
+                    plt.title(str(img_ids))
+                    plt.savefig(''.join([root_dir, str(img_ids[1]), '_', str(jdx), '_mask_non_target.png']))
+                    plt.clf()
 
 
 def display_fpn_outs(outs, img_ids=None, mask_det_file=None):

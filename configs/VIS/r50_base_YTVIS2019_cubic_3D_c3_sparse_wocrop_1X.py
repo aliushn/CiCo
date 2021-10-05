@@ -8,8 +8,15 @@ MODEL = dict(
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
         CUBIC_CORRELATION_MODE=False,
+        CUBIC_MODE_ON_PROTONET=True,
+        CUBIC_3D_MODE=True,
+        CIRCUMSCRIBED_BOXES=True,
         # INITIALIZATION=reduced or inflated
-        CUBIC_MODE_WITH_INITIALIZATION='inflated')
+        CUBIC_MODE_WITH_INITIALIZATION='inflated'),
+
+    MASK_HEADS=dict(
+        PROTO_CROP=False,
+    )
 )
 
 DATASETS = dict(
@@ -22,13 +29,14 @@ DATASETS = dict(
 
 SOLVER = dict(
     IMS_PER_BATCH=2,
-    NUM_CLIP_FRAMES=5,
+    NUM_CLIP_FRAMES=3,
     LR_STEPS=(8, 10),
     MAX_EPOCH=12)
 
 TEST = dict(
     IMS_PER_BATCH=1,
-    NUM_CLIP_FRAMES=3)
+    NUM_CLIP_FRAMES=3,
+    NMS_CONF_THRESH=0.1)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_c3_1X'
+NAME = 'r50_base_YTVIS2019_cubic_3D_c3_sparse_wocrop_1X'

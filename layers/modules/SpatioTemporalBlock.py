@@ -11,9 +11,10 @@ class SpatioTemporalBlock(nn.Module):
     def __init__(self,
                  in_channels,
                  kernel_size=(3, 3, 3),
-                 deformable_groups=4):
+                 deformable_groups=4,
+                 cascaded=False):
         super(SpatioTemporalBlock, self).__init__()
-
+        self.cascaded = cascaded
         self.kernel_size = (kernel_size, kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
         self.padding = ((self.kernel_size[0] - 1) // 2, (self.kernel_size[1] - 1) // 2, (self.kernel_size[2] - 1) // 2)
 
@@ -52,9 +53,14 @@ class SpatioTemporalBlock(nn.Module):
         x_spatio = x_spatio_fold.reshape(bs,T,-1,H,W).permute(0,2,1,3,4).contiguous()
 
         # Temporal branch
-        x_temporal = self.temporal(x)
+        if self.cascaded:
+            x_temporal = self.temporal(x_spatio)
+            return x_temporal
+        else:
+            x_temporal = self.temporal(x)
+            return x_spatio+x_temporal
         # display_feature_map(x_spatio, type='spatio')
         # display_feature_map(x_temporal, type='temporal')
-        return x_spatio + x_temporal
+
 
 

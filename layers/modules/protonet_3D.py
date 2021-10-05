@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from .make_net import make_net
 from .dynamic_mask_head import DynamicMaskHead
 from ..utils import aligned_bilinear
+from ..visualization_temporal import display_cubic_weights
 
 
 class ProtoNet3D(nn.Module):
@@ -32,7 +33,7 @@ class ProtoNet3D(nn.Module):
         if cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
             self.DynamicMaskHead = DynamicMaskHead()
 
-    def forward(self, x, fpn_outs):
+    def forward(self, x, fpn_outs, img_meta=None):
         if self.proto_src is None:
             proto_x = x
         else:
@@ -60,8 +61,17 @@ class ProtoNet3D(nn.Module):
         # Move the features last so the multiplication is easy
         prototypes = F.relu(self.proto_conv(proto_out_features))
         _, H_out, W_out = prototypes.size()[-3:]
+        display_cubic_weights(prototypes, 0, type=2, name='prototypes', img_meta=img_meta)
         if self.use_3D:
             prototypes = prototypes.permute(0, 2, 1, 3, 4).contiguous().reshape(-1, self.mask_dim, H_out, W_out)
         prototypes = prototypes.reshape(-1, self.clip_frames, self.mask_dim, H_out, W_out).permute(0, 3, 4, 1, 2).contiguous()
+
+        display_cubic_weights(proto_out_features, 0, type=2, name='proto', img_meta=img_meta)
+        display_weights = False
+        if display_weights:
+            for jdx in range(0,9,3):
+                display_cubic_weights(self.proto_net[jdx].weight, jdx, type=1, name='protonet')
+            for jdx in range(0,6,3):
+                display_cubic_weights(self.proto_conv[jdx].weight, jdx, type=1, name='protoconv')
 
         return prototypes

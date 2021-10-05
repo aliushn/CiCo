@@ -190,8 +190,9 @@ class STMask(nn.Module):
                 new_key = 'ProtoNet.'+key
                 state_dict[new_key] = state_dict.pop(key)
             elif key.split('.')[2] in {'bbox_extra', 'conf_extra', 'track_extra'}:
-                new_key = '.'.join(key.split('.')[:-1]) + '.temporal.' + key.split('.')[-1]
-                state_dict[new_key] = state_dict.pop(key)
+                if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_SPATIOTEMPORAL_BLOCK:
+                    new_key = '.'.join(key.split('.')[:-1]) + '.temporal.' + key.split('.')[-1]
+                    state_dict[new_key] = state_dict.pop(key)
 
         model_dict = self.state_dict()
         # Initialize the rest of the conv layers with xavier
@@ -230,7 +231,10 @@ class STMask(nn.Module):
                             if model_dict[key].size(2) == 1:
                                 model_dict[key] = state_dict[key].repeat(scale,1,1,1).unsqueeze(2).to(model_dict[key].device)
                             else:
-                                model_dict[key][:,:,1] = state_dict[key].repeat(scale,1,1,1).to(model_dict[key].device)
+                                # only init parameter for the center frame
+                                # model_dict[key][:,:,model_dict[key].size(2)//2] = state_dict[key].repeat(scale,1,1,1).to(model_dict[key].device)
+                                # All frames with same weights
+                                model_dict[key] = state_dict[key].unsqueeze(2).repeat(scale,1,model_dict[key].size(2), 1,1).to(model_dict[key].device)/model_dict[key].size(2)
 
                     else:
                         print('load parameters with inflated / reduced operation from pre-trained models:', key)
@@ -351,7 +355,7 @@ class STMask(nn.Module):
 
         if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
             with timer.env('proto '):
-                prototypes = self.ProtoNet(x, fpn_outs)
+                prototypes = self.ProtoNet(x, fpn_outs, img_meta=img_meta)
 
         with timer.env('pred_heads'):
             pred_outs = {'priors': [], 'prior_levels': []}
@@ -394,7 +398,7 @@ class STMask(nn.Module):
                 else:
                     pred_x = fpn_outs[idx]
 
-                p = pred_layer(pred_x, idx)
+                p = pred_layer(pred_x, idx, img_meta)
 
                 for k, v in p.items():
                     pred_outs[k].append(v)  # [batch_size, h*w*anchors, dim

@@ -29,7 +29,7 @@ class T2SLoss(nn.Module):
         :return:
         '''
 
-        losses_shift = {'B_shift': [], 'BIoU_shift': []}
+        losses_shift = {'B_shift': []}
         if self.cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT:
             losses_shift['M_shift'] = []
         # Complie temporal fusion module of STMask in CVPR2021  https://github.com/MinghanLi/STMask
@@ -127,14 +127,14 @@ class T2SLoss(nn.Module):
                 loss_B_shift += pre_loss_B.mean()
 
                 # BIoU_shift loss
-                shift_boxes_tar = decode(shift_boxes_reg, center_size(gt_boxes_ref[i][valid_flag]))
-                if self.cfg.MODEL.PREDICTION_HEADS.USE_DIoU:
-                    loss_BIoU_shift += DIoU_loss(shift_boxes_tar, gt_boxes_tar[i][valid_flag], reduction='mean')
-                else:
-                    loss_BIoU_shift += giou_loss(shift_boxes_tar, gt_boxes_tar[i][valid_flag], reduction='mean')
+                # shift_boxes_tar = decode(shift_boxes_reg, center_size(gt_boxes_ref[i][valid_flag]))
+                # if self.cfg.MODEL.PREDICTION_HEADS.USE_DIoU:
+                #     loss_BIoU_shift += DIoU_loss(shift_boxes_tar, gt_boxes_tar[i][valid_flag], reduction='mean')
+                # else:
+                #     loss_BIoU_shift += giou_loss(shift_boxes_tar, gt_boxes_tar[i][valid_flag], reduction='mean')
 
-        losses = {'B_shift': loss_B_shift / bs * self.cfg.MODEL.BOX_HEADS.LOSS_ALPHA,
-                  'BIoU_shift': loss_BIoU_shift / bs * self.cfg.MODEL.BOX_HEADS.BIoU_ALPHA}
+        losses = {'B_shift': loss_B_shift / bs * self.cfg.MODEL.BOX_HEADS.LOSS_ALPHA}
+                  # 'BIoU_shift': loss_BIoU_shift / bs * self.cfg.MODEL.BOX_HEADS.BIoU_ALPHA}
         if self.cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT:
             losses['M_shift'] = loss_mask_shift / bs * self.cfg.STMASK.T2S_HEADS.MASKSHIFT_ALPHA
 
