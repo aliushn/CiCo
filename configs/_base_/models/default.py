@@ -110,8 +110,8 @@ _C.MODEL.BACKBONE.PATH = 'resnet101_reducedfc.pth'
 _C.MODEL.BACKBONE.TYPE = 'ResNetBackbone'
 _C.MODEL.BACKBONE.ARGS = ([3, 4, 6, 3]),
 _C.MODEL.BACKBONE.SELECTED_LAYERS = list(range(2, 8))
-_C.MODEL.BACKBONE.PRED_SCALES = [[32], [64], [128], [256], [512]]
-_C.MODEL.BACKBONE.PRED_ASPECT_RATIOS = [[[0.66685089, 1.7073535, 0.87508774, 1.16524493, 0.49059086]]]
+_C.MODEL.BACKBONE.PRED_SCALES = [[24], [48], [96], [192], [384]]
+_C.MODEL.BACKBONE.PRED_ASPECT_RATIOS = [[[1, 0.5, 2]], [[1, 0.5, 2]], [[1, 0.5, 2]], [[1, 0.5, 2]], [[1, 0.5, 2]]]
 
 # Add StopGrad at a specified stage so the bottom layers are frozen
 _C.MODEL.BACKBONE.FREEZE_CONV_BODY_AT = 2
@@ -201,6 +201,7 @@ _C.MODEL.CLASS_HEADS.USE_FOCAL_LOSS = True
 _C.MODEL.CLASS_HEADS.FOCAL_LOSS_ALPHA = 0.25
 _C.MODEL.CLASS_HEADS.FOCAL_LOSS_GAMMA = 2
 _C.MODEL.CLASS_HEADS.LOSS_ALPHA = 5
+_C.MODEL.CLASS_HEADS.USE_SPATIO_DCN = False
 
 
 # ---------------------------------------------------------------------------- #
@@ -248,6 +249,8 @@ _C.MODEL.MASK_HEADS.SIPMASK_HEAD = 4
 _C.MODEL.MASK_HEADS.USE_DYNAMIC_MASK = False
 _C.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS = 3
 _C.MODEL.MASK_HEADS.DISABLE_REL_COORDS = False
+
+_C.MODEL.MASK_HEADS.USE_SPATIO_DCN = False
 
 
 # ---------------------------------------------------------------------------- #

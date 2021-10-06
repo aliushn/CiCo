@@ -384,7 +384,7 @@ def draw_dotted_line(img, pt1, pt2, color, thickness=1, gap=20, vertical=False):
 
 
 def display_cubic_weights(weights, idx, type=1, name='None', img_meta=None):
-    path_dir = 'weights/YTVIS2019/r50_base_YTVIS2019_cubic_3D_c3_spatiotemporal_block_1X/'
+    path_dir = 'weights/YTVIS2019/r50_base_YTVIS2019_cubic_3D_c7_1X/'
     if type == 1:
         path_dir = os.path.join(path_dir, 'weights/')
         if not os.path.exists(path_dir):
@@ -412,7 +412,7 @@ def display_cubic_weights(weights, idx, type=1, name='None', img_meta=None):
         weights_temp = weights.reshape(bs, C, T, -1)
         weights = (weights - torch.min(weights_temp, dim=-1)[0].reshape(bs,C,T,1,1)) / torch.clamp(weights_temp.max(-1)[0].reshape(bs,C,T,1,1), min=1e-10)
         data_numpy = []
-        for i in range(3):
+        for i in range(10//T):
             data_numpy.append(weights[:, 10*i:10*(i+1), :, :, :].permute(1,3,0,2,4).contiguous().reshape(10*h, -1))
         data_numpy = torch.cat(data_numpy, dim=-1)
         data_numpy = data_numpy.detach().cpu().numpy()

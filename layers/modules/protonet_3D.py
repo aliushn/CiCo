@@ -61,12 +61,12 @@ class ProtoNet3D(nn.Module):
         # Move the features last so the multiplication is easy
         prototypes = F.relu(self.proto_conv(proto_out_features))
         _, H_out, W_out = prototypes.size()[-3:]
-        display_cubic_weights(prototypes, 0, type=2, name='prototypes', img_meta=img_meta)
+        # display_cubic_weights(prototypes, 0, type=2, name='prototypes', img_meta=img_meta)
         if self.use_3D:
             prototypes = prototypes.permute(0, 2, 1, 3, 4).contiguous().reshape(-1, self.mask_dim, H_out, W_out)
         prototypes = prototypes.reshape(-1, self.clip_frames, self.mask_dim, H_out, W_out).permute(0, 3, 4, 1, 2).contiguous()
 
-        display_cubic_weights(proto_out_features, 0, type=2, name='proto', img_meta=img_meta)
+        # display_cubic_weights(proto_out_features, 0, type=2, name='proto', img_meta=img_meta)
         display_weights = False
         if display_weights:
             for jdx in range(0,9,3):

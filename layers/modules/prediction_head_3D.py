@@ -91,8 +91,8 @@ class PredictionModule_3D(nn.Module):
                                                   kernel_size=loc_kernel_size, padding=padding)
 
             if cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
-                if self.cfg.MODEL.PREDICTION_HEADS.USE_SPATIO_DCN:
-                    self.conf_spatio_offset = nn.Conv2d(self.in_channels, offset_channels, 1, bias=False)
+                if self.cfg.MODEL.CLASS_HEADS.USE_SPATIO_DCN:
+                    self.conf_spatio_offset = nn.Conv2d(self.num_priors*4, offset_channels, 1, bias=False)
                     self.conf_spatio_layer = DeformConv2d(self.in_channels,
                                                           self.in_channels,
                                                           kernel_size=(3, 3),
@@ -117,8 +117,8 @@ class PredictionModule_3D(nn.Module):
                                                           kernel_size=kernel_size, padding=padding)
 
             if cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-                if self.cfg.MODEL.PREDICTION_HEADS.USE_SPATIO_DCN:
-                    self.mask_spatio_offset = nn.Conv2d(self.in_channels, offset_channels, 1, bias=False)
+                if self.cfg.MODEL.MASK_HEADS.USE_SPATIO_DCN:
+                    self.mask_spatio_offset = nn.Conv2d(self.num_priors*4, offset_channels, 1, bias=False)
                     self.mask_spatio_layer = DeformConv2d(self.in_channels,
                                                           self.in_channels,
                                                           kernel_size=(3, 3),
@@ -178,6 +178,7 @@ class PredictionModule_3D(nn.Module):
             bbox = src.bbox_layer(bbox)
         else:
             bbox = src.bbox_layer(bbox_x)
+        bbox_4D = bbox.permute(0,2,1,3,4).contiguous().reshape(-1, self.num_priors*4, conv_h, conv_w)
         preds['loc'] = bbox.permute(0, 3, 4, 2, 1).contiguous().reshape(bs, conv_h*conv_w*self.num_priors, -1)
 
         # Centerness for Boxes
@@ -193,9 +194,9 @@ class PredictionModule_3D(nn.Module):
         # Classification
         if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
             conf_x = src.conf_extra(x)
-            if self.cfg.MODEL.PREDICTION_HEADS.USE_SPATIO_DCN:
+            if self.cfg.MODEL.CLASS_HEADS.USE_SPATIO_DCN:
                 conf_x_4D = conf_x.permute(0,2,1,3,4).contiguous().reshape(bs*T, -1, conv_h, conv_w)
-                conf = src.centerness_spatio_layer(conf_x_4D, src.centerness_spatio_offset(conf_x_4D))
+                conf = src.conf_spatio_layer(conf_x_4D, src.conf_spatio_offset(bbox_4D))
                 conf = conf.reshape(bs, T, -1, conv_h, conv_w).permute(0,2,1,3,4).contiguous()
                 conf = src.conf_layer(conf).permute(0, 3, 4, 2, 1).contiguous()
             else:
@@ -204,8 +205,8 @@ class PredictionModule_3D(nn.Module):
 
         # Mask coefficients
         if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-            if self.cfg.MODEL.PREDICTION_HEADS.USE_SPATIO_DCN:
-                mask = src.mask_spatio_layer(bbox_x_4D, src.mask_spatio_offset(bbox_x_4D))
+            if self.cfg.MODEL.MASK_HEADS.USE_SPATIO_DCN:
+                mask = src.mask_spatio_layer(bbox_x_4D, src.mask_spatio_offset(bbox_4D))
                 mask = mask.reshape(bs, T, -1, conv_h, conv_w).permute(0,2,1,3,4).contiguous()
                 mask = src.mask_layer(mask)
             else:
@@ -218,7 +219,7 @@ class PredictionModule_3D(nn.Module):
             track_x = src.track_extra(x)
             if self.cfg.MODEL.PREDICTION_HEADS.USE_SPATIO_DCN:
                 track_x_4D = track_x.permute(0,2,1,3,4).contiguous().reshape(bs*T, -1, conv_h, conv_w)
-                track = src.mask_spatio_layer(track_x_4D, src.track_spatio_offset(track_x_4D))
+                track = src.track_spatio_layer(track_x_4D, src.track_spatio_offset(track_x_4D))
                 track = track.reshape(bs, T, -1, conv_h, conv_w).permute(0,2,1,3,4).contiguous()
                 track = src.track_layer(track)
             else:

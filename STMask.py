@@ -353,10 +353,6 @@ class STMask(nn.Module):
             if self.cfg.MODEL.FPN.USE_BIFPN:
                 fpn_outs = self.bifpn(fpn_outs)
 
-        if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-            with timer.env('proto '):
-                prototypes = self.ProtoNet(x, fpn_outs, img_meta=img_meta)
-
         with timer.env('pred_heads'):
             pred_outs = {'priors': [], 'prior_levels': []}
             if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
@@ -407,7 +403,8 @@ class STMask(nn.Module):
                 pred_outs[k] = torch.cat(v, 1)
 
         if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-            pred_outs['proto'] = prototypes
+            with timer.env('proto '):
+                pred_outs['proto'] = self.ProtoNet(x, fpn_outs, img_meta=img_meta)
 
         if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
             with timer.env('track_by_Gaussian'):
