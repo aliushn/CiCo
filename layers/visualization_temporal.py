@@ -384,7 +384,7 @@ def draw_dotted_line(img, pt1, pt2, color, thickness=1, gap=20, vertical=False):
 
 
 def display_cubic_weights(weights, idx, type=1, name='None', img_meta=None):
-    path_dir = 'weights/YTVIS2019/r50_base_YTVIS2019_cubic_3D_c7_1X/'
+    path_dir = 'weights/YTVIS2019/r50_base_YTVIS2019_cubic_3D_c3_indbox_protodiv_1X/'
     if type == 1:
         path_dir = os.path.join(path_dir, 'weights/')
         if not os.path.exists(path_dir):

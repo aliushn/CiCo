@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from ...utils import center_size, point_form, generate_mask, jaccard, crop, sanitize_coordinates, circum_boxes
+from ...utils import center_size, point_form, generate_mask, jaccard, crop, sanitize_coordinates, circum_boxes, mask_iou
 
 
 class LincombMaskLoss(object):
@@ -14,16 +14,16 @@ class LincombMaskLoss(object):
         '''
         Compute instance segmentation loss proposed by YOLACT, which combines linearly mask coefficients and prototypes.
         Please link here https://github.com/dbolya/yolact for more information.
-        :param          pos: [bs, n_anchors], positive samples flag, which is 1 if positive samples else 0
-        :param        idx_t: [bs, n_anchors], store the matched index of predicted boxes and ground-truth boxes
+        :param            pos: [bs, n_anchors], positive samples flag, which is 1 if positive samples else 0
+        :param          idx_t: [bs, n_anchors], store the matched index of predicted boxes and ground-truth boxes
         :param pred_boxes_pos: List: bs * [n_pos_frame, clip_frames, 4], the predicted boxes of positive samples
-        :param  boxes_t_pos: List: bs * [n_pos, 4]
-        :param   mask_coeff: [bs, n_anchors, n_mask], mask coefficients, a predicted cubic box of a clip share
-                                   same mask coefficients due to temporal redundancy
-        :param prior_levels: [bs, n_anchors]
-        :param   proto_data: [bs, h, w, n_mask], or [bs, h, w, n_frames, n_mask] prototypes
-        :param     masks_gt: List: bs * [n_objs, n_frames, h, w]
-        :param   obj_ids_gt:
+        :param    boxes_t_pos: List: bs * [n_pos, 4]
+        :param     mask_coeff: [bs, n_anchors, n_mask], mask coefficients, a predicted cubic box of a clip share
+                               same mask coefficients due to temporal redundancy
+        :param   prior_levels: [bs, n_anchors]
+        :param     proto_data: [bs, h, w, n_mask], or [bs, h, w, n_frames, n_mask] prototypes
+        :param       masks_gt: List: bs * [n_objs, n_frames, h, w]
+        :param     obj_ids_gt:
         :return:
         '''
 
@@ -142,11 +142,24 @@ class LincombMaskLoss(object):
         losses['M_sparse'] = sparse_loss / bs
         if self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_LOSS:
             losses['M_coeff'] = loss_coeff_div / max(bs, 1)
+        # Prototypes divergence loss
+        if self.cfg.MODEL.MASK_HEADS.PROTO_DIVERGENCE_LOSS:
+            losses['M_proto'] = self.proto_divergence_loss(proto_data, masks_gt, boxes_gt, threshold=0.5)
     
         return losses
 
     def coeff_sparse_loss(self, coeffs):
         return 0.05 * torch.abs(coeffs).sum(dim=-1).mean()
+
+    def dice_coefficient(self, x, target):
+        eps = 1e-5
+        n_inst = x.size(0)
+        x = x.reshape(n_inst, -1)
+        target = target.reshape(n_inst, -1)
+        intersection = (x * target).sum(dim=1)
+        union = (x ** 2.0).sum(dim=1) + (target ** 2.0).sum(dim=1) + eps
+        loss = 1. - (2 * intersection / union)
+        return loss
 
     def coeff_diversity_loss(self, coeffs, instance_t):
         """
@@ -171,12 +184,56 @@ class LincombMaskLoss(object):
         # and all the losses will be divided by num_pos at the end, so just one extra time.
         return self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_ALPHA*loss.sum() / max(inst_eq.sum(), 1)
 
-    def dice_coefficient(self, x, target):
-        eps = 1e-5
-        n_inst = x.size(0)
-        x = x.reshape(n_inst, -1)
-        target = target.reshape(n_inst, -1)
-        intersection = (x * target).sum(dim=1)
-        union = (x ** 2.0).sum(dim=1) + (target ** 2.0).sum(dim=1) + eps
-        loss = 1. - (2 * intersection / union)
-        return loss
+    def proto_divergence_loss(self, protos, masks, boxes, threshold=0.5):
+        '''
+        :param protos: [bs, h, w, n_frames, n_mask]
+        :param masks: ground-truth masks, List: bs * [n_objs, n_frames, h, w]
+        :param boxes: ground-truth boxes, List: bs * [n_objs, n_frames, 4]
+        :return:
+        '''
+        bs, h, w, T, M = protos.size()
+        # From [0, +infinite] to [0, 1], 1.5 ==> 0.5
+        protos = 1 - torch.exp(-0.5*protos)
+
+        losses = torch.tensor(0., device=protos.device)
+        count = 0
+        for i in range(bs):
+            masks_cur = masks[i].unsqueeze(1) if masks[i].dim() == 3 else masks[i]
+            masks_cur = F.interpolate(masks_cur.float(), (h, w), mode='bilinear', align_corners=False)
+            masks_cur.gt_(0.5)
+            n_objs = boxes[i].size(0)
+            boxes_cir_cur = circum_boxes(boxes[i].reshape(n_objs, -1)).unsqueeze(1).repeat(1,M,1)
+
+            # Compute response score between each prototype and all instances
+            response_score = []
+            for n in range(n_objs):
+                protos_obj = crop(protos[i], boxes_cir_cur[n])
+                response_score.append(mask_iou(protos_obj.permute(2,3,0,1).contiguous(), masks_cur[n].unsqueeze(1)).mean(0))
+            response_score = torch.cat(response_score, dim=-1)
+
+            flag, fired_masks = torch.zeros(M, device=protos.device), []
+            iou = jaccard(boxes[i].permute(1,0,2).contiguous(), boxes[i].permute(1,0,2).contiguous()).mean(0)
+            for m in range(M):
+                sorted_score, idx = response_score[m].reshape(-1).sort(descending=True)
+                fired_idx = idx[sorted_score > threshold]
+                if fired_idx.nelement() > 0:
+                    flag[m] = 1
+                    # If there are overlapping objects, set regions of instances with lower response scores as 0
+                    if fired_idx.nelement() > 1:
+                        iou_fired = iou[fired_idx][:, fired_idx]
+                        iou_fired = torch.triu(iou_fired, diagonal=1)
+                        iou_fired_max, _ = torch.max(iou_fired, dim=0)
+                        fired_idx = fired_idx[iou_fired_max <= 0.1]
+                    fired_masks.append(masks_cur[fired_idx].sum(0))
+
+            if flag.sum() > 0:
+                count += 1
+                losses += self.dice_coefficient(protos[i][..., flag == 1].permute(3, 2, 0, 1).contiguous(),
+                                                torch.stack(fired_masks, dim=0)).mean()
+
+            return losses / max(count, 1) * self.cfg.MODEL.MASK_HEADS.PROTO_DIVERGENCE_LOSS_ALPHA
+
+
+
+
+

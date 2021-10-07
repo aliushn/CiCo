@@ -170,8 +170,8 @@ def train(cfg):
     time_avg = MovingAverage()
 
     global loss_types  # Forms the print order
-    loss_types = ['B', 'BIoU', 'B_cir', 'BIoU_cir', 'center', 'Rep', 'C', 'C_focal', 'stuff', 'M_bce', 'M_dice', 'M_coeff',
-                  'M_sparse', 'T', 'B_shift', 'BIoU_shift', 'M_shift', 'P', 'D', 'S', 'I']
+    loss_types = ['B', 'BIoU', 'B_cir', 'BIoU_cir', 'center', 'Rep', 'C', 'C_focal', 'stuff', 'M_bce', 'M_dice',
+                  'M_coeff', 'M_proto', 'M_sparse', 'T', 'B_shift', 'BIoU_shift', 'M_shift', 'P', 'D', 'S', 'I']
     loss_avgs = {k: MovingAverage(100) for k in loss_types}
 
     if args.local_rank == 0:
