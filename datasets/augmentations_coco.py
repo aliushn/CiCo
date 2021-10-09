@@ -8,7 +8,6 @@ import torch.nn.functional as F
 
 from datasets import cfg, MEANS, STD
 
-
 def intersect(box_a, box_b):
     max_xy = np.minimum(box_a[:, 2:], box_b[2:])
     min_xy = np.maximum(box_a[:, :2], box_b[:2])
@@ -148,19 +147,26 @@ class Resize(object):
 
     def __call__(self, image, masks, boxes, labels=None):
         img_h, img_w, _ = image.shape
-        min_size = self.min_size[np.random.randint(len(self.min_size))] if self.MS_train else self.min_size[-1]
-        # resize short edges
-        if img_h > img_w:
-            width, height = min_size, int(img_h * (min_size / img_w))
-            if height > self.max_size:
-                width = int(min_size * (self.max_size / height))
-                height = self.max_size
+        if self.MS_train:
+            size = np.random.randint(min(self.min_size), self.max_size)
+            size = int(((size-1) // 32 + 1) * 32)
         else:
-            width, height = int(img_w * (min_size / img_h)), min_size
-            if width > self.max_size:
-                height = int(min_size*(self.max_size/height))
-                width = self.max_size
-
+            size = self.max_size
+        # resize short edges
+        if img_w < img_h:
+            height = int(img_h * (size / img_w))
+            if height > self.max_size*2:
+                width = int(self.max_size*2/height * size)
+                height = self.max_size*2
+            else:
+                width = size
+        else:
+            width = int(img_w * (size / img_h))
+            if width > self.max_size*2:
+                height = int(self.max_size*2/width * size)
+                width = self.max_size*2
+            else:
+                height = size
         image = cv2.resize(image, (width, height))
         
         if self.resize_gt:

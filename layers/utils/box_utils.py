@@ -360,6 +360,8 @@ def compute_DIoU(boxes_a, boxes_b, eps: float = 1e-7):
     :param boxes_b: [n_b, 4]
     :return: [n_a, n_b]
     '''
+    boxes_a = boxes_a.float()
+    boxes_b = boxes_b.float()
     n_a, n_b = boxes_a.size(0), boxes_b.size(0)
 
     # calculate bbox IoUs between pos_pred_boxes and pos_gt_boxes, [n_a, n_b]

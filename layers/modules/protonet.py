@@ -39,7 +39,7 @@ class ProtoNet(nn.Module):
         if cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
             self.DynamicMaskHead = DynamicMaskHead()
 
-    def forward(self, x, fpn_outs):
+    def forward(self, x, fpn_outs, img_meta=None):
         if self.proto_src is None:
             proto_x = x
         else:

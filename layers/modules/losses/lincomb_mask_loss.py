@@ -144,7 +144,7 @@ class LincombMaskLoss(object):
             losses['M_coeff'] = loss_coeff_div / max(bs, 1)
         # Prototypes divergence loss
         if self.cfg.MODEL.MASK_HEADS.PROTO_DIVERGENCE_LOSS:
-            losses['M_proto'] = self.proto_divergence_loss(proto_data, masks_gt, boxes_gt, threshold=0.5)
+            losses['M_proto'] = self.proto_divergence_loss(proto_data, masks_gt, boxes_gt, threshold=0.25)
     
         return losses
 
@@ -212,7 +212,10 @@ class LincombMaskLoss(object):
             response_score = torch.cat(response_score, dim=-1)
 
             flag, fired_masks = torch.zeros(M, device=protos.device), []
-            iou = jaccard(boxes[i].permute(1,0,2).contiguous(), boxes[i].permute(1,0,2).contiguous()).mean(0)
+            if boxes[i].dim() == 3:
+                iou = jaccard(boxes[i].permute(1,0,2).contiguous(), boxes[i].permute(1,0,2).contiguous()).mean(0)
+            else:
+                iou = jaccard(boxes[i], boxes[i])
             for m in range(M):
                 sorted_score, idx = response_score[m].reshape(-1).sort(descending=True)
                 fired_idx = idx[sorted_score > threshold]

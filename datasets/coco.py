@@ -187,8 +187,7 @@ class COCODetection(data.Dataset):
                 target = np.hstack((boxes, np.expand_dims(labels, axis=1)))
             else:
                 img, _, _, _ = self.transform(img, np.zeros((1, height, width), dtype=np.float),
-                                              np.array([[0, 0, 1, 1]]),
-                                              {'num_crowds': 0, 'labels': np.array([0])})
+                                              np.array([[0, 0, 1, 1]]), {'num_crowds': 0, 'labels': np.array([0])})
                 masks = None
                 target = None
 
@@ -201,7 +200,7 @@ class COCODetection(data.Dataset):
             img_shape=img.shape,
             frame_id=index)
 
-        return torch.from_numpy(img).permute(2, 0, 1), img_meta, (target, masks, num_crowds)
+        return torch.from_numpy(img).permute(2, 0, 1).contiguous(), img_meta, (target, masks, num_crowds)
 
     def pull_image(self, index):
         '''Returns the original image object at index in PIL form
@@ -312,16 +311,14 @@ def detection_collate_coco(batch):
             masks.append(sample[2][1])
             num_crowds.append(sample[2][2])
 
-    from .utils import ImageList_from_tensors
-    imgs_batch = ImageList_from_tensors(imgs, size_divisibility=32)
-
-    return imgs_batch, img_metas, (boxes, labels, masks, num_crowds, img_metas)
+    return imgs, img_metas, (boxes, labels, masks, num_crowds)
 
 
 def prepare_data_coco(data_batch, devices):
     images, img_metas, (boxes, labels, masks, num_crowds) = data_batch
 
-    from .utils import GtList_from_tensor
+    from .utils import ImageList_from_tensors, GtList_from_tensor
+    images = ImageList_from_tensors(images, size_divisibility=32)
     if len(masks) > 0:
         pad_h, pad_w = images.size()[-2:]
         masks, boxes, img_metas = GtList_from_tensor(pad_h, pad_w, masks, boxes, img_metas)

@@ -126,9 +126,9 @@ class Track_TF(object):
                     bbox_ious = jaccard(det_bbox[:, :4], self.prev_candidate['box'][:, -4:])  # [n_dets, n_prev]
                     label_delta = (self.prev_candidate['class'] == det_labels.view(-1, 1)).float()
                     if self.train_masks:
-                        mask_ious = [mask_iou(det_masks_soft[:, i].gt(0.5).float(),
-                                              self.prev_candidate['mask'][:, i].gt(0.5)) for i in range(det_masks_soft.size(1))]
-                        mask_ious = torch.stack(mask_ious, dim=1).mean(1)
+                        mask_ious = mask_iou(det_masks_soft.gt(0.5).float().permute(1,0,2,3).contiguous(),
+                                             self.prev_candidate['mask'].gt(0.5).float().permute(1,0,2,3).contiguous())
+                        mask_ious = mask_ious.mean(dim=0)
                     else:
                         mask_ious = torch.zeros_like(bbox_ious)
 

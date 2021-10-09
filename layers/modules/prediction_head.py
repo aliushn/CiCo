@@ -128,7 +128,7 @@ class PredictionModule(nn.Module):
             if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
                 self.track_extra = make_extra(cfg.MODEL.TRACK_HEADS.TOWER_LAYERS, self.in_channels)
 
-    def forward(self, x, idx):
+    def forward(self, x, idx, img_meta=None):
         """
         Args:
             - x: The convOut from a layer in the backbone network

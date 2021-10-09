@@ -178,7 +178,7 @@ class PredictionModule_3D(nn.Module):
             bbox = src.bbox_layer(bbox)
         else:
             bbox = src.bbox_layer(bbox_x)
-        bbox_4D = bbox.permute(0,2,1,3,4).contiguous().reshape(-1, self.num_priors*4, conv_h, conv_w)
+        bbox_4D = bbox.permute(0,2,1,3,4).contiguous().reshape(-1, self.num_priors*4, conv_h, conv_w).detach()
         preds['loc'] = bbox.permute(0, 3, 4, 2, 1).contiguous().reshape(bs, conv_h*conv_w*self.num_priors, -1)
 
         # Centerness for Boxes

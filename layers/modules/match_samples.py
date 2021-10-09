@@ -84,9 +84,8 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
 
     keep_pos = best_truth_overlap > pos_thresh
     keep_neg = best_truth_overlap < neg_thresh
-    # print(idx, keep_pos.sum())
+    # print(bbox.size(0), keep_pos.sum())
     # print('idx:', best_truth_idx[keep_pos])
-    # print('labels:', labels[best_truth_idx[keep_pos]])
 
     valid_best_truth_idx = valid_idx[best_truth_idx]
     matches = bbox[valid_best_truth_idx]            # Shape: [num_priors,4]  [x1, y1, x2, y2]

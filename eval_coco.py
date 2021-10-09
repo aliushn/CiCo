@@ -23,6 +23,7 @@ from collections import OrderedDict
 import matplotlib.pyplot as plt
 import cv2
 from configs.load_config import load_config
+from configs._base_.datasets import get_dataset_config
 
 
 def str2bool(v):
@@ -72,6 +73,8 @@ def parse_args(argv=None):
                         help='If output_web_json is set, this is the path to dump detections into.')
     parser.add_argument('--no_bar', default=False, dest='no_bar', action='store_true',
                         help='Do not output the status bar. This is useful for when piping to a file.')
+    parser.add_argument('--save_folder', default='weights/prototypes/', type=str,
+                        help='The output file for coco bbox results if --coco_results is set.')
     parser.add_argument('--display_lincomb', default=False, type=str2bool,
                         help='If the config uses lincomb masks, output a visualization of how those masks are created.')
     parser.add_argument('--benchmark', default=False, dest='benchmark', action='store_true',
@@ -119,8 +122,7 @@ coco_cats_inv = {}
 color_cache = defaultdict(lambda: {})
 
 
-def prep_display(dets_out, img, img_meta, img_ids, undo_transform=True, output_file=None,
-                 class_color=False, mask_alpha=0.45, fps_str=''):
+def prep_display(dets_out, img, img_meta, img_ids, undo_transform=True, mask_alpha=0.45, fps_str=''):
     """
     Note: If undo_transform=False then im_h and im_w are allowed to be None.
     """
@@ -137,7 +139,7 @@ def prep_display(dets_out, img, img_meta, img_ids, undo_transform=True, output_f
         s_h,  s_w = img_h / pad_h, img_w / pad_w
         classes, scores, boxes, masks = postprocess(dets_out, ori_h, ori_w, s_h, s_w, img_ids,
                                                     visualize_lincomb=args.display_lincomb,
-                                                    score_threshold=args.score_threshold)
+                                                    output_file=args.save_folder)
 
     with timer.env('Copy'):
         idx = scores.argsort(0, descending=True)[:args.top_k]
@@ -156,7 +158,7 @@ def prep_display(dets_out, img, img_meta, img_ids, undo_transform=True, output_f
     # First, draw the masks on the GPU where we can do it really fast
     # Beware: very fast but possibly unintelligible mask-drawing code ahead
     # I wish I had access to OpenGL or Vulkan but alas, I guess Pytorch tensor operations will have to suffice
-    if args.display_masks and cfg.eval_mask_branch and num_dets_to_consider > 0:
+    if args.display_masks and num_dets_to_consider > 0:
         # After this, mask is of size [num_dets, h, w, 1]
         masks = masks[:num_dets_to_consider, :, :, None]
 
@@ -213,7 +215,7 @@ def prep_display(dets_out, img, img_meta, img_ids, undo_transform=True, output_f
                 cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 1)
 
             if args.display_text:
-                _class = cfg.train_dataset.class_names[classes[j]-1]
+                _class = class_names[classes[j]-1]
                 text_str = '%s: %.2f' % (_class, score) if args.display_scores else _class
 
                 font_face = cv2.FONT_HERSHEY_DUPLEX
@@ -685,7 +687,7 @@ def evalvideo(net: STMask, path: str, out_path: str = None):
     def prep_frame(inp, fps_str):
         with torch.no_grad():
             frame, preds = inp
-            return prep_display(preds, frame, None, None, None, None, undo_transform=False, class_color=True, fps_str=fps_str)
+            return prep_display(preds, frame, None, None, None, None, fps_str=fps_str)
 
     frame_buffer = Queue()
     video_fps = 0
@@ -846,6 +848,8 @@ def evalvideo(net: STMask, path: str, out_path: str = None):
 
 
 def evaluate(cfg, net: STMask, train_mode=False, epoch=None, iteration=None):
+    args.save_folder = cfg.OUTPUT_DIR
+    args.score_threshold = cfg.TEST.NMS_CONF_THRESH
     dataset = get_dataset('coco', cfg.DATASETS.VALID, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES, inference=True)
     frame_times = MovingAverage()
     dataset_size = len(dataset) // args.batch_size if args.max_images < 0 else min(args.max_images, len(dataset))
@@ -875,27 +879,27 @@ def evaluate(cfg, net: STMask, train_mode=False, epoch=None, iteration=None):
             timer.reset()
 
             with timer.env('Load Data'):
-                imgs, gt_boxes, gt_labels, gt_masks, num_crowds, img_metas = data_batch
+                imgs, img_metas, (gt_boxes, gt_labels, gt_masks, num_crowds) = data_batch
+                imgs = ImageList_from_tensors(imgs, size_divisibility=32, pad_h=cfg.INPUT.MIN_SIZE_TEST, pad_w=cfg.INPUT.MAX_SIZE_TEST)
                 gt_boxes = [torch.from_numpy(boxes).cuda() for boxes in gt_boxes]
                 gt_labels = [torch.from_numpy(labels).cuda() for labels in gt_labels]
                 gt_masks = [torch.from_numpy(masks).cuda() for masks in gt_masks]
+                pad_shape = {'pad_shape': (imgs.size(-2), imgs.size(-1), 3)}
+                for k in range(len(img_metas)):
+                    img_metas[k].update(pad_shape)
+
                 imgs = Variable(imgs)
                 if args.cuda:
                     imgs = imgs.cuda()
-
                 img_ids = [dataset.ids[it * args.batch_size + jdx] for jdx in range(imgs.size(0))]
 
             with timer.env('Network Extra'):
                 preds = net(imgs, img_ids)
 
             for jdx in range(imgs.size(0)):
-                pad_h, pad_w = imgs[jdx].size()[-2:]
-                img_metas[jdx]['pad_shape'] = (pad_h, pad_w, 3)
-
                 # Perform the meat of the operation here depending on our mode.
                 if args.display:
-                    img_numpy = prep_display(preds[jdx], imgs[jdx], img_metas[jdx], img_ids[jdx],
-                                             output_file=args.mask_det_file[:-12])
+                    img_numpy = prep_display(preds[jdx], imgs[jdx], img_metas[jdx], img_ids[jdx])
                 elif args.benchmark:
                     prep_benchmark(preds[jdx], img_metas[jdx], img_ids[jdx])
                 else:
@@ -1023,6 +1027,8 @@ if __name__ == '__main__':
         print('Config not specified. Parsed %s from the file name.\n' % args.config)
         cfg = load_config(args.config)
     cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, cfg.NAME)
+    global class_names
+    class_names = get_dataset_config(cfg.DATASETS.TRAIN, cfg.DATASETS.TYPE)['class_names']
 
     with torch.no_grad():
         if not os.path.exists('results'):

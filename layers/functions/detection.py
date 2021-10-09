@@ -16,7 +16,6 @@ class Detect(object):
 
     def __init__(self, cfg):
         self.cfg = cfg
-        self.use_DIoU = cfg.MODEL.PREDICTION_HEADS.USE_DIoU
         self.train_masks = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
         self.use_dynamic_mask = cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK
         self.mask_coeff_occlusion = cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION
@@ -31,7 +30,6 @@ class Detect(object):
 
         self.use_cross_class_nms = True
         self.use_fast_nms = True
-        self.circumscribed_boxes_iou = True
         self.cubic_mode = cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE
         if cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
             self.img_level_keys = {'proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg', 'track'}
@@ -62,13 +60,17 @@ class Detect(object):
 
                 # Remove proposals whose confidences are lower than the threshold
                 keep = scores > self.conf_thresh
+                idx_out = torch.arange(len(scores))[keep]
+                if len(idx_out) > self.top_k:
+                    _, idx_sorted = scores[keep].sort(0, descending=True)
+                    idx_out = idx_out[idx_sorted[:self.top_k]]
                 for k, v in predictions.items():
                     if k in self.img_level_keys:
                         candidate_cur[k] = v[i]
                     else:
-                        candidate_cur[k] = v[i][keep]
+                        candidate_cur[k] = v[i][idx_out]
 
-                if keep.sum() == 0:
+                if len(idx_out) == 0:
                     candidate_cur['box'] = torch.Tensor()
                     candidate_cur['box_cir'] = torch.Tensor()
                     candidate_cur['mask'] = torch.Tensor()
@@ -136,10 +138,9 @@ class Detect(object):
 
     def cc_fast_nms(self, candidate, iou_threshold: float = 0.5, top_k: int = 100):
         with timer.env('Detect'):
-            n_objs = candidate['box'].size(0)
             # Remove bounding boxes whose center beyond images or mask = 0
             boxes_c = center_size(candidate['box'].reshape(-1, 4))
-            keep = ((boxes_c[:, :2] > 0) & (boxes_c[:, :2] < 1)).reshape(n_objs, -1)
+            keep = ((boxes_c[:, :2] > 0) & (boxes_c[:, :2] < 1)).reshape(candidate['box'].size(0), -1)
             keep = keep.sum(dim=-1) >= keep.size(-1)//2
             if self.train_masks:
                 non_empty_mask = (candidate['mask'].gt(0.5).sum(dim=[-1, -2]) > 5).sum(dim=-1) > 0
@@ -164,23 +165,18 @@ class Detect(object):
             _, idx = rescores.sort(0, descending=True)
             idx = idx[:top_k]
 
-            if not self.circumscribed_boxes_iou:
-                # Compute the pairwise IoU between the boxes
-                boxes_idx = candidate['box'][idx]
-                if self.use_DIoU:
-                    box_iou = [compute_DIoU(boxes_idx[:, cdx*4:(cdx+1)*4], boxes_idx[:, cdx*4:(cdx+1)*4]) for cdx in range(boxes_idx.size(-1)//4)]
-                else:
-                    box_iou = [jaccard(boxes_idx[:, cdx*4:(cdx+1)*4], boxes_idx[:, cdx*4:(cdx+1)*4]) for cdx in range(boxes_idx.size(-1)//4)]
-                iou = [torch.stack(box_iou, dim=-1).mean(dim=-1)]
-            else:
-                boxes_cir_idx = candidate['box_cir'][idx]
-                iou = compute_DIoU(boxes_cir_idx, boxes_cir_idx) if self.use_DIoU else jaccard(boxes_cir_idx, boxes_cir_idx)
+            # Compute the pairwise IoU between the boxes
+            n_objs = len(idx)
+            boxes_idx = candidate['box'][idx].reshape(n_objs, -1, 4).permute(1,0,2).contiguous()
+            box_iou = jaccard(boxes_idx, boxes_idx).mean(0)
+            boxes_cir_idx = candidate['box_cir'][idx]
+            box_cir_iou = jaccard(boxes_cir_idx, boxes_cir_idx)
+            iou = 0.5*box_iou + 0.5*box_cir_iou
 
             if self.train_masks and self.nms_with_miou:
-                masks_idx = candidate['mask'][idx].gt(0.5).float()
-                flag = masks_idx.gt(0.5).sum(dim=[-1, -2]) > 5
-                m_iou = torch.stack([mask_iou(masks_idx[:, cdx], masks_idx[:, cdx]) for cdx in range(masks_idx.size(1))], dim=1)
-                m_iou = m_iou.sum(dim=1)/flag.sum(dim=-1)
+                masks_idx = candidate['mask'][idx].gt(0.5).float().permute(1,0,2,3).contiguous()
+                flag = masks_idx.sum(dim=[-1, -2]) > 5
+                m_iou = mask_iou(masks_idx, masks_idx).sum(dim=0) / flag.sum(dim=0)
                 # Calculate similarity of mask coefficients
                 masks_coeff_idx = F.normalize(candidate['mask_coeff'][idx], dim=-1)
                 sim = masks_coeff_idx @ masks_coeff_idx.t()

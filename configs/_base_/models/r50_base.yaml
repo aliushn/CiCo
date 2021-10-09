@@ -14,7 +14,6 @@ MODEL:
 
   PREDICTION_HEADS:
     USE_DIoU: True
-    USE_PREDICTION_MATCHING: True
     CUBIC_MODE: False
     CUBIC_CORRELATION_MODE: False
     # INITIALIZATION: reduced or inflated

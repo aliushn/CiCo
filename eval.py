@@ -1,6 +1,6 @@
 from datasets import *
 from STMask import STMask
-from utils.functions import MovingAverage, ProgressBar
+from utils.functions import ProgressBar
 from utils import timer
 from utils.functions import SavePath
 from layers.utils.output_utils import postprocess_ytbvis, undo_image_transformation

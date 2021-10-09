@@ -49,7 +49,7 @@ def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, train_masks=True, interpol
         return [torch.Tensor()] * 4
 
     # Actually extract everything from dets now
-    masks = dets['mask']
+    masks = dets['mask'].squeeze(1)
     classes = dets['class']
     boxes = dets['box']
     scores = dets['score']
@@ -63,7 +63,7 @@ def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, train_masks=True, interpol
         masks = masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
 
         if visualize_lincomb:
-            display_lincomb(proto_data, masks, masks_coeff, img_ids=[img_id], output_file=output_file)
+            display_lincomb(proto_data, masks_coeff, img_ids=[img_id], output_file=output_file)
 
         masks = F.interpolate(masks.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode, align_corners=False).squeeze(0)
         # Binarize the masks
@@ -199,6 +199,8 @@ def undo_image_transformation(img, ori_h, ori_w, img_h=None, img_w=None, interpo
 
 
 def display_lincomb(protos_data, masks_coeff=None, img_ids=None, output_file=None, masks_non_target=None):
+    # From [0, +infinite] to [0, 1], 1.5 ==> 0.5
+    # protos_data = 1 - torch.exp(-0.5*protos_data)
 
     if protos_data.dim() == 3:
         protos_data = protos_data.unsqueeze(-2)
@@ -208,9 +210,9 @@ def display_lincomb(protos_data, masks_coeff=None, img_ids=None, output_file=Non
     protos_data = protos_data.permute(2,0,1,3).contiguous()
     bs = protos_data.size(0)
     # masks_coeff[torch.abs(masks_coeff) < 0.25] = 0
-    root_dir = os.path.join(output_file, 'protos')
+    root_dir = os.path.join(output_file, 'protos/')
     if len(img_ids) > 1:
-        root_dir = ''.join([root_dir, '/', str(img_ids[0]), '/'])
+        root_dir = ''.join([root_dir, str(img_ids[0]), '/'])
     if not os.path.exists(root_dir):
         os.makedirs(root_dir)
 
@@ -241,7 +243,7 @@ def display_lincomb(protos_data, masks_coeff=None, img_ids=None, output_file=Non
         plt.imshow(arr_img)
         plt.axis('off')
         plt.title(str(img_ids[-1]))
-        plt.savefig(''.join([root_dir, str(img_ids[-1]), '_sparse.png']))
+        plt.savefig(''.join([root_dir, str(img_ids[-1]), '.png']))
         plt.clf()
 
         x = torch.arange(len(masks_coeff[0])).cpu().numpy()
@@ -253,7 +255,7 @@ def display_lincomb(protos_data, masks_coeff=None, img_ids=None, output_file=Non
             plt.plot(x, y, '+--')
         plt.ylim(-1, 1)
         plt.title(str(img_ids[-1]))
-        plt.savefig(''.join([root_dir, str(img_ids[-1]), '_mask_coeff_sparse.png']))
+        plt.savefig(''.join([root_dir, str(img_ids[-1]), '_mask_coeff.png']))
         plt.clf()
 
         for jdx in range(masks_coeff.size(0)):
