@@ -37,7 +37,7 @@ class STMask(nn.Module):
         src_channels = self.backbone.channels
         in_channels = cfg.MODEL.FPN.NUM_FEATURES
         self.clip_frames, self.reduced_scale = 1, 1
-        self.block_diagonal = True
+        self.block_diagonal = False
 
         # Some hacky rewiring to accomodate the FPN
         self.fpn = FPN([src_channels[i] for i in cfg.MODEL.BACKBONE.SELECTED_LAYERS])
@@ -47,9 +47,9 @@ class STMask(nn.Module):
         if cfg.MODEL.FPN.USE_BIFPN:
             self.bifpn = nn.Sequential(*[BiFPN(self.fpn_num_features) for _ in range(cfg.num_bifpn)])
 
+        self.init_cubic_mode = cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_WITH_INITIALIZATION
         if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
             self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-            self.init_cubic_mode = cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_WITH_INITIALIZATION
             if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE and self.init_cubic_mode == 'reduced':
                 self.reduced_scale = 2
                 self.fpn_reduced_channels = nn.Sequential(*[
@@ -59,14 +59,14 @@ class STMask(nn.Module):
 
         # inflated channels in temporal direction
         if not cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE and self.init_cubic_mode != 'tsm':
-            src_channels = [self.clip_frames//self.reduced_scale*self.fpn_num_features] * len(self.selected_layers)
-            if cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
-                self.correlation_patch_size = cfg.MODEL.PREDICTION_HEADS.CORRELATION_PATCH_SIZE
-                src_channels = [channels+self.correlation_patch_size**2 for channels in src_channels]
-                # Flag channels that not belong to correlation
-                self.flag_noncorr_channels = torch.ones(src_channels[0])
-                for c in range(1, self.clip_frames):
-                    self.flag_corr_channels[src_channels[c]-self.correlation_patch_size**2: src_channels[c]] = 0
+                src_channels = [self.clip_frames//self.reduced_scale*self.fpn_num_features] * len(self.selected_layers)
+                if cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
+                    self.correlation_patch_size = cfg.MODEL.PREDICTION_HEADS.CORRELATION_PATCH_SIZE
+                    src_channels = [channels+self.correlation_patch_size**2 for channels in src_channels]
+                    # Flag channels that not belong to correlation
+                    self.flag_noncorr_channels = torch.ones(src_channels[0])
+                    for c in range(1, self.clip_frames):
+                        self.flag_corr_channels[src_channels[c]-self.correlation_patch_size**2: src_channels[c]] = 0
         else:
             src_channels = [self.fpn_num_features] * len(self.selected_layers)
 
@@ -118,7 +118,7 @@ class STMask(nn.Module):
                 track_arch = [(in_channels, 3, {'padding': 1})] * 2 + [(cfg.track_dim, 1, {})]
                 self.track_conv, _ = make_net(in_channels, track_arch, include_bn=True, include_last_relu=False)
 
-            if not cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE and not cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
+            if not cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE and not cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
                 # Track objects frame-by-frame
                 self.Track = Track(cfg.MODEL.TRACK_HEADS.MATCH_COEFF, self.clip_frames, train_masks=self.train_masks,
                                    track_by_Gaussian=cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN)
@@ -240,11 +240,12 @@ class STMask(nn.Module):
 
                     else:
                         print('load parameters from pre-trained models:', key)
-                        scale = self.clip_frames//self.reduced_scale
                         c_out, c_in, kh, kw = model_dict[key].size()
                         c_out_pre, c_in_pre = state_dict[key].size()[:2]
+                        c_in_scale = c_in//c_in_pre
+                        c_out_scale = c_out//c_out_pre
                         if self.block_diagonal:
-                            for c in range(scale):
+                            for c in range(c_in_scale):
                                 if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
                                     flag_channels = range(c*self.fpn_num_features, (c+1)*self.fpn_num_features)
                                 else:
@@ -262,14 +263,11 @@ class STMask(nn.Module):
                         else:
                             # Inflated or reduced weights from 2D (single frame) to 3D (multi-frames)
                             if key.split('.')[-2][-5:] == 'layer':
-                                if c_out != c_out_pre:
-                                    init_weights = state_dict[key].reshape(self.num_priors, -1, c_in, kh, kw)\
-                                        .repeat(1, self.clip_frames, scale, 1, 1).reshape(-1, scale*c_in, kh, kw)
-                                else:
-                                    init_weights = state_dict[key].repeat(1, scale, 1, 1)
+                                init_weights = state_dict[key].reshape(self.num_priors, -1, c_in, kh, kw)\
+                                    .repeat(1, c_out_scale, c_in_scale, 1, 1).reshape(-1, c_in_scale*c_in, kh, kw)
                             else:
-                                init_weights = state_dict[key].repeat(scale, scale, 1, 1)
-                            init_weights /= float(scale)
+                                init_weights = state_dict[key].repeat(c_out_scale, c_in_scale, 1, 1)
+                            init_weights /= float(c_in_scale*c_out_scale)
 
                             if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
                                 model_dict[key] = init_weights.to(model_dict[key].device)
@@ -373,12 +371,12 @@ class STMask(nn.Module):
                     else:
                         if self.init_cubic_mode == 'tsm':
                             pred_x = []
-                            interval = int(0.5/(self.clip_frames-1)*c)
-                            left, right = 0, interval
+                            fold = int(0.5/(self.clip_frames-1)*c)
+                            left, right = 0, fold
                             for frame_idx in range(-(self.clip_frames//2), self.clip_frames//2+1):
                                 pred_x.append(fpn_outs_clip[:, frame_idx, left:right])
                                 left = right
-                                right = right + int(0.5*c) if frame_idx+1 == 0 else right+interval
+                                right = right + int(0.5*c) if frame_idx+1 == 0 else right+fold
 
                         else:
                             # stack frames in channels
@@ -433,14 +431,11 @@ class STMask(nn.Module):
             pred_outs['fpn_feat'] = fpn_outs[self.TF_correlation_selected_layer]
 
         if self.training:
-
             return pred_outs
         else:
 
             pred_outs['conf'] = pred_outs['conf'].sigmoid() if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS \
                 else pred_outs['conf'].softmax(dim=-1)
-            # pred_outs['conf_3D'] = pred_outs['conf_3D'].sigmoid() if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS \
-            #     else pred_outs['conf_3D'].softmax(dim=-1)
 
             # Detection
             pred_outs_after_NMS = self.Detect(self, pred_outs)

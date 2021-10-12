@@ -65,6 +65,7 @@ class Track(object):
             for k, v in detection.items():
                 if k in {'box', 'box_cir', 'mask', 'class', 'track', 'track_mu', 'track_var', 'score'}:
                     self.prev_detection[k] = v.clone()
+            return detection
 
         else:
 

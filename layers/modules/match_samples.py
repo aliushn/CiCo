@@ -24,11 +24,15 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
         The matched indices corresponding to 1)location and 2)confidence preds.
     """
     # Remove some error annotations with width <= 0 or height <= 0
+    labels = labels.reshape(-1)
     bbox_c = center_size(bbox)
-    keep = (bbox_c[:, 2] > 0) & (bbox_c[:, 3] > 0)
-    valid_bbox = bbox[keep]
-    valid_idx = torch.nonzero(keep, as_tuple=False).reshape(-1)
-    small_objs_idx = torch.nonzero(bbox_c[:, 2] * bbox_c[:, 3] < 0.01, as_tuple=False)
+    valid = (bbox_c[:, 2] > 0) & (bbox_c[:, 3] > 0)
+    if (valid == 0).sum() > 0:
+        valid_bbox = bbox[valid]
+        valid_idx = torch.nonzero(valid, as_tuple=False).reshape(-1)
+    else:
+        valid_bbox = bbox
+    small_objs_idx = torch.nonzero(center_size(valid_bbox)[:, 2] * center_size(valid_bbox)[:, 3] < 0.01, as_tuple=False)
 
     # decoded_priors => [x1, y1, x2, y2]
     decoded_boxes = decode(loc_data, priors)
@@ -87,11 +91,11 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
     # print(bbox.size(0), keep_pos.sum())
     # print('idx:', best_truth_idx[keep_pos])
 
-    valid_best_truth_idx = valid_idx[best_truth_idx]
+    valid_best_truth_idx = valid_idx[best_truth_idx] if (valid == 0).sum() > 0 else best_truth_idx
     matches = bbox[valid_best_truth_idx]            # Shape: [num_priors,4]  [x1, y1, x2, y2]
     conf = labels[valid_best_truth_idx]             # Shape: [num_priors]
-    conf[~keep_pos] = -1                      # label as neutral
-    conf[keep_neg] = 0                        # label as background
+    conf[~keep_pos] = -1                            # label as neutral
+    conf[keep_neg] = 0                              # label as background
 
     # Deal with crowd annotations for COCO
     if crowd_boxes is not None and cfg.MODEL.PREDICTION_HEADS.CROWD_IoU_THRESHOLD < 1:
@@ -100,7 +104,10 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
         # Size [num_priors]
         best_crowd_overlap, best_crowd_idx = crowd_overlaps.max(1)
         # Set non-positives with crowd iou of over the threshold to be neutral.
-        conf[(conf <= 0) & (best_crowd_overlap > cfg.MODEL.PREDICTION_HEADS.CROWD_IoU_THRESHOLD)] = -1
+        if conf.size() == best_crowd_overlap.size():
+            conf[(conf <= 0) & (best_crowd_overlap > cfg.MODEL.PREDICTION_HEADS.CROWD_IoU_THRESHOLD)] = -1
+        else:
+            print('The tensors a and b should have same shape: ', conf.size(), best_crowd_overlap.size())
 
     loc = encode(matches, priors)  # [cx, cy, w, h]
     nonvalid_loc = (torch.isinf(loc).sum(-1) + torch.isnan(loc).sum(-1)) > 0
@@ -114,6 +121,8 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
         conf[nonvalid_loc_data] = -1
 
     loc_t[idx]  = loc                                            # [num_priors,4] encoded offsets to learn
+    if conf_t[idx].size() != conf.size():
+        print(conf_t[idx].size(), conf.size(), labels.size(), best_truth_overlap.size())
     conf_t[idx] = conf                                           # [num_priors] top class label for each prior
     idx_t[idx]  = valid_best_truth_idx.view(-1)                  # [num_priors] indices for lookup
     if ids is not None:
@@ -163,25 +172,33 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
                     gt_boxes[kdx, missed_cdx] = gt_boxes[kdx, occur_cdx[supp_cdx]]
 
     # ------- Introducing smallest enclosing boxes of multiple boxes in the clip to define positive/negative samples
+    # gt_boxes_min_area = torch.prod(gt_boxes[:, :, 2:]-gt_boxes[:, :, :2], dim=-1).min(dim=-1)[1]
     # if the number of frames is odd, use the central 3 frames as target frames, else 2 frames
-    # if n_clip_frames % 2 == 0:
-    #     gt_boxes_central_unfold = gt_boxes[:, n_clip_frames//2-1:n_clip_frames//2+1].reshape(n_objs, -1)
-    # else:
-    #     gt_boxes_central_unfold = gt_boxes[:, n_clip_frames//2-1:n_clip_frames//2+2].reshape(n_objs, -1)
-
-    gt_boxes_central_unfold = gt_boxes.reshape(n_objs, -1)
-    gt_circumscribed_box = circum_boxes(gt_boxes_central_unfold)
-
-    # compute iou for each object
-    # iou = torch.stack([jaccard(gt_boxes[i], gt_boxes[i]) for i in range(n_objs)], dim=0).triu_(1)
-    # divergence = iou.sum(dim=(1, 2)) / max(n_clip_frames-1, 1) / max(n_clip_frames-2, 1)
+    match_type = 'cen33'
+    if match_type == 'cen3':
+        if n_clip_frames % 2 == 0:
+            gt_boxes_central_unfold = gt_boxes[:, n_clip_frames//2-1:n_clip_frames//2+1].reshape(n_objs, -1)
+        else:
+            gt_boxes_central_unfold = gt_boxes[:, n_clip_frames//2-1:n_clip_frames//2+2].reshape(n_objs, -1)
+        gt_boxes_cir_list = [circum_boxes(gt_boxes_central_unfold)]
+    elif match_type == 'cen33':
+        gt_boxes_cir_list = [circum_boxes(gt_boxes[:, i:(i+3)].reshape(n_objs, -1)) for i in range(0, n_clip_frames-2, 2)]
+    else:
+        gt_boxes_cir_list = [circum_boxes(gt_boxes.reshape(n_objs, -1))]
 
     # decoded_priors [cx, cy, w, h] => [x1, y1, x2, y2]
     # TODO: add cfg.MODEL.PREDICTION_HEADS.USE_PREDICTION_MATCHING???
     decoded_priors = point_form(priors[:, :4])
-    overlaps_clip_cir = jaccard(gt_circumscribed_box, decoded_priors)
+    overlaps_clip_cir_all = torch.stack([jaccard(gt_circumscribed_box, decoded_priors)
+                                         for gt_circumscribed_box in gt_boxes_cir_list], dim=-1)
+    # best_truth_overlap_cir_all, best_truth_idx_cir_all = overlaps_clip_cir_all.max(dim=0)
+    overlaps_clip_cir = overlaps_clip_cir_all.max(dim=-1)[0]
     best_truth_overlap_cir, best_truth_idx_cir = overlaps_clip_cir.max(dim=0)
+    keep_pos_cir = best_truth_overlap_cir > pos_thresh
+    # print(n_objs, keep_pos_cir.sum())
+    # print(best_truth_idx_cir_all[keep_pos_cir], best_truth_overlap_cir_all[keep_pos_cir])
 
+    overlaps_clip_cir = overlaps_clip_cir_all.max(dim=-1)[0]
     # if a bbox is matched with two or more ground truth boxes, this bbox will be assigned as -1
     thresh = 0.5 * (pos_thresh + neg_thresh)
     multiple_bbox = (overlaps_clip_cir > pos_thresh).sum(dim=0) > 1

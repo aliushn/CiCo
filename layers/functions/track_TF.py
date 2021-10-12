@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
-from layers.utils import jaccard,  mask_iou, generate_track_gaussian, compute_comp_scores, compute_kl_div, generate_mask
+from layers.utils import jaccard, mask_iou, generate_track_gaussian, compute_comp_scores, compute_kl_div, generate_mask, \
+    center_size, point_form, encode
 from .TF_utils import CandidateShift
 from utils import timer
 import numpy as np
@@ -27,6 +28,7 @@ class Track_TF(object):
         self.track_by_Gaussian = track_by_Gaussian
         self.train_masks = train_masks
         self.use_stmask_TF = use_stmask_TF
+        self.use_cubic_TF = False
         self.proto_coeff_occlusion = proto_coeff_occlusion
         self.img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
         if self.track_by_Gaussian:
@@ -57,9 +59,14 @@ class Track_TF(object):
 
         return candidates
 
-    def track(self, candidate, img_meta, img=None):
+    def track(self, candidate, img_meta, img=None, bbox_dummy_iou=0.3):
         # only support batch_size = 1 for video test
-        is_first = img_meta['is_first']
+        if isinstance(img_meta, list):
+            is_first = img_meta[0]['is_first']
+            candidate['img_ids'] = torch.tensor([meta['frame_id'] for meta in img_meta])
+        else:
+            is_first = img_meta['is_first']
+            candidate['img_ids'] = img_meta['frame_id']
         if is_first:
             self.prev_candidate = None
 
@@ -94,9 +101,12 @@ class Track_TF(object):
             # Tracked mask: to track masks from previous frames to current frame
             if self.use_stmask_TF:
                 self.CandidateShift(candidate, self.prev_candidate, img=img, img_meta=img_meta)
-            else:
+            if self.use_cubic_TF:
                 # Tracked masks without crop: P_t * coeff_{t-1}
+                prev_boxes_cir = center_size(self.prev_candidate['box_cir'])
+                prev_boxes_cir[:, 2:] *= 1.2
                 self.prev_candidate['mask'] = generate_mask(candidate['proto'], self.prev_candidate['mask_coeff'],
+                                                            point_form(prev_boxes_cir),
                                                             proto_coeff_occlusion=self.proto_coeff_occlusion)
                 self.prev_candidate['score'] *= 0.9**(self.prev_candidate['mask'].size(1))
             for k, v in candidate.items():
@@ -121,14 +131,29 @@ class Track_TF(object):
 
                 match_type = 1
                 if match_type == 1:
+                    img_ids_overlapped_idx = torch.nonzero(self.prev_candidate['img_ids'].unsqueeze(1) == candidate['img_ids'],
+                                                           as_tuple=False)
+                    if img_ids_overlapped_idx.nelement() > 0:
+                        prev_overlapped_idx = img_ids_overlapped_idx[:, 0]
+                        cur_overlapped_idx = img_ids_overlapped_idx[:, 1]
+                    else:
+                        prev_overlapped_idx, cur_overlapped_idx = [candidate['proto'].size(2)-1], [0]
                     # calculate KL divergence for Gaussian distribution of isntances
                     # Calculate BIoU and MIoU between detected masks and tracked masks for assign IDs
-                    bbox_ious = jaccard(det_bbox[:, :4], self.prev_candidate['box'][:, -4:])  # [n_dets, n_prev]
+                    bbox_ious = torch.stack([jaccard(det_bbox[:, cur_idx*4:(cur_idx+1)*4],
+                                             self.prev_candidate['box'][:, prev_idx*4:(prev_idx+1)*4])
+                                             for prev_idx, cur_idx in zip(prev_overlapped_idx, cur_overlapped_idx)
+                                             ]).mean(dim=0)
                     label_delta = (self.prev_candidate['class'] == det_labels.view(-1, 1)).float()
                     if self.train_masks:
-                        mask_ious = mask_iou(det_masks_soft.gt(0.5).float().permute(1,0,2,3).contiguous(),
-                                             self.prev_candidate['mask'].gt(0.5).float().permute(1,0,2,3).contiguous())
-                        mask_ious = mask_ious.mean(dim=0)
+                        det_masks, prev_masks = det_masks_soft.gt(0.5).float(), self.prev_candidate['mask'].gt(0.5).float()
+                        if self.use_cubic_TF:
+                            mask_ious = mask_iou(det_masks.permute(1,0,2,3).contiguous(),
+                                                 prev_masks.permute(1,0,2,3).contiguous()).mean(dim=0)
+                        else:
+                            mask_ious = torch.stack([mask_iou(det_masks[:, cur_idx], prev_masks[:, prev_idx])
+                                                    for prev_idx, cur_idx in zip(prev_overlapped_idx, cur_overlapped_idx)
+                                                     ]).mean(dim=0)
                     else:
                         mask_ious = torch.zeros_like(bbox_ious)
 
@@ -152,7 +177,7 @@ class Track_TF(object):
                                                       mask_ious,
                                                       label_delta,
                                                       add_bbox_dummy=True,
-                                                      bbox_dummy_iou=0.3,
+                                                      bbox_dummy_iou=bbox_dummy_iou,
                                                       match_coeff=self.match_coeff)
                     # only need to do that for isntances whose Mask IoU is lower than 0.9
                     match_likelihood, match_ids = torch.max(comp_scores, dim=1)
@@ -162,33 +187,26 @@ class Track_TF(object):
                     match_likelihood, match_ids = torch.max(comp_scores, dim=1)
 
                 # translate match_ids to det_obj_ids, assign new id to new objects
-                # update tracking features/bboxes of exisiting object,
-                # add tracking features/bboxes of new object
+                # update tracking features/boxes of existing object,
+                # add tracking features/boxes of new object
                 det_obj_ids = torch.ones(n_dets, dtype=torch.int64) * (-1)
-                best_match_scores = torch.ones(n_prev) * (-1)
-                best_match_idx = torch.ones(n_prev, dtype=torch.int64) * (-1)
                 for match_idx, match_id in enumerate(match_ids):
                     if match_id == 0:
                         det_obj_ids[match_idx] = self.prev_candidate['box'].size(0)
                         for k, v in self.prev_candidate.items():
-                            if k not in self.img_level_keys + ['box_ids']:
+                            if k not in self.img_level_keys + ['box_ids', 'img_ids']:
                                 self.prev_candidate[k] = torch.cat([v, candidate[k][match_idx][None]], dim=0)
 
                     else:
-                        # multiple candidate might match with previous object, here we choose the one with
-                        # largest comprehensive score
-                        obj_id = match_id - 1
-                        match_score = match_likelihood[match_idx]
-                        if match_score > best_match_scores[obj_id]:
-                            if best_match_idx[obj_id] != -1:
-                                det_obj_ids[int(best_match_idx[obj_id])] = -1
-                            det_obj_ids[match_idx] = obj_id
-                            best_match_scores[obj_id] = match_score
-                            best_match_idx[obj_id] = match_idx
-                            # udpate feature
+                        keep = (match_ids - match_id) == 0
+                        matched_score_max = match_likelihood[keep].max()
+                        if match_likelihood[match_idx] == matched_score_max:
+                            # multiple candidate might match with previous object, here we choose the one with
+                            # largest comprehensive score
+                            det_obj_ids[match_idx] = match_id - 1
                             for k, v in self.prev_candidate.items():
-                                if k not in self.img_level_keys + ['box_ids']:
-                                    self.prev_candidate[k][obj_id] = candidate[k][match_idx]
+                                if k not in self.img_level_keys + ['box_ids', 'img_ids']:
+                                    self.prev_candidate[k][match_id-1] = candidate[k][match_idx]
 
         candidate['box_ids'] = det_obj_ids
         self.prev_candidate['box_ids'] = torch.arange(self.prev_candidate['box'].size(0))
@@ -211,12 +229,12 @@ class Track_TF(object):
             candidate['box_ids'] = torch.Tensor()
         else:
             for k, v in candidate.items():
-                if k not in self.img_level_keys:
+                if k not in self.img_level_keys+['img_ids']:
                     if num_detected_objs == 0:
                         candidate[k] = self.prev_candidate[k][keep_tracked_objs]
                     elif keep_tracked_objs.sum() == 0:
                         candidate[k] = v[det_obj_ids >= 0]
                     else:
                         candidate[k] = torch.cat([v[det_obj_ids >= 0], self.prev_candidate[k][keep_tracked_objs]])
-
+        self.prev_candidate['img_ids'] = candidate['img_ids']
         return candidate

@@ -498,9 +498,9 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
         print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
 
         # reverse order
-        if args.display:
-            vdx = -vdx-1
-            vid = dataset.vid_ids[vdx]
+        # if args.display:
+        #     vdx = -vdx-1
+        #     vid = dataset.vid_ids[vdx]
         vid_objs = {}
         if data_type == 'vis':
             len_vid = dataset.vid_infos[vdx]['length']
@@ -534,7 +534,7 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
                     images_meta = (images_meta*eval_clip_frames)[:eval_clip_frames]
 
             with timer.env('Network Extra'):
-                preds_clip = net(images, img_meta=images_meta)
+                preds_clip = net(images, img_meta=[images_meta])
                 pred_clip = preds_clip[0]
 
             temporal_dependent_keys = {'proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg', 'mask_coeff_3D', 'mask',

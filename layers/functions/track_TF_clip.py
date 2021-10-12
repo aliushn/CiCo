@@ -117,7 +117,7 @@ class Track_TF_Clip(object):
             #         [4, 2]])
             last_clip_frame_ids = self.last_clip_result['frame_id'][:, 0]
             cur_clip_frame_ids = candidates_clip['frame_id'][:, 0]
-            frame_ids_overlapped_idx = (last_clip_frame_ids.unsqueeze(1) == cur_clip_frame_ids).nonzero(as_tuple=False)
+            frame_ids_overlapped_idx = torch.nonzero(last_clip_frame_ids.unsqueeze(1) == cur_clip_frame_ids, as_tuple=False)
             last_overlapped_idx = frame_ids_overlapped_idx[:, 0]
             cur_overlapped_idx = frame_ids_overlapped_idx[:, 1]
 

@@ -191,7 +191,7 @@ class COCODetection(data.Dataset):
                 masks = None
                 target = None
 
-        if target is not None and target.shape[0] == 0:
+        if target is not None and (target.shape[0] == 0 or target.shape[0] == num_crowds):
             print('Warning: Augmentation output an example with no ground truth. Resampling...')
             return self.pull_item(random.randint(0, len(self.ids)-1))
 
@@ -324,14 +324,14 @@ def prepare_data_coco(data_batch, devices):
         masks, boxes, img_metas = GtList_from_tensor(pad_h, pad_w, masks, boxes, img_metas)
 
     if images.size(0) % len(devices) != 0:
-        idx = [i % images.size(0) for i in range(len(devices))]
-        remainder = len(devices) - images.size(0) % len(devices)
-        images = torch.cat([images, images[idx[:remainder]]])
-        boxes += [boxes[i] for i in idx[:remainder]]
-        labels += [boxes[i] for i in idx[:remainder]]
-        masks += [masks[i] for i in idx[:remainder]]
-        num_crowds += [num_crowds[i] for i in idx[:remainder]]
-        img_metas += [img_metas[i] for i in idx[:remainder]]
+        n_total = (images.size(0) // len(devices) + 1) * len(devices)
+        idx = [i % images.size(0) for i in range(images.size(0), n_total)]
+        images = torch.cat([images, images[idx]], dim=0)
+        boxes += [boxes[i] for i in idx]
+        labels += [labels[i] for i in idx]
+        masks += [masks[i] for i in idx]
+        num_crowds += [num_crowds[i] for i in idx]
+        img_metas += [img_metas[i] for i in idx]
     n = images.size(0) // len(devices)
 
     with torch.no_grad():

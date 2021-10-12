@@ -151,7 +151,7 @@ class MultiBoxLoss(nn.Module):
             ids_t = Variable(ids_t, requires_grad=False)
 
         pos = conf_t > 0
-        losses = {}
+        losses = dict()
         if pos.sum() > 0:
             # ---------------------------  Localization Loss (Smooth L1) -------------------------------------------
             losses_loc, pred_boxes_p, gt_boxes_p = self.loclization_loss(pos, priors, loc_data, loc_t, centerness_data)
@@ -249,12 +249,11 @@ class MultiBoxLoss(nn.Module):
         return neg
     
     def loclization_loss(self, pos, priors, loc_data, loc_t, centerness_data):
-        losses = dict()
         loc_p = loc_data[pos].reshape(-1, 4)
         loc_t = loc_t[pos].reshape(-1, 4)
         pos_priors = priors[pos].reshape(-1, 4)
         box_loss = F.smooth_l1_loss(loc_p, loc_t, reduction='none').sum(dim=-1)
-        losses['B'] = box_loss.mean() * self.cfg.MODEL.BOX_HEADS.LOSS_ALPHA
+        losses = {'B': box_loss.mean() * self.cfg.MODEL.BOX_HEADS.LOSS_ALPHA}
 
         decoded_loc_p = decode(loc_p, pos_priors)
         decoded_loc_t = decode(loc_t, pos_priors)

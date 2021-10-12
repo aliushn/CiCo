@@ -120,7 +120,7 @@ class YTVOSDataset(data.Dataset):
         return bbox
 
     def sample_ref(self, idx):
-        # sample another frame in the same sequence as reference
+        # sample another frames in the same sequence as reference
         vid, frame_id = idx
         valid_samples = []
         for i in range(-self.clip_frames, self.clip_frames+1):

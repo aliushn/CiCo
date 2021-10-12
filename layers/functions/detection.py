@@ -175,8 +175,9 @@ class Detect(object):
 
             if self.train_masks and self.nms_with_miou:
                 masks_idx = candidate['mask'][idx].gt(0.5).float().permute(1,0,2,3).contiguous()
-                flag = masks_idx.sum(dim=[-1, -2]) > 5
-                m_iou = mask_iou(masks_idx, masks_idx).sum(dim=0) / flag.sum(dim=0)
+                flag = masks_idx.sum(dim=[-1, -2]) > 0
+                m_iou = mask_iou(masks_idx, masks_idx)
+                m_iou = m_iou.sum(dim=0) / flag.sum(dim=0)
                 # Calculate similarity of mask coefficients
                 masks_coeff_idx = F.normalize(candidate['mask_coeff'][idx], dim=-1)
                 sim = masks_coeff_idx @ masks_coeff_idx.t()
