@@ -396,7 +396,12 @@ class STMask(nn.Module):
                 else:
                     pred_x = fpn_outs[idx]
 
-                p = pred_layer(pred_x, idx, img_meta)
+                if idx == 0:
+                    p = pred_layer(pred_x, bb_outs[0].permute(1,0,2,3).contiguous().unsqueeze(0), idx, img_meta)
+                else:
+                    # out_x = 0.5*pred_x + 0.5*F.interpolate(prev_x.squeeze(0), (pred_x.size(-2), pred_x.size(-1))).unsqueeze(0)
+                    p = pred_layer(pred_x, prev_x, idx, img_meta)
+                prev_x = pred_x
 
                 for k, v in p.items():
                     pred_outs[k].append(v)  # [batch_size, h*w*anchors, dim

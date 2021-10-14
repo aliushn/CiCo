@@ -67,6 +67,9 @@ class LincombMaskLoss(object):
                         boxes_cur = circum_boxes(pred_boxes_pos[i].detach())
                     else:
                         boxes_cur = circum_boxes(boxes_t_pos[i])
+                    if self.cfg.MODEL.MASK_HEADS.PROTO_DIVERGENCE_LOSS:
+                        biou = jaccard(boxes_cur, boxes_cur)
+                        boxes_cur = torch.stack([circum_boxes(boxes_cur[biou[i] > 0.1].reshape(-1)) for i in range(biou.size(0))])
                     boxes_cur_c = center_size(boxes_cur)
                     boxes_cur_c[:, 2:] *= 1.2
                     # for small objects, we set width and height of bounding boxes is 0.1
@@ -118,8 +121,8 @@ class LincombMaskLoss(object):
                         pred_masks = torch.clamp(F.interpolate(pred_masks.float(), (1, H_gt, W_gt),
                                                                mode='trilinear', align_corners=True), min=0, max=1)
                     # crop non-target ground-truth masks in bounding boxes
-                    mask_t = torch.stack([crop(mask_t[:, k].permute(2,3,1,0).contiguous(), boxes_cur)
-                                          for k in range(pred_masks.size(1))], dim=-1).permute(3,4,2,0,1).contiguous()
+                    mask_t = torch.stack([crop(mask_t[:, k].permute(2, 3, 1, 0).contiguous(), boxes_cur)
+                                          for k in range(pred_masks.size(1))], dim=-1).permute(3, 4, 2, 0, 1).contiguous()
                     if self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF:
                         pre_loss = torch.stack([self.dice_coefficient(pred_masks[:, k], mask_t[:, k])
                                                 for k in range(pred_masks.size(1))], dim=1).sum(1)
@@ -137,19 +140,19 @@ class LincombMaskLoss(object):
                         # pre_loss = pre_loss.sum(dim=(-1, -2, -3)) / pred_masks.size(-1)/pred_masks.size(-2)/n_frames
 
                 loss += pre_loss.mean()
-        loss = loss / bs * self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA * (n_frames/2.)
+        loss = loss / bs * self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA * n_frames
         losses = {'M_dice': loss} if self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF else {'M_bce': loss}
         losses['M_sparse'] = sparse_loss / bs
         if self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_LOSS:
             losses['M_coeff'] = loss_coeff_div / max(bs, 1)
         # Prototypes divergence loss
-        if self.cfg.MODEL.MASK_HEADS.PROTO_DIVERGENCE_LOSS:
-            losses['M_proto'] = self.proto_divergence_loss(proto_data, masks_gt, boxes_gt, threshold=0.25)
+        # if self.cfg.MODEL.MASK_HEADS.PROTO_DIVERGENCE_LOSS:
+        #     losses['M_proto'] = self.proto_divergence_loss(proto_data, masks_gt, boxes_gt, threshold=0.25)
     
         return losses
 
     def coeff_sparse_loss(self, coeffs):
-        return 0.05 * torch.abs(coeffs).sum(dim=-1).mean()
+        return 0.01 * torch.abs(coeffs).sum(dim=-1).mean()
 
     def dice_coefficient(self, x, target):
         eps = 1e-5
@@ -174,15 +177,17 @@ class LincombMaskLoss(object):
         cos_sim = (cos_sim + 1) / 2
     
         instance_t = instance_t.view(-1)  # juuuust to make sure
-        inst_eq = (instance_t[:, None].expand_as(cos_sim) == instance_t[None, :].expand_as(cos_sim))
+        inst_eq = (instance_t[:, None].expand_as(cos_sim) == instance_t[None, :].expand_as(cos_sim)).float()
     
         # If they're the same instance, use cosine distance, else use cosine similarity
         cos_sim_diff = torch.clamp(1 - cos_sim, min=1e-10)
-        loss = -1 * (torch.clamp(cos_sim, min=1e-10).log() * inst_eq.float() + cos_sim_diff.log())
+        loss = -1 * (torch.clamp(cos_sim, min=1e-10).log() * inst_eq + cos_sim_diff.log() * (1-inst_eq))
+        loss.triu_(diagonal=1)
     
         # Only divide by num_pos once because we're summing over a num_pos x num_pos tensor
         # and all the losses will be divided by num_pos at the end, so just one extra time.
-        return self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_ALPHA*loss.sum() / max(inst_eq.sum(), 1)
+        num = (loss.size(0)-1)*loss.size(0) // 2
+        return self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_ALPHA*loss.sum() / max(num, 1)
 
     def proto_divergence_loss(self, protos, masks, boxes, threshold=0.5):
         '''

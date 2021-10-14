@@ -6,7 +6,7 @@ from utils import timer
 from itertools import product
 from math import sqrt
 from mmcv.ops import DeformConv2d
-from ..visualization_temporal import display_cubic_weights
+from ..visualization_temporal import display_cubic_weights, display_pixle_similarity
 
 
 class PredictionModule_3D(nn.Module):
@@ -79,6 +79,8 @@ class PredictionModule_3D(nn.Module):
                                                       padding=(1, 1))
             self.bbox_layer = nn.Conv3d(self.in_channels, self.num_priors*4,
                                         kernel_size=loc_kernel_size, padding=padding)
+            # self.bbox_layer = nn.Conv3d(self.in_channels, self.num_priors*4, kernel_size=loc_kernel_size,
+            #                             padding=(0, 2, 2), dilation=(1, 2, 2), stride=2)
 
             if cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
                 if self.cfg.MODEL.PREDICTION_HEADS.USE_SPATIO_DCN:
@@ -89,6 +91,8 @@ class PredictionModule_3D(nn.Module):
                                                                 padding=(1, 1))
                 self.centerness_layer = nn.Conv3d(self.in_channels, self.num_priors,
                                                   kernel_size=loc_kernel_size, padding=padding)
+                # self.centerness_layer = nn.Conv3d(self.in_channels, self.num_priors, kernel_size=loc_kernel_size,
+                #                                   padding=(0, 2, 2), dilation=(1, 2, 2), stride=2)
 
             if cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
                 if self.cfg.MODEL.CLASS_HEADS.USE_SPATIO_DCN:
@@ -99,6 +103,8 @@ class PredictionModule_3D(nn.Module):
                                                           padding=(1, 1))
                 self.conf_layer = nn.Conv3d(self.in_channels, self.num_priors*self.num_classes,
                                             kernel_size=kernel_size, padding=padding)
+                self.conf_layer_d2 = nn.Conv3d(self.in_channels, self.num_priors*self.num_classes,
+                                               kernel_size=kernel_size, padding=(0, 2, 2), dilation=(1, 2, 2), stride=2)
                 if self.cfg.MODEL.PREDICTION_HEADS.USE_TEMPORAL_COEFF:
                     self.conf_temporal_layer = nn.Conv3d(self.in_channels, 1,
                                                          kernel_size=kernel_size, padding=padding)
@@ -151,7 +157,7 @@ class PredictionModule_3D(nn.Module):
             if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
                 self.track_extra = make_extra(cfg.MODEL.TRACK_HEADS.TOWER_LAYERS, self.in_channels)
 
-    def forward(self, x, idx, img_meta):
+    def forward(self, x, upper_x, idx, img_meta):
         """
         Args:
             - x: The convOut from a layer in the backbone network
@@ -185,7 +191,7 @@ class PredictionModule_3D(nn.Module):
         if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
             if self.cfg.MODEL.PREDICTION_HEADS.USE_SPATIO_DCN:
                 centerness = src.centerness_spatio_layer(bbox_x_4D, src.centerness_spatio_offset(bbox_x_4D))
-                centerness = centerness.reshape(bs, T, -1, conv_h, conv_w).permute(0,2,1,3,4).contiguous()
+                centerness = centerness.reshape(bs, T, -1, conv_h, conv_w).permute(0, 2, 1, 3, 4).contiguous()
                 centerness = src.centerness_layer(centerness).permute(0, 3, 4, 2, 1).contiguous()
             else:
                 centerness = src.centerness_layer(bbox_x).permute(0, 3, 4, 2, 1).contiguous()
@@ -201,13 +207,19 @@ class PredictionModule_3D(nn.Module):
                 conf = src.conf_layer(conf).permute(0, 3, 4, 2, 1).contiguous()
             else:
                 conf = src.conf_layer(conf_x)
+
+            if upper_x is not None:
+                conf_x_upper = src.conf_extra(upper_x)
+                conf_upper = src.conf_layer_d2(conf_x_upper)
+                conf = conf + con
             preds['conf'] = conf.permute(0, 3, 4, 2, 1).contiguous().reshape(bs, -1, self.num_classes)
+            display_pixle_similarity(conf, bbox_x, img_meta[0], idx=idx)
 
         # Mask coefficients
         if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
             if self.cfg.MODEL.MASK_HEADS.USE_SPATIO_DCN:
                 mask = src.mask_spatio_layer(bbox_x_4D, src.mask_spatio_offset(bbox_4D))
-                mask = mask.reshape(bs, T, -1, conv_h, conv_w).permute(0,2,1,3,4).contiguous()
+                mask = mask.reshape(bs, T, -1, conv_h, conv_w).permute(0, 2, 1, 3, 4).contiguous()
                 mask = src.mask_layer(mask)
             else:
                 mask = src.mask_layer(bbox_x)

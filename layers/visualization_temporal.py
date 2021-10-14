@@ -64,12 +64,13 @@ def display_pos_smaples(pos, img_gpu, decoded_priors, bbox):
     cv2.imwrite(path, image)
 
 
-def display_box_shift(box, box_shift, img_meta, img_gpu=None, conf=None):
-    save_dir = 'weights/YTVIS2019/r50_base_YTVIS2019_stmask_TF2_1X/box_shift/'
-    save_dir = os.path.join(save_dir, str(img_meta['video_id']))
+def display_box_shift(boxes, box_shift=None, img_meta=None, img_gpu=None, conf=None):
+    save_dir = 'weights/YTVIS2019/r50_base_YTVIS2019_cubic_3D_c7_indbox_matchcen33_1X/box_shift/'
+    if img_meta is not None:
+        save_dir = os.path.join(save_dir, str(img_meta['video_id']))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
-    path = ''.join([save_dir, '/', str(img_meta['frame_id']), '_c10.png'])
+    path = ''.join([save_dir, '/', str(img_meta['frame_id']), '.png'])
 
     # Make empty black image
     if img_gpu is None:
@@ -80,20 +81,22 @@ def display_box_shift(box, box_shift, img_meta, img_gpu=None, conf=None):
         img_gpu = img_gpu.squeeze(0).permute(1, 2, 0).contiguous()
         img_gpu = img_gpu[:, :, (2, 1, 0)]  # To BRG
         img_gpu = img_gpu * torch.tensor(STD) + torch.tensor(MEANS)
-        # img_gpu = img_gpu[:, :, (2, 1, 0)]  # To RGB
-        img_numpy = torch.clamp(img_gpu, 0, 255).cpu().numpy()
+        img_gpu = img_gpu[:, :, (2, 1, 0)]  # To RGB
+        img_numpy = torch.clamp(img_gpu, 0, 255).byte().cpu().numpy()
 
     if conf is not None:
         scores, classes = conf[:, 1:].max(dim=1)
 
     # plot pred bbox
-    color_type = range(box.size(0))
-    for i in range(box.size(0)):
+    color_type = range(boxes.size(0))
+    for i in reversed(range(boxes.size(0))):
         color = get_color(i, color_type)
-        cv2.rectangle(img_numpy, (box[i, 0]*w, box[i, 1]*h), (box[i, 2]*w, box[i, 3]*h), color, 2)
-
-        draw_dotted_rectangle(img_numpy, box_shift[i, 0] * w, box_shift[i, 1] * h,
-                              box_shift[i, 2] * w, box_shift[i, 3] * h, color, 2, gap=10)
+        box = boxes[i].reshape(-1, 4)
+        for j in range(box.size(0)):
+            cv2.rectangle(img_numpy, (box[j, 0]*w, box[j, 1]*h), (box[j, 2]*w, box[j, 3]*h), color, 2)
+        if box_shift is not None:
+            draw_dotted_rectangle(img_numpy, box_shift[i, 0] * w, box_shift[i, 1] * h,
+                                  box_shift[i, 2] * w, box_shift[i, 3] * h, color, 2, gap=10)
 
         if conf is not None:
             text_str = '%s: %.2f' % (classes[i].item()+1, scores[i])
@@ -104,7 +107,10 @@ def display_box_shift(box, box_shift, img_meta, img_gpu=None, conf=None):
             text_pt = (box_shift[i, 0]*w, box_shift[i, 1]*h - 3)
             text_color = [255, 255, 255]
             cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness, cv2.LINE_AA)
-    cv2.imwrite(path, img_numpy)
+    plt.axis('off')
+    plt.imshow(img_numpy)
+    plt.savefig(path)
+    plt.clf()
 
 
 def display_feature_align_dcn(detection, offset, loc_data, img_gpu=None, img_meta=None, use_yolo_regressors=False):
@@ -423,3 +429,32 @@ def display_cubic_weights(weights, idx, type=1, name='None', img_meta=None):
         else:
             plt.savefig(path_dir+'/'+name+str(idx)+'.png')
         plt.clf()
+
+
+def display_pixle_similarity(conf, f, img_meta, idx=0):
+    '''
+    :param conf: [bs, class, 1, h, w]
+    :param f: [bs, c, T, h, w]
+    :return:
+    '''
+    bs, c, T, h, w = f.size()
+    for i in range(bs):
+        conf_max, classes = conf[i].sigmoid().max(dim=0)
+        keep = conf_max > 0.1
+        classes = classes[keep] % 40 + 1
+        n_objs = keep.sum()
+        if n_objs > 0:
+            tar_f = f[i][keep.unsqueeze(0).repeat(c,T,1,1)]
+            sim = torch.sum((f.reshape(c, T, 1, -1) - tar_f.reshape(c, T, -1, 1))**2, dim=(0, 1)).reshape(-1, h, w)
+            r = int(sqrt(n_objs))
+            sim_map = sim[:r*int(n_objs//r)].reshape(r, -1, h, w).permute(0,2,1,3).contiguous()
+            sim_map = sim_map.reshape(r*h, -1).detach().cpu().numpy()
+
+            plt.axis('off')
+            plt.title(str(classes.tolist()))
+            plt.imshow(sim_map)
+            path_dir = 'weights/YTVIS2019/r50_base_YTVIS2019_cubic_3D_c7_indbox_matchcen33_1X/heatmap/'+str(img_meta[i]['video_id'])
+            if not os.path.exists(path_dir):
+                os.makedirs(path_dir)
+            plt.savefig(path_dir+'/'+str(img_meta[i]['frame_id'])+'_'+str(idx)+'box.png')
+            plt.clf()

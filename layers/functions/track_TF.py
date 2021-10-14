@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
-from layers.utils import jaccard, mask_iou, generate_track_gaussian, compute_comp_scores, compute_kl_div, generate_mask, \
-    center_size, point_form, encode
+from layers.utils import jaccard,  mask_iou, generate_track_gaussian, compute_comp_scores, compute_kl_div, generate_mask, \
+    center_size, point_form
 from .TF_utils import CandidateShift
 from utils import timer
 import numpy as np
@@ -28,7 +28,7 @@ class Track_TF(object):
         self.track_by_Gaussian = track_by_Gaussian
         self.train_masks = train_masks
         self.use_stmask_TF = use_stmask_TF
-        self.use_cubic_TF = False
+        self.use_cubic_TF = True
         self.proto_coeff_occlusion = proto_coeff_occlusion
         self.img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
         if self.track_by_Gaussian:
@@ -187,9 +187,11 @@ class Track_TF(object):
                     match_likelihood, match_ids = torch.max(comp_scores, dim=1)
 
                 # translate match_ids to det_obj_ids, assign new id to new objects
-                # update tracking features/boxes of existing object,
-                # add tracking features/boxes of new object
+                # update tracking features/bboxes of exisiting object,
+                # add tracking features/bboxes of new object
                 det_obj_ids = torch.ones(n_dets, dtype=torch.int64) * (-1)
+                best_match_scores = torch.ones(n_prev) * (-1)
+                best_match_idx = torch.ones(n_prev, dtype=torch.int64) * (-1)
                 for match_idx, match_id in enumerate(match_ids):
                     if match_id == 0:
                         det_obj_ids[match_idx] = self.prev_candidate['box'].size(0)
@@ -198,15 +200,20 @@ class Track_TF(object):
                                 self.prev_candidate[k] = torch.cat([v, candidate[k][match_idx][None]], dim=0)
 
                     else:
-                        keep = (match_ids - match_id) == 0
-                        matched_score_max = match_likelihood[keep].max()
-                        if match_likelihood[match_idx] == matched_score_max:
-                            # multiple candidate might match with previous object, here we choose the one with
-                            # largest comprehensive score
-                            det_obj_ids[match_idx] = match_id - 1
+                        # multiple candidate might match with previous object, here we choose the one with
+                        # largest comprehensive score
+                        obj_id = match_id - 1
+                        match_score = match_likelihood[match_idx]
+                        if match_score > best_match_scores[obj_id]:
+                            if best_match_idx[obj_id] != -1:
+                                det_obj_ids[int(best_match_idx[obj_id])] = -1
+                            det_obj_ids[match_idx] = obj_id
+                            best_match_scores[obj_id] = match_score
+                            best_match_idx[obj_id] = match_idx
+                            # udpate feature
                             for k, v in self.prev_candidate.items():
                                 if k not in self.img_level_keys + ['box_ids', 'img_ids']:
-                                    self.prev_candidate[k][match_id-1] = candidate[k][match_idx]
+                                    self.prev_candidate[k][obj_id] = candidate[k][match_idx]
 
         candidate['box_ids'] = det_obj_ids
         self.prev_candidate['box_ids'] = torch.arange(self.prev_candidate['box'].size(0))
@@ -222,7 +229,7 @@ class Track_TF(object):
 
         # Choose objects detected and segmented by frame-level prediction head
         num_detected_objs = (det_obj_ids >= 0).sum() if det_obj_ids is not None else 0
-        if not self.use_stmask_TF:
+        if not self.use_cubic_TF:
             keep_tracked_objs = keep_tracked_objs > 10
 
         if num_detected_objs + keep_tracked_objs.sum() == 0:

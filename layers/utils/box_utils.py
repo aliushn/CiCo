@@ -248,7 +248,8 @@ def crop(masks, boxes, padding:int=1, return_mask=False):
     d_masks = len(masks.size())
     if d_masks == 3:
         masks = masks.unsqueeze(2)
-    h, w, c, n = masks.size()
+    h, w, c, _ = masks.size()
+    n = boxes.size(0)
 
     x1, x2 = sanitize_coordinates(boxes[:, 0], boxes[:, 2], w, padding, cast=True)
     y1, y2 = sanitize_coordinates(boxes[:, 1], boxes[:, 3], h, padding, cast=True)
@@ -260,8 +261,10 @@ def crop(masks, boxes, padding:int=1, return_mask=False):
     masks_right = rows <  x2.view(1, 1, 1, -1)
     masks_up    = cols >= y1.view(1, 1, 1, -1)
     masks_down  = cols <  y2.view(1, 1, 1, -1)
-    
     crop_mask = (masks_left * masks_right * masks_up * masks_down).float()
+
+    if masks.size(-1) == 1 and n > 1:
+        crop_mask = (crop_mask.sum(dim=-1) > 0).float()
     cropped_masks = crop_mask * masks
     if d_masks == 3:
         crop_mask = crop_mask.squeeze(2)

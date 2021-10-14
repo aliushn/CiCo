@@ -155,14 +155,14 @@ class Resize(object):
         # resize short edges
         if img_w < img_h:
             height = int(img_h * (size / img_w))
-            if height > self.max_size*2:
+            if height > int(self.max_size*1.5):
                 width = int(self.max_size*2/height * size)
                 height = self.max_size*2
             else:
                 width = size
         else:
             width = int(img_w * (size / img_h))
-            if width > self.max_size*2:
+            if width > int(self.max_size*1.5):
                 height = int(self.max_size*2/width * size)
                 width = self.max_size*2
             else:

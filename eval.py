@@ -103,10 +103,10 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
                                       output_file=args.save_folder)
         torch.cuda.synchronize()
 
+    num_dets_to_consider = min(args.top_k, dets_out['class'].nelement())
     scores = dets_out['score'][:args.top_k].view(-1).detach().cpu().numpy()
     boxes = dets_out['box'][:args.top_k].detach().cpu().numpy()
     classes = dets_out['class'][:args.top_k].view(-1).detach().cpu().numpy()
-    num_dets_to_consider = min(args.top_k, classes.shape[0])
     color_type = dets_out['box_ids'].view(-1)
     num_tracked_mask = dets_out['tracked_mask'] if 'tracked_mask' in dets_out.keys() else None
     boxes_cir = dets_out['box_cir'] if 'box_cir' in dets_out.keys() else None
