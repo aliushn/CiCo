@@ -49,7 +49,8 @@ INPUT = dict(
     
 SOLVER = dict(
     IMS_PER_BATCH=8,
-    NUM_CLIP_FRAMES=2,
+    NUM_CLIP_FRAMES=1,
+    NUM_CLIPS=2,
     LR=0.0005,
     LR_STEPS=(8, ),
     MAX_EPOCH=12,

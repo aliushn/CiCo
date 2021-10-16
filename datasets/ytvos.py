@@ -15,6 +15,7 @@ class YTVOSDataset(data.Dataset):
                  img_prefix,
                  has_gt=False,
                  clip_frames=1,
+                 num_clips=1,
                  size_divisor=None,
                  transform=None,
                  with_crowd=False):
@@ -40,6 +41,7 @@ class YTVOSDataset(data.Dataset):
 
         # if using mutil-scale training, random an integer from [min_size, max_size]
         self.clip_frames = clip_frames
+        self.num_clips = num_clips
 
         # padding border to ensure the image size can be divided by
         # size_divisor (used for FPN)
@@ -123,17 +125,18 @@ class YTVOSDataset(data.Dataset):
         # sample another frames in the same sequence as reference
         vid, frame_id = idx
         valid_samples = []
-        for i in range(-self.clip_frames, self.clip_frames+1):
+        n_total = self.clip_frames*self.num_clips
+        for i in range(-n_total//2, (n_total+1)//2):
             # check if the frame id is valid
             ref_idx = (vid, i+frame_id)
             if i != 0 and ref_idx in self.img_ids:
                 valid_samples.append(i+frame_id)
         if len(valid_samples) == 0:
-            ref_frames = [frame_id]*(self.clip_frames-1)
+            ref_frames = [frame_id]*(n_total-1)
         else:
-            if self.clip_frames-1 > len(valid_samples):
-                valid_samples += (valid_samples*self.clip_frames)[:self.clip_frames-1-len(valid_samples)]
-            ref_frames = random.sample(valid_samples, self.clip_frames-1)
+            if n_total-1 > len(valid_samples):
+                valid_samples += (valid_samples*n_total)[:n_total-1-len(valid_samples)]
+            ref_frames = random.sample(valid_samples, n_total-1)
         return ref_frames
 
     def pull_item(self, idx):
@@ -141,7 +144,7 @@ class YTVOSDataset(data.Dataset):
         vid,  frame_id = idx
         vid_idx = self.vid_ids.index(vid)
         vid_info = self.vid_infos[vid_idx]
-        if self.has_gt and self.clip_frames > 1:
+        if self.has_gt and self.clip_frames*self.num_clips > 1:
             ref_frame_ids = self.sample_ref(idx)
             clip_frame_ids = ref_frame_ids + [frame_id]
             clip_frame_ids.sort()

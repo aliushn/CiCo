@@ -30,8 +30,7 @@ DATASETS = dict(
 SOLVER = dict(
     IMS_PER_BATCH=2,
     NUM_CLIP_FRAMES=7,
-    LR_STEPS=(8, 10),
-    MAX_EPOCH=12)
+    NUM_CLIPS=1)
 
 TEST = dict(
     IMS_PER_BATCH=1,

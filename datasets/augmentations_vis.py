@@ -57,7 +57,6 @@ class Resize(object):
         else:
             min_size = self.min_size[np.random.randint(len(self.min_size))] if self.MS_train else self.min_size[-1]
         scale_img, scale = img_h / img_w, min_size / self.max_size
-        # resize short edges
         if scale_img < scale:
             width, height = self.max_size, int(img_h * (self.max_size / img_w))
         else:

@@ -25,7 +25,8 @@ DATASETS = dict(
 
 SOLVER = dict(
     IMS_PER_BATCH=16,
-    NUM_CLIP_FRAMES=5)
+    NUM_CLIP_FRAMES=5,
+    NUM_CLIPS=1)
 
 TEST = dict(
     IMS_PER_BATCH=1,

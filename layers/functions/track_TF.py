@@ -18,26 +18,25 @@ class Track_TF(object):
     """
     # TODO: Refactor this whole class away. It needs to go.
 
-    def __init__(self, net, match_coeff, correlation_patch_size, train_maskshift=False, conf_thresh=0.1,
-                 track_by_Gaussian=False, train_masks=True, use_stmask_TF=False, proto_coeff_occlusion=False):
+    def __init__(self, net, cfg):
         self.prev_candidate = None
-        self.match_coeff = match_coeff
-        self.correlation_patch_size = correlation_patch_size
-        self.train_maskshift = train_maskshift
-        self.conf_thresh = conf_thresh
-        self.track_by_Gaussian = track_by_Gaussian
-        self.train_masks = train_masks
-        self.use_stmask_TF = use_stmask_TF
-        self.use_cubic_TF = True
-        self.proto_coeff_occlusion = proto_coeff_occlusion
+        self.cfg = cfg
+        self.match_coeff = cfg.MODEL.TRACK_HEADS.MATCH_COEFF
+        self.correlation_patch_size = cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE
+        self.conf_thresh = cfg.TEST.NMS_CONF_THRESH
+        self.track_by_Gaussian = cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN
+        self.proto_coeff_occlusion = cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION
         self.img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
         if self.track_by_Gaussian:
             self.img_level_keys += 'track'
         self.video_mask_coeffs = None
+        self.use_cubic_TF = True
 
-        self.CandidateShift = CandidateShift(net, self.correlation_patch_size, train_maskshift=self.train_maskshift,
-                                             train_masks=self.train_masks, track_by_Gaussian=self.track_by_Gaussian,
-                                             proto_coeff_occlusion=proto_coeff_occlusion)
+        self.CandidateShift = CandidateShift(net, cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE,
+                                             train_maskshift=cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT,
+                                             train_masks=cfg.MODEL.MASK_HEADS.TRAIN_MASKS,
+                                             track_by_Gaussian=self.track_by_Gaussian,
+                                             proto_coeff_occlusion=self.proto_coeff_occlusion)
 
     def __call__(self, candidates, imgs_meta, img=None):
         """
@@ -99,7 +98,7 @@ class Track_TF(object):
             self.video_mask_coeffs.append(candidate['mask_coeff'])
             assert self.prev_candidate is not None
             # Tracked mask: to track masks from previous frames to current frame
-            if self.use_stmask_TF:
+            if self.cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
                 self.CandidateShift(candidate, self.prev_candidate, img=img, img_meta=img_meta)
             if self.use_cubic_TF:
                 # Tracked masks without crop: P_t * coeff_{t-1}
@@ -120,10 +119,10 @@ class Track_TF(object):
                 det_obj_ids = None
             else:
                 # get bbox and class after NMS
-                det_bbox, det_score, det_labels = candidate['box'], candidate['score'], candidate['class']
+                det_bbox, det_score = candidate['box'], candidate['score']
                 n_dets = det_bbox.size(0)
                 candidate['tracked_mask'] = torch.zeros(n_dets)
-                if self.train_masks:
+                if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
                     det_masks_soft = candidate['mask']
                 if self.track_by_Gaussian:
                     candidate['track_mu'], candidate['track_var'] = generate_track_gaussian(candidate['track'].squeeze(0),
@@ -140,16 +139,25 @@ class Track_TF(object):
                         prev_overlapped_idx, cur_overlapped_idx = [candidate['proto'].size(2)-1], [0]
                     # calculate KL divergence for Gaussian distribution of isntances
                     # Calculate BIoU and MIoU between detected masks and tracked masks for assign IDs
-                    bbox_ious = torch.stack([jaccard(det_bbox[:, cur_idx*4:(cur_idx+1)*4],
-                                             self.prev_candidate['box'][:, prev_idx*4:(prev_idx+1)*4])
-                                             for prev_idx, cur_idx in zip(prev_overlapped_idx, cur_overlapped_idx)
-                                             ]).mean(dim=0)
-                    label_delta = (self.prev_candidate['class'] == det_labels.view(-1, 1)).float()
-                    if self.train_masks:
+                    if det_bbox.size(-1) == 4:
+                        bbox_ious = jaccard(det_bbox,  self.prev_candidate['box'])
+                    else:
+                        bbox_ious = torch.stack([jaccard(det_bbox[:, cur_idx*4:(cur_idx+1)*4],
+                                                 self.prev_candidate['box'][:, prev_idx*4:(prev_idx+1)*4])
+                                                 for prev_idx, cur_idx in zip(prev_overlapped_idx, cur_overlapped_idx)
+                                                 ]).mean(dim=0)
+
+                    if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
+                        label_delta = torch.zeros_like(bbox_ious)
+                    else:
+                        det_labels = candidate['class']
+                        label_delta = (self.prev_candidate['class'] == det_labels.view(-1, 1)).float()
+
+                    if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
                         det_masks, prev_masks = det_masks_soft.gt(0.5).float(), self.prev_candidate['mask'].gt(0.5).float()
                         if self.use_cubic_TF:
-                            mask_ious = mask_iou(det_masks.permute(1,0,2,3).contiguous(),
-                                                 prev_masks.permute(1,0,2,3).contiguous()).mean(dim=0)
+                            mask_ious = mask_iou(det_masks.permute(1, 0, 2, 3).contiguous(),
+                                                 prev_masks.permute(1, 0, 2, 3).contiguous()).mean(dim=0)
                         else:
                             mask_ious = torch.stack([mask_iou(det_masks[:, cur_idx], prev_masks[:, prev_idx])
                                                     for prev_idx, cur_idx in zip(prev_overlapped_idx, cur_overlapped_idx)
@@ -157,7 +165,7 @@ class Track_TF(object):
                     else:
                         mask_ious = torch.zeros_like(bbox_ious)
 
-                    if self.train_masks and self.track_by_Gaussian:
+                    if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS and self.track_by_Gaussian:
                         kl_divergence = compute_kl_div(self.prev_candidate['track_mu'], self.prev_candidate['track_var'],
                                                        candidate['track_mu'], candidate['track_var'])    # value in [[0, +infinite]]
                         sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10.
@@ -166,7 +174,7 @@ class Track_TF(object):
                         # from [0, +infinite] to [0, 1]: sim = exp(1-kl_div)), threshold  = 5
                         # sim = torch.exp(1 - torch.cat([sim_dummy, kl_divergence], dim=-1))
                     else:
-                        cos_sim = candidate['track'] @ self.prev_candidate['track'].t()  # [n_dets, n_prev], val in [-1, 1]
+                        cos_sim = candidate['track'] @ self.prev_candidate['track'].t()  # val in [-1, 1]
                         cos_sim = torch.cat([torch.zeros(n_dets, 1), cos_sim], dim=1)
                         sim = (cos_sim + 1) / 2  # [0, 1]
 
@@ -222,7 +230,7 @@ class Track_TF(object):
         # a declining weights (0.8) to remove some false positives that cased by consecutively track to segment
         cond2 = self.prev_candidate['score'].clone().detach() > self.conf_thresh
         keep_tracked_objs = cond1 & cond2
-        if self.train_masks:
+        if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
             # whether tracked masks are greater than a small threshold, which removes some false positives
             cond3 = (self.prev_candidate['mask'].gt(0.5).sum([-1, -2]) > 0).sum(-1) > 0
             keep_tracked_objs = keep_tracked_objs & cond3.reshape(-1)

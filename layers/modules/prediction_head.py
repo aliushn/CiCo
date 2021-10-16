@@ -35,19 +35,18 @@ class PredictionModule(nn.Module):
                          from parent instead of from this module.
     """
 
-    def __init__(self, cfg, in_channels, pred_aspect_ratios=None, pred_scales=None, parent=None, deform_groups=1):
+    def __init__(self, cfg, in_channels, deform_groups=1):
         super().__init__()
 
         self.cfg = cfg
         self.in_channels = in_channels
         self.num_classes = cfg.DATASETS.NUM_CLASSES if cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS else cfg.DATASETS.NUM_CLASSES + 1
         self.mask_dim = cfg.MODEL.MASK_HEADS.MASK_DIM
-        self.num_priors = len(pred_aspect_ratios[0]) * len(pred_scales)
         self.track_dim = cfg.MODEL.TRACK_HEADS.TRACK_DIM
-        self.pred_aspect_ratios = pred_aspect_ratios
-        self.pred_scales = pred_scales
+        self.pred_aspect_ratios = cfg.MODEL.BACKBONE.PRED_ASPECT_RATIOS
+        self.pred_scales = cfg.MODEL.BACKBONE.PRED_SCALES
+        self.num_priors = len(self.pred_aspect_ratios[0]) * len(self.pred_scales[0])
         self.deform_groups = deform_groups
-        self.parent = [parent]  # Don't include this in the state dict
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE else 1
 
         if cfg.MODEL.MASK_HEADS.USE_SIPMASK:
@@ -64,71 +63,69 @@ class PredictionModule(nn.Module):
 
         kernel_size = (3, 3)
         padding = [(kernel_size[0] - 1) // 2, (kernel_size[1] - 1) // 2]
-        if parent is None:
+        if cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES and cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
+            # only needs a circumscribed box of multiple frames for instance segmentation
+            self.boxes_dim = self.num_priors
+        else:
+            self.boxes_dim = self.num_priors*self.clip_frames
+        self.bbox_layer = nn.Conv2d(self.in_channels, self.boxes_dim*4,
+                                    kernel_size=kernel_size, padding=padding)
+        if cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
+            self.centerness_layer = nn.Conv2d(self.in_channels, self.boxes_dim,
+                                              kernel_size=kernel_size, padding=padding)
 
-            if cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES and cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-                # only needs a circumscribed box of multiple frames for instance segmentation
-                self.boxes_dim = self.num_priors
+        if cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
+            if cfg.STMASK.FC.FCB_USE_DCN_CLASS:
+                self.conf_layer = FeatureAlign(self.in_channels,
+                                               self.num_priors * self.num_classes,
+                                               kernel_size=kernel_size,
+                                               deformable_groups=self.deform_groups,
+                                               use_pred_offset=cfg.STMASK.FC.FCB_USE_PRED_OFFSET)
             else:
-                self.boxes_dim = self.num_priors*self.clip_frames
-            self.bbox_layer = nn.Conv2d(self.in_channels, self.boxes_dim*4,
-                                        kernel_size=kernel_size, padding=padding)
-            if cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
-                self.centerness_layer = nn.Conv2d(self.in_channels, self.boxes_dim,
-                                                  kernel_size=kernel_size, padding=padding)
+                self.conf_layer = nn.Conv2d(self.in_channels, self.num_priors*self.num_classes,
+                                            kernel_size=kernel_size, padding=padding)
 
-            if cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
-                if cfg.STMASK.FC.FCB_USE_DCN_CLASS:
-                    self.conf_layer = FeatureAlign(self.in_channels,
-                                                   self.num_priors * self.num_classes,
-                                                   kernel_size=kernel_size,
-                                                   deformable_groups=self.deform_groups,
-                                                   use_pred_offset=cfg.STMASK.FC.FCB_USE_PRED_OFFSET)
-                else:
-                    self.conf_layer = nn.Conv2d(self.in_channels, self.num_priors*self.num_classes,
-                                                kernel_size=kernel_size, padding=padding)
+        if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
+            if cfg.STMASK.FC.FCB_USE_DCN_TRACK:
+                self.track_layer = FeatureAlign(self.in_channels,
+                                                self.num_priors*self.track_dim,
+                                                kernel_size=kernel_size,
+                                                deformable_groups=self.deform_groups,
+                                                use_pred_offset=cfg.STMASK.FC.FCB_USE_PRED_OFFSET)
+            else:
+                self.track_layer = nn.Conv2d(self.in_channels, self.num_priors*self.track_dim,
+                                             kernel_size=kernel_size, padding=padding)
 
-            if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-                if cfg.STMASK.FC.FCB_USE_DCN_TRACK:
-                    self.track_layer = FeatureAlign(self.in_channels,
-                                                    self.num_priors*self.track_dim,
-                                                    kernel_size=kernel_size,
-                                                    deformable_groups=self.deform_groups,
-                                                    use_pred_offset=cfg.STMASK.FC.FCB_USE_PRED_OFFSET)
-                else:
-                    self.track_layer = nn.Conv2d(self.in_channels, self.num_priors*self.track_dim,
-                                                 kernel_size=kernel_size, padding=padding)
+        if cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
+            if cfg.STMASK.FC.FCB_USE_DCN_MASK:
+                self.mask_layer = FeatureAlign(self.out_channels,
+                                               self.num_priors * self.mask_dim,
+                                               kernel_size=kernel_size,
+                                               deformable_groups=self.deform_groups,
+                                               use_pred_offset=cfg.STMASK.FC.FCB_USE_PRED_OFFSET)
+            else:
+                self.mask_layer = nn.Conv2d(self.in_channels, self.num_priors * self.mask_dim,
+                                            kernel_size=kernel_size, padding=padding)
 
-            if cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-                if cfg.STMASK.FC.FCB_USE_DCN_MASK:
-                    self.mask_layer = FeatureAlign(self.out_channels,
-                                                   self.num_priors * self.mask_dim,
-                                                   kernel_size=kernel_size,
-                                                   deformable_groups=self.deform_groups,
-                                                   use_pred_offset=cfg.STMASK.FC.FCB_USE_PRED_OFFSET)
-                else:
-                    self.mask_layer = nn.Conv2d(self.in_channels, self.num_priors * self.mask_dim,
-                                                kernel_size=kernel_size, padding=padding)
+        # What is this ugly lambda doing in the middle of all this clean prediction module code?
+        def make_extra(num_layers, in_channels):
+            if num_layers == 0:
+                return lambda x: x
+            else:
+                # Looks more complicated than it is. This just creates an array of num_layers alternating conv-relu
+                return nn.Sequential(*sum([[
+                    nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+                    # nn.BatchNorm2d(in_channels),
+                    # nn.GroupNorm(32, in_channels),
+                    nn.ReLU(inplace=True)
+                ] for _ in range(num_layers)], []))
 
-            # What is this ugly lambda doing in the middle of all this clean prediction module code?
-            def make_extra(num_layers, in_channels):
-                if num_layers == 0:
-                    return lambda x: x
-                else:
-                    # Looks more complicated than it is. This just creates an array of num_layers alternating conv-relu
-                    return nn.Sequential(*sum([[
-                        nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
-                        # nn.BatchNorm2d(in_channels),
-                        # nn.GroupNorm(32, in_channels),
-                        nn.ReLU(inplace=True)
-                    ] for _ in range(num_layers)], []))
+        self.bbox_extra = make_extra(cfg.MODEL.BOX_HEADS.TOWER_LAYERS, self.in_channels)
+        self.conf_extra = make_extra(cfg.MODEL.CLASS_HEADS.TOWER_LAYERS, self.in_channels)
+        if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
+            self.track_extra = make_extra(cfg.MODEL.TRACK_HEADS.TOWER_LAYERS, self.in_channels)
 
-            self.bbox_extra = make_extra(cfg.MODEL.BOX_HEADS.TOWER_LAYERS, self.in_channels)
-            self.conf_extra = make_extra(cfg.MODEL.CLASS_HEADS.TOWER_LAYERS, self.in_channels)
-            if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-                self.track_extra = make_extra(cfg.MODEL.TRACK_HEADS.TOWER_LAYERS, self.in_channels)
-
-    def forward(self, x, idx, img_meta=None):
+    def forward(self, fpn_outs, img_meta=None):
         """
         Args:
             - x: The convOut from a layer in the backbone network
@@ -140,40 +137,55 @@ class PredictionModule(nn.Module):
             - prior_boxes: [conv_h*conv_w*num_priors, 4]
         """
 
-        # In case we want to use another module's layers
-        src = self if self.parent[0] is None else self.parent[0]
-
-        bs, _, conv_h, conv_w = x.size()
-        priors, prior_levels = self.make_priors(idx, conv_h, conv_w, x.device)
-        preds = {'priors': priors, 'prior_levels': prior_levels}
-
-        bbox_x = src.bbox_extra(x)
-        bbox = src.bbox_layer(bbox_x).permute(0, 2, 3, 1).contiguous()
-        preds['loc'] = bbox.reshape(bs, conv_h*conv_w*self.num_priors, -1)
-
-        # Centerness for Boxes
-        if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
-            centerness = src.centerness_layer(bbox_x).permute(0, 2, 3, 1).contiguous()
-            preds['centerness'] = centerness.reshape(bs, conv_h*conv_w*self.num_priors, -1).sigmoid()
-
-        # Classification
-        if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
-            conf_x = src.conf_extra(x)
-            conf = src.conf_layer(conf_x, bbox.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_CLASS else src.conf_layer(conf_x)
-            preds['conf'] = conf.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.num_classes)
-
-        # Mask coefficients
+        preds = {'priors': [], 'prior_levels': []}
         if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-            mask = src.mask_layer(bbox_x, bbox.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_MASK else src.mask_layer(bbox_x)
-            # Activation function is Tanh
-            preds['mask_coeff'] = torch.tanh(mask.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.mask_dim))
-
-        # Tracking
+            preds['mask_coeff'] = []
         if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-            track_x = src.track_extra(x)
-            track = src.track_layer(track_x, bbox.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_TRACK else src.track_layer(track_x)
-            track = track.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.track_dim)
-            preds['track'] = F.normalize(track, dim=-1)
+            preds['track'] = []
+        if self.cfg.MODEL.BOX_HEADS.TRAIN_BOXES:
+            preds['loc'] = []
+        if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
+            preds['centerness'] = []
+        if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
+            preds['conf'] = []
+
+        for idx in range(len(fpn_outs)):
+            x = fpn_outs[idx]
+            bs, _, conv_h, conv_w = x.size()
+            priors, prior_levels = self.make_priors(idx, conv_h, conv_w, x.device)
+            preds['priors'] += [priors]
+            preds['prior_levels'] += [prior_levels]
+    
+            bbox_x = self.bbox_extra(x)
+            bbox = self.bbox_layer(bbox_x).permute(0, 2, 3, 1).contiguous()
+            preds['loc'] += [bbox.reshape(bs, conv_h*conv_w*self.num_priors, -1)]
+
+            # Centerness for Boxes
+            if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
+                centerness = self.centerness_layer(bbox_x).permute(0, 2, 3, 1).contiguous()
+                preds['centerness'] += [centerness.reshape(bs, conv_h*conv_w*self.num_priors, -1).sigmoid()]
+
+            # Classification
+            if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
+                conf_x = self.conf_extra(x)
+                conf = self.conf_layer(conf_x, bbox.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_CLASS else self.conf_layer(conf_x)
+                preds['conf'] += [conf.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.num_classes)]
+
+            # Mask coefficients
+            if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
+                mask = self.mask_layer(bbox_x, bbox.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_MASK else self.mask_layer(bbox_x)
+                # Activation function is Tanh
+                preds['mask_coeff'] += [torch.tanh(mask.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.mask_dim))]
+
+            # Tracking
+            if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
+                track_x = self.track_extra(x)
+                track = self.track_layer(track_x, bbox.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_TRACK else self.track_layer(track_x)
+                track = track.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.track_dim)
+                preds['track'] += [F.normalize(track, dim=-1)]
+
+        for k, v in preds.items():
+            preds[k] = torch.cat(v, 1)
 
         return preds
 
@@ -188,17 +200,16 @@ class PredictionModule(nn.Module):
                 x = (i + 0.5) / conv_w
                 y = (j + 0.5) / conv_h
 
-                for ars in self.pred_aspect_ratios:
-                    for scale in self.pred_scales:
-                        for ar in ars:
-                            # [1, 1/2, 2]
-                            ar = sqrt(ar)
-                            r = scale / self.pred_scales[0] * 3
-                            w = r * ar / conv_w
-                            h = r / ar / conv_h
+                for scale in self.pred_scales[idx]:
+                    for ar in self.pred_aspect_ratios[idx]:
+                        # [1, 1/2, 2]
+                        ar = sqrt(ar)
+                        r = scale / self.pred_scales[idx][0] * 3
+                        w = r * ar / conv_w
+                        h = r / ar / conv_h
 
-                            prior_data += [x, y, w, h]
-                            prior_levels += [idx]
+                        prior_data += [x, y, w, h]
+                        prior_levels += [idx]
 
             priors = torch.Tensor(prior_data, device=device).reshape(1, -1, 4).detach()
             priors.requires_grad = False

@@ -131,33 +131,33 @@ def bbox2result_video(results, preds, frame_idx, types=None):
         return results
     else:
         bboxes = preds['box'].cpu().numpy()
-        labels = preds['class'].view(-1).cpu().numpy()
+        labels = preds['class'].view(-1).cpu().numpy() if 'class' in preds.keys() else None
         scores = preds['score'].view(-1).cpu().numpy()
         obj_ids = preds['box_ids'].view(-1).cpu().numpy()
         for type in types:
-            if type == 'segm':
-                segms = preds['mask']
-                for label, score, segm, obj_id in zip(labels, scores, segms, obj_ids):
+            for idx, score, bbox, obj_id in zip(range(len(obj_ids)), scores, bboxes, obj_ids):
+                if type == 'segm':
+                    segm = preds['mask'][idx]
                     # segm annotation: png2rle
                     segm = mask_util.encode(np.array(segm.cpu(), order='F', dtype='uint8'))
                     # .json file can not deal with var with 'bytes'
                     segm['counts'] = segm['counts'].decode()
-                    if obj_id not in results:
-                        results[obj_id] = {'score': [score], 'category_id': [label],
-                                           'segmentations': [None]*frame_idx + [segm]}
-                    else:
-                        results[obj_id]['score'] += [score]
-                        results[obj_id]['category_id'] += [label]
-                        results[obj_id]['segmentations'][-1] = segm
 
-            elif type == 'bbox':
-                for bbox, label, score, obj_id in zip(bboxes, labels, scores, obj_ids):
-                    if obj_id not in results:
-                        results[obj_id] = {'score': [score], 'category_id': [label],
-                                           'bbox': [None]*frame_idx + [bbox.tolist()]}
-                    else:
-                        results[obj_id]['score'] += [score]
-                        results[obj_id]['category_id'] += [label]
+                if obj_id not in results:
+                    results[obj_id] = {'score': [score]}
+                    if labels is not None:
+                        results[obj_id]['category_id'] = [labels[idx]]
+                    if type == 'segm':
+                        results[obj_id]['segmentations'] = [None]*frame_idx + [segm]
+                    elif type == 'bbox':
+                        results[obj_id]['bbox'] = [None]*frame_idx + [bbox.tolist()]
+                else:
+                    results[obj_id]['score'] += [score]
+                    if labels is not None:
+                        results[obj_id]['category_id'] += [labels[idx]]
+                    if type == 'segm':
+                        results[obj_id]['segmentations'][-1] =segm
+                    elif type == 'bbox':
                         results[obj_id]['bbox'][-1] = bbox.tolist()
 
         return results

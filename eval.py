@@ -19,6 +19,7 @@ from configs._base_.datasets import get_dataset_config
 
 import matplotlib.pyplot as plt
 import cv2
+import random
 
 
 def str2bool(v):
@@ -103,10 +104,9 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
                                       output_file=args.save_folder)
         torch.cuda.synchronize()
 
-    num_dets_to_consider = min(args.top_k, dets_out['class'].nelement())
+    num_dets_to_consider = min(args.top_k, dets_out['box'].size(0))
     scores = dets_out['score'][:args.top_k].view(-1).detach().cpu().numpy()
     boxes = dets_out['box'][:args.top_k].detach().cpu().numpy()
-    classes = dets_out['class'][:args.top_k].view(-1).detach().cpu().numpy()
     color_type = dets_out['box_ids'].view(-1)
     num_tracked_mask = dets_out['tracked_mask'] if 'tracked_mask' in dets_out.keys() else None
     boxes_cir = dets_out['box_cir'] if 'box_cir' in dets_out.keys() else None
@@ -163,12 +163,14 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
             num_tracked_mask_j = num_tracked_mask[j] if num_tracked_mask is not None else None
 
             if args.display_bboxes:
-                if num_tracked_mask_j == 0 or num_tracked_mask_j is None:
-                    cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 3)
-                else:
-                    draw_dotted_rectangle(img_numpy, x1, y1, x2, y2, color, 3, gap=10)
+                cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 3)
+                # if num_tracked_mask_j == 0 or num_tracked_mask_j is None:
+                #     cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 3)
+                # else:
+                #     draw_dotted_rectangle(img_numpy, x1, y1, x2, y2, color, 3, gap=10)
 
             if args.display_text:
+                classes = dets_out['class'][:args.top_k].view(-1).detach().cpu().numpy()
                 if classes[j] - 1 < 0:
                     _class = 'None'
                 else:
@@ -179,10 +181,10 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
                         rescore = dets_out['conf_3D'][:args.top_k].detach().cpu().numpy()[j, classes[j]-1]
                         text_str = '%s: %.2f: %.2f: %s' % (_class, score, rescore, str(color_type[j].cpu().numpy())) \
                             if args.display_scores else _class
-                    elif 'centerness' in dets_out.keys():
-                        rescore = dets_out['centerness'][:args.top_k].view(-1).detach().cpu().numpy()[j]
-                        text_str = '%s: %.2f: %.2f: %s' % (_class, score, rescore, str(color_type[j].cpu().numpy())) \
-                            if args.display_scores else _class
+                    # elif 'centerness' in dets_out.keys():
+                    #     rescore = dets_out['centerness'][:args.top_k].view(-1).detach().cpu().numpy()[j]
+                    #     text_str = '%s: %.2f: %.2f: %s' % (_class, score, rescore, str(color_type[j].cpu().numpy())) \
+                    #         if args.display_scores else _class
                     else:
                         text_str = '%s: %.2f: %s' % (
                             _class, score, str(color_type[j].cpu().numpy())) if args.display_scores else _class
@@ -475,7 +477,8 @@ def evaluate(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval
     return json_results
 
 
-def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval_clip_frames=1, output_dir=None):
+def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval_clip_frames=1, n_clips=1,
+                  TRAIN_INTERCLIPS_CLASS=False, output_dir=None):
     '''
     :param net:
     :param dataset:
@@ -509,6 +512,8 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
             len_vid = len(dataset.vid_infos[vdx])
             train_masks, use_vid_metric = False, True
 
+        if TRAIN_INTERCLIPS_CLASS:
+            conf_feats_video = dict()
         len_clips = (len_vid + n_newly_frames-1) // n_newly_frames
         progress_bar_clip = ProgressBar(len_clips, len_clips)
         for cdx in range(len_clips):
@@ -537,8 +542,15 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
                 preds_clip = net(images, img_meta=[images_meta])
                 pred_clip = preds_clip[0]
 
-            temporal_dependent_keys = {'proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg', 'mask_coeff_3D', 'mask',
-                                       'track_3D', 'conf_3D'}
+            if TRAIN_INTERCLIPS_CLASS:
+                box_ids = pred_clip['box_ids']
+                for obj_idx, obj_id in enumerate(box_ids):
+                    if obj_id not in conf_feats_video:
+                        conf_feats_video[int(obj_id)] = [pred_clip['conf_feat'][obj_idx]]
+                    else:
+                        conf_feats_video[int(obj_id)] += [pred_clip['conf_feat'][obj_idx]]
+
+            temporal_dependent_keys = {'proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg', 'mask'}
             pred_frame = dict()
             for k, v in pred_clip.items():
                 if k not in temporal_dependent_keys:
@@ -586,11 +598,29 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
                     else:
                         bbox2result_video(vid_objs, preds_cur, frame_id, types=args.eval_types)
 
+        # Predict interclips classification or global classification for each objects
+        if TRAIN_INTERCLIPS_CLASS:
+            category_ids_video = dict()
+            for obj_id, conf_feats_obj in conf_feats_video.items():
+                selected_conf_feats_obj = []
+                if len(conf_feats_obj) < n_clips:
+                    conf_feats_obj = sum([conf_feats_obj for _ in range(n_clips)], [])[:n_clips]
+                for _ in range((len(conf_feats_obj)-1)//n_clips+1):
+                    selected_idx = random.sample(range(len(conf_feats_obj)), n_clips)
+                    selected_conf_feats_obj += [torch.cat([conf_feats_obj[idx] for idx in selected_idx], dim=-1)]
+
+                conf_data = net.InterclipsClass(torch.stack(selected_conf_feats_obj, dim=0))
+                conf, category_id_obj = torch.softmax(conf_data, dim=-1).mean(0).max(0)
+                category_ids_video[obj_id] = category_id_obj + 1
+
         if not args.display and data_type == 'vis':
             for obj_id, vid_obj in vid_objs.items():
                 vid_obj['video_id'] = vid
                 vid_obj['score'] = np.array(vid_obj['score']).mean().item()
-                vid_obj['category_id'] = np.bincount(vid_obj['category_id']).argmax().item()
+                if TRAIN_INTERCLIPS_CLASS:
+                    vid_obj['category_id'] = category_ids_video[obj_id]
+                else:
+                    vid_obj['category_id'] = np.bincount(vid_obj['category_id']).argmax().item()
                 json_results.append(vid_obj)
 
     return json_results
@@ -655,7 +685,8 @@ def evalvideo(net: STMask, input_folder: str, output_folder: str):
     return
 
 
-def evaldatasets(net: STMask, val_dataset, data_type, output_dir, eval_clip_frames=1, cubic_mode=False, cfg_input=None):
+def evaldatasets(net: STMask, val_dataset, data_type, output_dir, eval_clip_frames=1, n_clips=1,
+                 cubic_mode=False, cfg_input=None, TRAIN_INTERCLIPS_CLASS=False):
     args.save_folder = output_dir
     if cfg_input is not None:
         pad_h, pad_w = cfg_input.MIN_SIZE_TEST, cfg_input.MAX_SIZE_TEST
@@ -666,7 +697,8 @@ def evaldatasets(net: STMask, val_dataset, data_type, output_dir, eval_clip_fram
         print('Begin Inference!')
         if cubic_mode:
             results = evaluate_clip(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,
-                                    eval_clip_frames=eval_clip_frames, output_dir=output_dir)
+                                    eval_clip_frames=eval_clip_frames, n_clips=n_clips,
+                                    TRAIN_INTERCLIPS_CLASS=TRAIN_INTERCLIPS_CLASS, output_dir=output_dir)
         else:
             results = evaluate(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,
                                eval_clip_frames=eval_clip_frames, output_dir=output_dir)
@@ -768,7 +800,8 @@ if __name__ == '__main__':
 
         else:
             evaldatasets(net, val_dataset, cfg.DATASETS.TYPE, cfg.OUTPUT_DIR, cfg.TEST.NUM_CLIP_FRAMES,
-                         cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE, cfg.INPUT)
+                         cfg.SOLVER.NUM_CLIPS, cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE, cfg.INPUT,
+                         TRAIN_INTERCLIPS_CLASS=cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS)
 
 
 

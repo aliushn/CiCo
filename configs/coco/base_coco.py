@@ -52,12 +52,12 @@ DATASETS = dict(
     TEST='coco2017_testdev_dataset')
   
 SOLVER = dict(
-    IMS_PER_BATCH=2,
+    IMS_PER_BATCH=4,
     NUM_CLIP_FRAMES=1,
     LR=0.001,
     LR_STEPS=(20, 40, 46, 50),
     MAX_EPOCH=54,
-    SAVE_INTERVAL=300)
+    SAVE_INTERVAL=3000)
   
 TEST = dict(
     IMS_PER_BATCH=1,

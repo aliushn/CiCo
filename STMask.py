@@ -4,10 +4,10 @@ import torch.nn.functional as F
 import numpy as np
 from collections import defaultdict
 
-from layers.modules import PredictionModule_FC, PredictionModule, PredictionModule_3D, make_net, FPN, BiFPN, TemporalNet, \
-    ProtoNet, ProtoNet3D
+from layers.modules import PredictionModule_FC, PredictionModule, PredictionModule_3D, make_net, FPN, BiFPN, \
+    TemporalNet, ProtoNet, ProtoNet3D
 from layers.functions import Detect, Track, Track_TF, Track_TF_Clip
-from layers.utils import aligned_bilinear, correlate_operator
+from layers.modules import InterclipsClass
 from layers.visualization_temporal import display_cubic_weights
 from backbone import construct_backbone
 from utils import timer
@@ -57,18 +57,18 @@ class STMask(nn.Module):
                     nn.ReLU(inplace=True)
                 ])
 
-        # inflated channels in temporal direction
+        # Inflated channels in temporal direction
         if not cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE and self.init_cubic_mode != 'tsm':
-                src_channels = [self.clip_frames//self.reduced_scale*self.fpn_num_features] * len(self.selected_layers)
-                if cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
-                    self.correlation_patch_size = cfg.MODEL.PREDICTION_HEADS.CORRELATION_PATCH_SIZE
-                    src_channels = [channels+self.correlation_patch_size**2 for channels in src_channels]
-                    # Flag channels that not belong to correlation
-                    self.flag_noncorr_channels = torch.ones(src_channels[0])
-                    for c in range(1, self.clip_frames):
-                        self.flag_corr_channels[src_channels[c]-self.correlation_patch_size**2: src_channels[c]] = 0
+            src_channels = self.clip_frames//self.reduced_scale*self.fpn_num_features
+            if cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
+                self.correlation_patch_size = cfg.MODEL.PREDICTION_HEADS.CORRELATION_PATCH_SIZE
+                src_channels += self.correlation_patch_size**2
+                # Flag channels that not belong to correlation
+                self.flag_noncorr_channels = torch.ones(src_channels[0])
+                for c in range(1, self.clip_frames):
+                    self.flag_corr_channels[src_channels[c]-self.correlation_patch_size**2: src_channels[c]] = 0
         else:
-            src_channels = [self.fpn_num_features] * len(self.selected_layers)
+            src_channels = self.fpn_num_features
 
         # ------------ build ProtoNet ------------
         self.train_masks = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
@@ -77,37 +77,22 @@ class STMask(nn.Module):
                 ProtoNet3D(cfg, in_channels)
 
         # ------- Build multi-scales prediction head  ------------
-        self.pred_scales = cfg.MODEL.BACKBONE.PRED_SCALES
-        self.pred_aspect_ratios = cfg.MODEL.BACKBONE.PRED_ASPECT_RATIOS
-        self.num_priors = len(self.pred_scales[0]) * len(self.pred_aspect_ratios[0][0])
+        self.num_priors = len(cfg.MODEL.BACKBONE.PRED_SCALES[0]) * len(cfg.MODEL.BACKBONE.PRED_ASPECT_RATIOS[0])
         # prediction layers for loc, conf, mask, track
-        self.prediction_layers = nn.ModuleList()
-        for idx, layer_idx in enumerate(self.selected_layers):
-            # If we're sharing prediction module weights, have every module's parent be the first one
-            parent = None
-            if cfg.MODEL.PREDICTION_HEADS.SHARE_PREDICTION_MODULE and idx > 0:
-                parent = self.prediction_layers[0]
 
-            if cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
-                pred = PredictionModule_3D(cfg, src_channels[idx],
-                                           deform_groups=1,
-                                           pred_aspect_ratios=self.pred_aspect_ratios[idx],
-                                           pred_scales=self.pred_scales[idx],
-                                           parent=parent)
+        if cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
+            self.prediction_layers = PredictionModule_3D(cfg, src_channels, deform_groups=1)
+
+        else:
+            if cfg.STMASK.FC.USE_FCA:
+                self.prediction_layers = PredictionModule_FC(cfg, src_channels, deform_groups=1)
             else:
-                if cfg.STMASK.FC.USE_FCA:
-                    pred = PredictionModule_FC(cfg, src_channels[idx],
-                                               deform_groups=1,
-                                               pred_scales=self.pred_scales[idx],
-                                               parent=parent)
-                else:
-                    pred = PredictionModule(cfg, src_channels[idx],
-                                            deform_groups=1,
-                                            pred_aspect_ratios=self.pred_aspect_ratios[idx],
-                                            pred_scales=self.pred_scales[idx],
-                                            parent=parent)
+                self.prediction_layers = PredictionModule(cfg, src_channels, deform_groups=1)
 
-            self.prediction_layers.append(pred)
+        # InterClips Classification branch
+        if cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
+            self.InterclipsClass = InterclipsClass(cfg.MODEL.CLASS_HEADS.INTERCLIPS_CLAFEAT_DIM, cfg.SOLVER.NUM_CLIPS,
+                                                   cfg.SOLVER.NUM_CLIP_FRAMES, cfg.DATASETS.NUM_CLASSES)
 
         # ---------------- Build detection ----------------
         self.Detect = Detect(cfg)
@@ -126,13 +111,7 @@ class STMask(nn.Module):
                 if cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE and cfg.TEST.NUM_CLIP_FRAMES > 1:
                     self.Track = Track_TF_Clip(self, cfg.MODEL.TRACK_HEADS.MATCH_COEFF)
                 else:
-                    self.Track = Track_TF(self, cfg.MODEL.TRACK_HEADS.MATCH_COEFF,
-                                          cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE,
-                                          train_maskshift=cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT,
-                                          conf_thresh=cfg.TEST.NMS_CONF_THRESH, train_masks=self.train_masks,
-                                          track_by_Gaussian=cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN,
-                                          use_stmask_TF=cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE,
-                                          proto_coeff_occlusion=cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION)
+                    self.Track = Track_TF(self, cfg)
 
                 if cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
                     # A Temporal Fusion built on two adjacent frames for tracking
@@ -158,6 +137,9 @@ class STMask(nn.Module):
             if key.split('.')[0] in {'mask_refine', 'proto_net', 'proto_conv'}:
                 new_key = 'ProtoNet.'+key
                 state_dict[new_key] = state_dict.pop(key)
+            elif key.split('.')[0] == 'prediction_layers' and key.split('.')[1] == '0':
+                new_key = 'prediction_layers.' + '.'.join(key.split('.')[2:])
+                state_dict[new_key] = state_dict.pop(key)
 
         # For backward compatability, remove these (the new variable is called layers)
         for key in list(state_dict.keys()):
@@ -180,6 +162,7 @@ class STMask(nn.Module):
         """ Initialize weights for training. """
         print('Initialize weights from:', backbone_path)
         state_dict = torch.load(backbone_path, map_location=torch.device('cpu'))
+        model_dict = self.state_dict()
         # In case of save models from distributed training
         for key in list(state_dict.keys()):
             if key.startswith('module'):
@@ -187,16 +170,22 @@ class STMask(nn.Module):
             if key.split('.')[0] in {'mask_refine', 'proto_net', 'proto_conv'}:
                 new_key = 'ProtoNet.'+key
                 state_dict[new_key] = state_dict.pop(key)
+            elif key.split('.')[0] in {'prediction_layers'}:
+                new_key = 'prediction_layers.' + '.'.join(key.split('.')[2:])
+                state_dict[new_key] = state_dict.pop(key)
+                if self.cfg.MODEL.PREDICTION_HEADS.USE_MULTISCALE_MIX:
+                    temp_key = '.'.join(new_key.split('.')[:-1]) + '_d2.'+new_key.split('.')[-1]
+                    if temp_key in model_dict.keys():
+                        state_dict[temp_key] = state_dict[new_key].clone()
             elif key.split('.')[2] in {'bbox_extra', 'conf_extra', 'track_extra'}:
                 if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_SPATIOTEMPORAL_BLOCK:
                     new_key = '.'.join(key.split('.')[:-1]) + '.temporal.' + key.split('.')[-1]
                     state_dict[new_key] = state_dict.pop(key)
 
-        model_dict = self.state_dict()
         # Initialize the rest of the conv layers with xavier
         print('Init all weights by Xavier:')
         for name, module in self.named_modules():
-            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Conv3d):
+            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Conv3d) or isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight.data)
                 if module.bias is not None:
                     if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS and 'conf_layer' in name:
@@ -346,71 +335,10 @@ class STMask(nn.Module):
                 fpn_outs = self.bifpn(fpn_outs)
 
         with timer.env('pred_heads'):
-            pred_outs = {'priors': [], 'prior_levels': []}
+            pred_outs = self.prediction_layers(fpn_outs, img_meta)
+
+        with timer.env('proto '):
             if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-                pred_outs['mask_coeff'] = []
-            if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-                pred_outs['track'] = []
-            if self.cfg.MODEL.BOX_HEADS.TRAIN_BOXES:
-                pred_outs['loc'] = []
-            if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
-                pred_outs['centerness'] = []
-            if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
-                pred_outs['conf'] = []
-
-            for idx, pred_layer in zip(self.selected_layers, self.prediction_layers):
-                # A hack for the way dataparallel works
-                if self.cfg.MODEL.PREDICTION_HEADS.SHARE_PREDICTION_MODULE and idx != 0:
-                    pred_layer.parent = [self.prediction_layers[0]]
-
-                if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
-                    _, c, h, w = fpn_outs[idx].size()
-                    fpn_outs_clip = fpn_outs[idx].reshape(-1, self.clip_frames, c, h, w)
-                    if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
-                        pred_x = fpn_outs_clip.permute(0, 2, 1, 3, 4).contiguous()
-                    else:
-                        if self.init_cubic_mode == 'tsm':
-                            pred_x = []
-                            fold = int(0.5/(self.clip_frames-1)*c)
-                            left, right = 0, fold
-                            for frame_idx in range(-(self.clip_frames//2), self.clip_frames//2+1):
-                                pred_x.append(fpn_outs_clip[:, frame_idx, left:right])
-                                left = right
-                                right = right + int(0.5*c) if frame_idx+1 == 0 else right+fold
-
-                        else:
-                            # stack frames in channels
-                            pred_x = [self.fpn_reduced_channels(fpn_outs_clip[:, 0])]  \
-                                if self.init_cubic_mode == 'reduced' else [fpn_outs_clip[:, 0]]
-                            for frame_idx in range(self.clip_frames-1):
-                                if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
-                                    corr = correlate_operator(fpn_outs_clip[:, frame_idx].contiguous(),
-                                                              fpn_outs_clip[:, frame_idx+1].contiguous(),
-                                                              patch_size=self.correlation_patch_size,
-                                                              kernel_size=1)
-                                    pred_x.append(corr)
-                                cur_fpn_x = self.fpn_reduced_channels(fpn_outs_clip[:, frame_idx+1]) \
-                                    if self.init_cubic_mode == 'reduced' else fpn_outs_clip[:, frame_idx+1]
-                                pred_x.append(cur_fpn_x)
-                        pred_x = torch.cat(pred_x, dim=1)
-                else:
-                    pred_x = fpn_outs[idx]
-
-                if idx == 0:
-                    p = pred_layer(pred_x, bb_outs[0].permute(1,0,2,3).contiguous().unsqueeze(0), idx, img_meta)
-                else:
-                    # out_x = 0.5*pred_x + 0.5*F.interpolate(prev_x.squeeze(0), (pred_x.size(-2), pred_x.size(-1))).unsqueeze(0)
-                    p = pred_layer(pred_x, prev_x, idx, img_meta)
-                prev_x = pred_x
-
-                for k, v in p.items():
-                    pred_outs[k].append(v)  # [batch_size, h*w*anchors, dim
-
-            for k, v in pred_outs.items():
-                pred_outs[k] = torch.cat(v, 1)
-
-        if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-            with timer.env('proto '):
                 pred_outs['proto'] = self.ProtoNet(x, fpn_outs, img_meta=img_meta)
 
         if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:

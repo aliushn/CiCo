@@ -146,7 +146,7 @@ def ImageList_from_tensors(
     return batched_imgs.contiguous()
 
 
-def get_dataset(data_type, data_name, input, num_clip_frame, inference=False):
+def get_dataset(data_type, data_name, input, num_clip_frame, num_clips=1, inference=False):
     from configs._base_.datasets import get_dataset_config
     from .ytvos import YTVOSDataset
     from .coco import COCODetection
@@ -177,6 +177,7 @@ def get_dataset(data_type, data_name, input, num_clip_frame, inference=False):
                                img_prefix=dataset_config['img_prefix'],
                                has_gt=dataset_config['has_gt'],
                                clip_frames=num_clip_frame,
+                               num_clips=num_clips,
                                size_divisor=input.SIZE_DIVISOR,
                                transform=BaseTransform_vis(
                                     min_size=min_size,

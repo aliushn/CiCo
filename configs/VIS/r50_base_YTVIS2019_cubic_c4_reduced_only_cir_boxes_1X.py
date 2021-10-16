@@ -24,7 +24,8 @@ DATASETS = dict(
 
 SOLVER = dict(
     IMS_PER_BATCH=2,
-    NUM_CLIP_FRAMES=4)
+    NUM_CLIP_FRAMES=4,
+    NUM_CLIPS=1)
 
 TEST = dict(
     IMS_PER_BATCH=1,

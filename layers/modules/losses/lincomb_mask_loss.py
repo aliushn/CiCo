@@ -38,7 +38,6 @@ class LincombMaskLoss(object):
             if pos_cur.sum() > 0:
                 idx_t_cur = idx_t[i, pos_cur]
                 mask_coeff_cur = mask_coeff[i, pos_cur]
-                fpn_levels = prior_levels[i, pos_cur]
                 # If the input is given frame by frame style, for example bboxes_gt [n_objs, 4],
                 # please expand them in temporal axis like: [n_objs, 1, 4] to better coding
                 masks_gt_cur = masks_gt[i].unsqueeze(1) if masks_gt[i].dim() == 3 else masks_gt[i]
@@ -97,6 +96,7 @@ class LincombMaskLoss(object):
                     pred_masks = generate_mask(proto_data[i], mask_coeff_cur, boxes_cur,
                                                proto_coeff_occlusion=self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION)
                 else:
+                    fpn_levels = prior_levels[i, pos_cur]
                     pred_masks = self.net.DynamicMaskHead(proto_data[i].permute(3, 0, 1, 2).contiguous().unsqueeze(0),
                                                           mask_coeff_cur, boxes_cur, fpn_levels)
                     if self.cfg.MODEL.MASK_HEADS.PROTO_CROP:

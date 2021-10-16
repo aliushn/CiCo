@@ -5,6 +5,9 @@ MODEL = dict(
         CONV_BODY='ResNet50',
         PATH='STMask_resnet50_coco_960_46_340000.pth'),
 
+    # CLASS_HEADS=dict(
+    #     USE_FOCAL_LOSS=False),
+
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
         CUBIC_CORRELATION_MODE=False,
@@ -26,12 +29,13 @@ DATASETS = dict(
     TEST='test_YouTube_VOS2019_dataset')
 
 SOLVER = dict(
-    IMS_PER_BATCH=4,
-    NUM_CLIP_FRAMES=3)
+    IMS_PER_BATCH=2,
+    NUM_CLIP_FRAMES=3,
+    NUM_CLIPS=1)
 
 TEST = dict(
     IMS_PER_BATCH=1,
     NUM_CLIP_FRAMES=3)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c3_indbox_1X'
+NAME = 'r50_base_YTVIS2019_cubic_3D_c3_indbox_multiscalemix_1X'

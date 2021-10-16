@@ -18,7 +18,7 @@ INPUT = dict(
     SIZE_DIVISOR=32)
 
 SOLVER = dict(
-    IMS_PER_BATCH=12,
+    IMS_PER_BATCH=4,
     NUM_CLIP_FRAMES=1,
     LR=0.005,
     LR_STEPS=(20, 40, 46, 50),

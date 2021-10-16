@@ -7,7 +7,10 @@ from layers.utils import decode, jaccard, generate_mask, compute_kl_div, generat
     log_sum_exp, DIoU_loss
 from .match_samples import match, match_clip
 from .losses import LincombMaskLoss, T2SLoss
+from . InterclipsClass import InterclipsClass
 from fvcore.nn import sigmoid_focal_loss_jit, giou_loss
+from itertools import product
+import random
 
 
 class MultiBoxLoss(nn.Module):
@@ -74,19 +77,15 @@ class MultiBoxLoss(nn.Module):
         """
 
         if self.cfg.DATASETS.TYPE not in {'coco', 'det'}:
-            # In video domain, we load GT annotations as [n_objs, n_clip_frames, ...],
-            # So we have to unfold them in the temporal dim (2-th) to do frame-level detection or segmentation
-            clip_frames = gt_boxes[0].size(1)
-            if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
-                if not self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
-                    predictions['priors'] = predictions['priors'].repeat(1, 1, clip_frames)
-            else:
-                gt_boxes = sum([split_squeeze(boxes, dim=1) for boxes in gt_boxes], [])
+            # In video domain, we load GT annotations as [n_objs, n_clips*n_clip_frames, ...],
+            # So we have to unfold them in the temporal dim (2-th) as [n_objs, n_clips, n_clip_frames, ...]
+            if self.cfg.SOLVER.NUM_CLIPS > 1:
+                gt_boxes = sum([split_squeeze(boxes, length=self.cfg.SOLVER.NUM_CLIP_FRAMES, dim=1) for boxes in gt_boxes], [])
                 if None not in gt_masks:
-                    gt_masks = sum([split_squeeze(masks, dim=1) for masks in gt_masks], [])
-                gt_labels = sum([[labels]*clip_frames for labels in gt_labels], [])
-                gt_ids = sum([[ids]*clip_frames for ids in gt_ids], [])
-                num_crowds = sum([[num]*clip_frames for num in num_crowds], [])
+                    gt_masks = sum([split_squeeze(masks, length=self.cfg.SOLVER.NUM_CLIP_FRAMES, dim=1) for masks in gt_masks], [])
+                gt_labels = sum([[labels]*self.cfg.SOLVER.NUM_CLIPS for labels in gt_labels], [])
+                gt_ids = sum([[ids]*self.cfg.SOLVER.NUM_CLIPS for ids in gt_ids], [])
+                num_crowds = sum([[num]*self.cfg.SOLVER.NUM_CLIPS for num in num_crowds], [])
 
         losses, ids_t = self.multibox_loss(predictions, gt_boxes, gt_labels, gt_masks, gt_ids, num_crowds)
         for k, v in losses.items():
@@ -98,8 +97,8 @@ class MultiBoxLoss(nn.Module):
     def multibox_loss(self, predictions, gt_boxes, gt_labels, gt_masks, gt_ids, num_crowds):
         # ----------------------------------  Prepare Data ----------------------------------
         loc_data = predictions['loc']
+        batch_size, num_priors, box_dim = loc_data.size()
         centerness_data = predictions['centerness'] if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS else None
-        conf_data = predictions['conf']
         mask_coeff, proto_data, segm_data = None, None, None
         if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
             mask_coeff, proto_data = predictions['mask_coeff'], predictions['proto']
@@ -109,9 +108,9 @@ class MultiBoxLoss(nn.Module):
             if self.cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS:
                 segm_data = predictions['sem_seg']
         track_data = predictions['track'] if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK else None
-        priors = predictions['priors']
-        prior_levels = predictions['prior_levels']
-        batch_size, num_priors, box_dim = loc_data.size()
+        priors, prior_levels = predictions['priors'], predictions['prior_levels']
+        if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE and not self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
+            priors = priors.repeat(1, 1, self.cfg.SOLVER.NUM_CLIP_FRAMES)
 
         # Match priors (default boxes) and ground truth boxes
         # These tensors will be created with the same device as loc_data
@@ -176,30 +175,44 @@ class MultiBoxLoss(nn.Module):
 
             # --------------------------------- Confidence loss ------------------------------------------------
             # Focal loss for COCO (crowded objects > 10),
-            # ohem loss for VIS dataset (sparse objects < 6, tooo many negative samples)
+            # Ohem loss for VIS dataset (sparse objects < 6, tooo many negative samples)
             if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
-                conf_data_unfold = conf_data.reshape(-1, self.num_classes)
                 conf_t_unfold = conf_t.reshape(-1)
+                pos_unfold = pos.float().reshape(-1)
+                if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
+                    # Stuff loss
+                    stuff_data_unfold = torch.flatten(predictions['conf'])
+                    neg = self.select_neg_bboxes(stuff_data_unfold, conf_t_unfold, ratio=3, type='stuff')
+                    keep = (pos_unfold + neg).gt(0)
+                    stuff_loss = F.binary_cross_entropy_with_logits(stuff_data_unfold[keep], pos_unfold[keep], reduction='mean')
+                    losses['stuff'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * stuff_loss
 
-                if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS:
-                    pos_inds = torch.nonzero(conf_t_unfold > 0, as_tuple=False)
-                    # prepare one_hot
-                    class_target = torch.zeros_like(conf_data_unfold)
-                    class_target[pos_inds, conf_t_unfold[pos_inds] - 1] = 1
-                    # filter out those samples with IoU threshold between 0.4 and 0.5
-                    keep = conf_t_unfold != -1
-                    class_loss = sigmoid_focal_loss_jit(
-                        conf_data_unfold[keep],
-                        class_target[keep],
-                        alpha=self.cfg.MODEL.CLASS_HEADS.FOCAL_LOSS_ALPHA,
-                        gamma=self.cfg.MODEL.CLASS_HEADS.FOCAL_LOSS_GAMMA,
-                        reduction='sum')
-                    losses['C_focal'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * class_loss / len(pos_inds)
+                    # InterClips classification loss or global classification
+                    intercla_loss = self.interclips_classification_loss(pos, gt_labels, predictions['conf_feat'], idx_t)
+                    losses['CI'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * intercla_loss
+
                 else:
-                    neg = self.select_neg_bboxes(conf_data_unfold, conf_t_unfold, ratio=3)
-                    keep = (pos.reshape(-1) + neg).gt(0)
-                    class_loss = F.cross_entropy(conf_data_unfold[keep], conf_t_unfold[keep], reduction='mean')
-                    losses['C'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * class_loss
+                    conf_data_unfold = torch.flatten(predictions['conf'], end_dim=-2)
+
+                    if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS:
+                        pos_inds = torch.nonzero(conf_t_unfold > 0, as_tuple=False)
+                        # prepare one_hot
+                        class_target = torch.zeros_like(conf_data_unfold)
+                        class_target[pos_inds, conf_t_unfold[pos_inds] - 1] = 1
+                        # filter out those samples with IoU threshold between 0.4 and 0.5
+                        keep = conf_t_unfold != -1
+                        class_loss = sigmoid_focal_loss_jit(
+                            conf_data_unfold[keep],
+                            class_target[keep],
+                            alpha=self.cfg.MODEL.CLASS_HEADS.FOCAL_LOSS_ALPHA,
+                            gamma=self.cfg.MODEL.CLASS_HEADS.FOCAL_LOSS_GAMMA,
+                            reduction='sum')
+                        losses['C_focal'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * class_loss / len(pos_inds)
+                    else:
+                        neg = self.select_neg_bboxes(conf_data_unfold, conf_t_unfold, ratio=3)
+                        keep = (pos_unfold + neg).gt(0)
+                        class_loss = F.cross_entropy(conf_data_unfold[keep], conf_t_unfold[keep], reduction='mean')
+                        losses['C'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * class_loss
 
             # --------------------------------- Tracking loss ------------------------------------------------
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
@@ -217,21 +230,24 @@ class MultiBoxLoss(nn.Module):
 
         return losses, ids_t
 
-    def select_neg_bboxes(self, conf_data, conf_t, ratio=3, use_most_confident=True):
+    def select_neg_bboxes(self, conf_data, conf_t, ratio=3, use_most_confident=True, type='conf'):
         '''
-        :param conf_data: [n, num_classes]
+        :param conf_data: [n, num_classes] or [n, 1]
         :param conf_t: [n, 1]
         :param type: 'class' or 'stuff'
         :return:
         '''
 
-        # Compute max conf across batch for hard negative mining
-        if use_most_confident:
-            # i.e. max(softmax) along classes > 0
-            conf_data = F.softmax(conf_data, dim=1)
-            loss_c, _ = conf_data[:, 1:].max(dim=1)
+        if type == 'conf':
+            # Compute max conf across batch for hard negative mining
+            if use_most_confident:
+                # i.e. max(softmax) along classes > 0
+                conf_data = F.softmax(conf_data, dim=1)
+                loss_c, _ = conf_data[:, 1:].max(dim=1)
+            else:
+                loss_c = log_sum_exp(conf_data) - conf_data[:, 0]
         else:
-            loss_c = log_sum_exp(conf_data) - conf_data[:, 0]
+            loss_c = conf_data.sigmoid()
 
         # Hard Negative Mining
         num_pos = (conf_t > 0).sum()
@@ -301,19 +317,19 @@ class MultiBoxLoss(nn.Module):
         return rep_loss / max(n, 1.)
 
     def track_loss(self, track_data, pos, ids_t=None):
-        clip_frames = pos.size(0) if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE else self.cfg.SOLVER.NUM_CLIP_FRAMES
-        n_clips = pos.size(0) // clip_frames
+        n_clips = self.cfg.SOLVER.NUM_CLIPS
+        bs = track_data.size(0) // n_clips
 
         loss = torch.tensor(0., device=track_data.device)
-        for i in range(n_clips):
-            pos_cur = pos[i*clip_frames:(i+1)*clip_frames]
-            pos_track_data = track_data[i*clip_frames:(i+1)*clip_frames][pos_cur]
+        for i in range(bs):
+            pos_cur = pos[i*n_clips:(i+1)*n_clips]
+            pos_track_data = track_data[i*n_clips:(i+1)*n_clips][pos_cur]
             cos_sim = pos_track_data @ pos_track_data.t()  # [n_pos, n_ref_pos]
             # Rescale to be between 0 and 1
             cos_sim = (cos_sim + 1) / 2
             cos_sim.triu_(diagonal=1)
 
-            pos_ids_t = ids_t[i*clip_frames:(i+1)*clip_frames][pos_cur]
+            pos_ids_t = ids_t[i*n_clips:(i+1)*n_clips][pos_cur]
             inst_eq = (pos_ids_t.view(-1, 1) == pos_ids_t.view(1, -1)).float()
 
             # If they are the same instance, use cosine distance, else use consine similarity
@@ -323,7 +339,7 @@ class MultiBoxLoss(nn.Module):
             loss_t = -1 * (inst_eq * torch.clamp(cos_sim, min=1e-10).log() + (1 - inst_eq) * cos_sim_diff.log())
             loss += loss_t.triu_(diagonal=1).sum() / max(len(pos_ids_t), 1) / max(len(pos_ids_t)-1, 1)
 
-        return {'T': loss / n_clips * self.cfg.MODEL.TRACK_HEADS.LOSS_ALPHA}
+        return {'T': loss / bs * self.cfg.MODEL.TRACK_HEADS.LOSS_ALPHA}
 
     def track_gauss_loss(self, track_data, gt_masks, gt_ids, proto_data, mask_coeff, gt_boxes, pos, ids_t, idx_t):
 
@@ -377,6 +393,59 @@ class MultiBoxLoss(nn.Module):
 
         return losses
 
+    def interclips_classification_loss(self, pos, gt_labels, conf_feats, idx_t):
+        '''
+        :param pos: [bs*n_clips, n_priors]
+        :param gt_labels: List[label_1, ...], the total length is n_clips
+        :param conf_feats: [bs*n_clips, n_priors, n_clip_frames*d]
+        :return:
+        '''
+        n_clips = self.cfg.SOLVER.NUM_CLIPS
+        n_clip_frames = self.cfg.SOLVER.NUM_CLIP_FRAMES
+        pos_list = split_squeeze(pos, length=n_clips, dim=0)
+        idx_t_list = split_squeeze(idx_t, length=n_clips, dim=0)
+        conf_feats_list = split_squeeze(conf_feats, length=n_clips, dim=0)
+        bs = len(conf_feats_list)
+
+        losses = torch.tensor(0., device=pos.device)
+        for k in range(bs):
+            loss_cur_video = torch.tensor(0., device=pos.device)
+            gt_labels_cur_video = gt_labels[k*n_clips]
+            idx_t_cur_video = idx_t_list[k]            # [n_clips, n_priors]
+            pos_cur_video = pos_list[k]                # [n_clips, n_priors]
+            conf_feats_cur_video = conf_feats_list[k]
+
+            # Find all positive samples for each instance clip by clip
+            for i, label in enumerate(gt_labels_cur_video):
+                pos_conf_feats_clips = []
+                pos_num_clips = []
+                for c in range(n_clips):
+                    pos_cur_clip = pos_cur_video[c]
+                    keep = idx_t_cur_video[c][pos_cur_clip] == i
+                    pos_conf_feats_clips += [conf_feats_cur_video[c][pos_cur_clip][keep]]
+                    pos_num_clips += [int(keep.sum())]
+
+                interclips_conf_feats = []
+                n_selected = max(sum(pos_num_clips)//n_clips, 1)
+                for j in range(n_selected):
+                    # Stack all conf features by order [clip1, clip2, ...]
+                    # TODO: Whether conf features should be randomly sorted, irreleated to temporal order?
+                    selected_conf_feats = []
+                    for c in range(n_clips):
+                        if pos_num_clips[c] > 0:
+                            selected_idx = random.sample(range(pos_num_clips[c]), 1)
+                            selected_conf_feats += [pos_conf_feats_clips[c][selected_idx]]
+                    if len(selected_conf_feats) < n_clips:
+                        temp = sum([selected_conf_feats for _ in range(n_clips)], [])
+                        selected_conf_feats = temp[:n_clips]
+                    interclips_conf_feats += [torch.cat(selected_conf_feats, dim=1)]
+
+                conf_data = self.net.InterclipsClass(torch.cat(interclips_conf_feats, dim=0))
+                loss_cur_video += F.cross_entropy(conf_data, (label-1).reshape(-1).repeat(n_selected))
+
+            losses += loss_cur_video / max(len(gt_labels_cur_video), 1)
+        return losses / bs
+
     def _mask_iou(self, mask1, mask2):
         intersection = torch.sum(mask1*mask2, dim=(1, 2))
         area1 = torch.sum(mask1, dim=(1, 2))
@@ -427,8 +496,8 @@ class MultiBoxLoss(nn.Module):
         return sem_loss / float(bs) * self.cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS
 
 
-def split_squeeze(x, dim=-1):
-    x_list = list(torch.split(x, 1, dim=dim))
+def split_squeeze(x, length=1, dim=-1):
+    x_list = list(torch.split(x, length, dim=dim))
     for i in range(len(x_list)):
         x_list[i] = x_list[i].squeeze(dim)
     return x_list

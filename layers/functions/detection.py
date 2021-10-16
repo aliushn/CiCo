@@ -52,8 +52,11 @@ class Detect(object):
             batch_size = predictions['loc'].size(0)
             for i in range(batch_size):
                 candidate_cur = dict()
-                scores, scores_idx = torch.max(predictions['conf'][i], dim=1) if self.use_focal_loss else \
-                    torch.max(predictions['conf'][i, :, 1:], dim=-1)
+                if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
+                    scores = predictions['conf'][i].reshape(-1)
+                else:
+                    scores, _ = torch.max(predictions['conf'][i], dim=1) if self.use_focal_loss else \
+                        torch.max(predictions['conf'][i, :, 1:], dim=-1)
 
                 # Remove proposals whose confidences are lower than the threshold
                 keep = scores > self.conf_thresh
@@ -103,10 +106,7 @@ class Detect(object):
     def detect(self, candidate):
         """ Perform nms for only the max scoring class that isn't background (class 0) """
         if candidate['box'].nelement() == 0:
-            out_aft_nms = {'box': torch.Tensor(), 'class': torch.Tensor(), 'score': torch.Tensor()}
-            if self.train_masks:
-                out_aft_nms['mask_coeff'] = torch.Tensor()
-                out_aft_nms['mask'] = torch.Tensor()
+            out_aft_nms = self.return_empty_out()
 
         else:
             # Remove bounding boxes whose center beyond images or mask = 0
@@ -121,10 +121,7 @@ class Detect(object):
                     candidate[k] = v[keep]
 
             if candidate['box'].nelement() == 0:
-                out_aft_nms = {'box': torch.Tensor(), 'class': torch.Tensor(), 'score': torch.Tensor()}
-                if self.train_masks:
-                    out_aft_nms['mask_coeff'] = torch.Tensor()
-                    out_aft_nms['mask'] = torch.Tensor()
+                out_aft_nms = self.return_empty_out()
             else:
 
                 if self.use_cross_class_nms:
@@ -139,15 +136,17 @@ class Detect(object):
         return out_aft_nms
 
     def cc_fast_nms(self, candidate, iou_threshold: float = 0.5, top_k: int = 100):
-        # Collapse all the classes into 1
-        scores = candidate['conf']
-        if not self.use_focal_loss:
-            scores = scores[..., 1:]
-        rescores = candidate['centerness'].mean(-1).reshape(-1, 1) * scores if 'centerness' in candidate.keys() else scores
-        # centerness = jaccard(candidate['box'].reshape(candidate['box'].size(0), -1, 4),
-        #                      point_form(candidate['priors']).reshape(-1, 1, 4)).mean(1)
-        # rescores = centerness * scores
-        rescores, classes = rescores.max(dim=1)
+        if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
+            scores = candidate['conf'].reshape(-1)
+            rescores = candidate['centerness'].mean(-1).reshape(-1)*scores if 'centerness' in candidate.keys() else scores
+        else:
+            # Collapse all the classes into 1
+            scores = candidate['conf']
+            if not self.use_focal_loss:
+                scores = scores[..., 1:]
+            rescores = candidate['centerness'].mean(-1).reshape(-1, 1) * scores if 'centerness' in candidate.keys() else scores
+            rescores, classes = rescores.max(dim=1)
+
         _, idx = rescores.sort(0, descending=True)
         idx = idx[:top_k]
         n_objs = len(idx)
@@ -182,7 +181,10 @@ class Detect(object):
         # don't have a higher scoring box that would supress it in normal NMS.
         idx_out = idx[iou_max <= iou_threshold]
 
-        out_after_NMS = {'class': classes[idx_out]+1, 'score': scores[idx_out, classes[idx_out]]}
+        if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
+            out_after_NMS = {'score': rescores[idx_out]}
+        else:
+            out_after_NMS = {'score': scores[idx_out, classes[idx_out]], 'class': classes[idx_out]+1}
         for k, v in candidate.items():
             if k not in self.img_level_keys and k not in {'conf', 'loc'}:
                 out_after_NMS[k] = v[idx_out]
@@ -249,3 +251,11 @@ class Detect(object):
 
         return out_after_NMS
 
+    def return_empty_out(self):
+        out_aft_nms = {'box': torch.Tensor(), 'score': torch.Tensor()}
+        if not self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
+            out_aft_nms['class'] = torch.Tensor()
+        if self.train_masks:
+            out_aft_nms['mask_coeff'] = torch.Tensor()
+            out_aft_nms['mask'] = torch.Tensor()
+        return out_aft_nms

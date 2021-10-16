@@ -121,7 +121,8 @@ def train(cfg):
                              pos_threshold=cfg.MODEL.PREDICTION_HEADS.POSITIVE_IoU_THRESHOLD,
                              neg_threshold=cfg.MODEL.PREDICTION_HEADS.NEGATIVE_IoU_THRESHOLD)
 
-    train_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.TRAIN, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES)
+    train_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.TRAIN, cfg.INPUT,
+                                cfg.SOLVER.NUM_CLIP_FRAMES, cfg.SOLVER.NUM_CLIPS)
 
     if args.is_distributed:
         cfg.SOLVER.IMS_PER_BATCH //= torch.cuda.device_count()
@@ -170,7 +171,7 @@ def train(cfg):
     time_avg = MovingAverage()
 
     global loss_types  # Forms the print order
-    loss_types = ['B', 'BIoU', 'B_cir', 'BIoU_cir', 'center', 'Rep', 'C', 'C_focal', 'stuff', 'M_bce', 'M_dice',
+    loss_types = ['B', 'BIoU', 'B_cir', 'BIoU_cir', 'center', 'Rep', 'C', 'C_focal', 'stuff', 'CI', 'M_bce', 'M_dice',
                   'M_coeff', 'M_proto', 'M_sparse', 'T', 'B_shift', 'BIoU_shift', 'M_shift', 'P', 'D', 'S', 'I']
     loss_avgs = {k: MovingAverage(100) for k in loss_types}
 
@@ -261,13 +262,13 @@ def train(cfg):
                             setup_eval(epoch)
                             # valid_sub, the last one ten of training data
                             valid_sub_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.VALID_SUB, cfg.INPUT,
-                                                            cfg.TEST.NUM_CLIP_FRAMES, inference=True)
+                                                            cfg.TEST.NUM_CLIP_FRAMES, num_clips=1, inference=True)
                             compute_validation_map(net, valid_sub_dataset)
 
                             # valid or test datasets
                             if cfg.DATASETS.TYPE == 'vis':
                                 valid_dataset = get_dataset(cfg.DATASETS.TYPE,  cfg.DATASETS.VALID, cfg.INPUT,
-                                                            cfg.TEST.NUM_CLIP_FRAMES, inference=True)
+                                                            cfg.TEST.NUM_CLIP_FRAMES, num_clips=1, inference=True)
                                 compute_validation_map(net, valid_dataset)
 
                 iteration += 1
@@ -378,7 +379,8 @@ def compute_validation_map(net, dataset):
         print()
         print("Computing validation mAP (this may take a while)...", flush=True)
         eval_script.evaldatasets(net, dataset, cfg.DATASETS.TYPE, cfg.OUTPUT_DIR, cfg.TEST.NUM_CLIP_FRAMES,
-                                 cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE, cfg.INPUT)
+                                 cfg.SOLVER.NUM_CLIPS, cubic_mode=cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE,
+                                 cfg_input=cfg.INPUT, TRAIN_INTERCLIPS_CLASS=cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS)
         net.train()
 
 

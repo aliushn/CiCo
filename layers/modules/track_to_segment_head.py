@@ -25,7 +25,7 @@ class TemporalNet(nn.Module):
         x = self.relu(self.conv2(x))
         x = self.relu(self.conv3(x))
         x = self.pool(x)
-        x = x.view(x.size(0), -1)
+        x = torch.flatten(x, 1)
         x_reg = self.fc(x)
 
         if self.maskshift_loss:
