@@ -146,13 +146,15 @@ def compute_kl_div(p_mu, p_var, q_mu=None, q_var=None):
     return kl_divergence if use_batch else kl_divergence.squeeze(0)
 
 
-def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta, add_bbox_dummy=False,
-                        bbox_dummy_iou=0, match_coeff=None):
+def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta, small_objects=None,
+                        add_bbox_dummy=False, bbox_dummy_iou=0, match_coeff=None):
     # compute comprehensive matching score based on matchig likelihood,
     # bbox confidence, and ious
     if add_bbox_dummy:
         bbox_iou_dummy = torch.ones(bbox_ious.size(0), 1,
                                     device=torch.cuda.current_device()) * bbox_dummy_iou
+        if small_objects is not None:
+            bbox_iou_dummy[small_objects] *= 0.5
         bbox_ious = torch.cat((bbox_iou_dummy, bbox_ious), dim=1)
         mask_ious = torch.cat((bbox_iou_dummy, mask_ious), dim=1)
         label_dummy = torch.ones(bbox_ious.size(0), 1,

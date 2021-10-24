@@ -81,7 +81,7 @@ def plot_protos(protos, pred_masks, img_meta, num):
 
 
 def generate_mask(proto_data, mask_coeff, bbox=None, mask_dim=32, frame_wise=False,
-                  use_sipmask=False, proto_coeff_occlusion=False):
+                  use_sipmask=False, proto_coeff_occlu=False):
     '''
     Activation function of mask is sigmoid
     :param proto_data : [h, w, 32] or [n, h, w, 32]
@@ -103,7 +103,7 @@ def generate_mask(proto_data, mask_coeff, bbox=None, mask_dim=32, frame_wise=Fal
 
     else:
 
-        if not proto_coeff_occlusion:
+        if not proto_coeff_occlu:
             pred_masks = torch.sigmoid(generate_single_mask(proto_data, mask_coeff, frame_wise))
             if bbox is not None:
                 pred_masks = crop(pred_masks, bbox)                                         # [h, w, T, n]
@@ -131,9 +131,11 @@ def generate_mask(proto_data, mask_coeff, bbox=None, mask_dim=32, frame_wise=Fal
 
 def generate_single_mask(proto_data, mask_coeff, frame_wise=False):
     if not frame_wise:
+        # Proto_data: [h,w,32] or [h,w,T,32], mask_coeff: [n,32]
         pred_masks = proto_data @ mask_coeff.t()
     else:
-        # to generate masks for all objects in a video clip
+        # Proto_data: [n, h, w, 32]
+        # mask_coeff: [n, 32]
         pred_masks = (proto_data * mask_coeff.unsqueeze(1).unsqueeze(2)).sum(dim=-1)
         pred_masks = pred_masks.permute(1, 2, 0).contiguous()
 

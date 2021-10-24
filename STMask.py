@@ -162,27 +162,20 @@ class STMask(nn.Module):
         """ Initialize weights for training. """
         print('Initialize weights from:', backbone_path)
         state_dict = torch.load(backbone_path, map_location=torch.device('cpu'))
-        model_dict = self.state_dict()
-        # In case of save models from distributed training
         for key in list(state_dict.keys()):
+            # In case of save models from distributed training
             if key.startswith('module'):
                 state_dict[key[7:]] = state_dict.pop(key)
+            # In case of save models without 'ProtoNet.'
             if key.split('.')[0] in {'mask_refine', 'proto_net', 'proto_conv'}:
                 new_key = 'ProtoNet.'+key
                 state_dict[new_key] = state_dict.pop(key)
-            elif key.split('.')[0] in {'prediction_layers'}:
+            # In case of save models with shared prediction heads like Yolact
+            if '.'.join(key.split('.')[:2]) in {'prediction_layers.0'}:
                 new_key = 'prediction_layers.' + '.'.join(key.split('.')[2:])
                 state_dict[new_key] = state_dict.pop(key)
-                if self.cfg.MODEL.PREDICTION_HEADS.USE_MULTISCALE_MIX:
-                    temp_key = '.'.join(new_key.split('.')[:-1]) + '_d2.'+new_key.split('.')[-1]
-                    if temp_key in model_dict.keys():
-                        state_dict[temp_key] = state_dict[new_key].clone()
-            elif key.split('.')[2] in {'bbox_extra', 'conf_extra', 'track_extra'}:
-                if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_SPATIOTEMPORAL_BLOCK:
-                    new_key = '.'.join(key.split('.')[:-1]) + '.temporal.' + key.split('.')[-1]
-                    state_dict[new_key] = state_dict.pop(key)
 
-        # Initialize the rest of the conv layers with xavier
+        # First initialize the rest of the conv layers with xavier
         print('Init all weights by Xavier:')
         for name, module in self.named_modules():
             if isinstance(module, nn.Conv2d) or isinstance(module, nn.Conv3d) or isinstance(module, nn.Linear):
@@ -200,76 +193,47 @@ class STMask(nn.Module):
         print('Finish init all weights by Xavier.')
         print()
 
+        model_dict = self.state_dict()
         # only update same modules and layers between pre-trained model and our model
         for key in list(state_dict.keys()):
-            if key in model_dict.keys():
+            if key not in model_dict.keys():
+                print('Layers in pre-trained model but not in current model:', key)
+            else:
                 if model_dict[key].shape == state_dict[key].shape:
                     model_dict[key] = state_dict[key]
-                elif self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
-                    if 'conf_layer' in key:
-                        continue
-
-                    if state_dict[key].dim() == 1:
-                        scale = model_dict[key].size(0)//state_dict[key].size(0)
-                        init_weights = state_dict[key].repeat(scale).to(model_dict[key].device)
-                        if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
-                            model_dict[key] = init_weights
-                        else:
-                            model_dict[key][self.flag_corr_channels] = init_weights
-                    elif state_dict[key].dim() == 4 and model_dict[key].dim() == 5:
-                        print('load 3D parameters from pre-trained models:', key)
-                        scale = model_dict[key].size(0)//state_dict[key].size(0)
-                        if model_dict[key].size(2) == 1:
-                            model_dict[key] = state_dict[key].repeat(scale,1,1,1).unsqueeze(2).to(model_dict[key].device)
-                        else:
-                            # only init parameter for the center frame
-                            # model_dict[key][:,:,model_dict[key].size(2)//2] = state_dict[key].repeat(scale,1,1,1).to(model_dict[key].device)
-                            # All frames with same weights
-                            model_dict[key] = state_dict[key].unsqueeze(2).repeat(scale,1,model_dict[key].size(2), 1,1).to(model_dict[key].device)/model_dict[key].size(2)
-
-                    else:
-                        print('load parameters from pre-trained models:', key)
-                        c_out, c_in, kh, kw = model_dict[key].size()
-                        c_out_pre, c_in_pre = state_dict[key].size()[:2]
-                        c_in_scale = c_in//c_in_pre
-                        c_out_scale = c_out//c_out_pre
-                        if self.block_diagonal:
-                            for c in range(c_in_scale):
-                                if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
-                                    flag_channels = range(c*self.fpn_num_features, (c+1)*self.fpn_num_features)
-                                else:
-                                    single = self.fpn_num_features+self.correlation_patch_size**2
-                                    flag_channels = range(c*single, (c+1)*single-self.correlation_patch_size**2)
-                                if key.split('.')[-2][-5:] == 'layer' or (kh == 1 and kw == 1):
-                                    if c_out != c_out_pre:
-                                        flag_channels_out = range(c*c_out_pre, (c+1)*c_out_pre)
-                                    else:
-                                        flag_channels_out = range(c_out_pre)
-                                else:
-                                    flag_channels_out = flag_channels
-                                model_dict[key][flag_channels_out][:, flag_channels] = state_dict[key].to(model_dict[key].device)
-
-                        else:
-                            # Inflated or reduced weights from 2D (single frame) to 3D (multi-frames)
-                            if key.split('.')[-2][-5:] == 'layer':
-                                init_weights = state_dict[key].reshape(self.num_priors, -1, c_in, kh, kw)\
-                                    .repeat(1, c_out_scale, c_in_scale, 1, 1).reshape(-1, c_in_scale*c_in, kh, kw)
-                            else:
-                                init_weights = state_dict[key].repeat(c_out_scale, c_in_scale, 1, 1)
-                            init_weights /= float(c_in_scale*c_out_scale)
-
-                            if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
-                                model_dict[key] = init_weights.to(model_dict[key].device)
-                            else:
-                                if 'extra' in key:
-                                    model_dict[key][self.flag_corr_channels, self.flag_corr_channels] = init_weights.to(model_dict[key].device)
-                                else:
-                                    model_dict[key][:, self.flag_corr_channels] = init_weights.to(model_dict[key].device)
-
                 else:
-                    print('Size is different in pre-trained model and in current model:', key)
-            else:
-                print('parameters in pre-trained model but not in current model:', key)
+                    if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
+                        print('Size is different in pre-trained model and current model:', key)
+                    else:
+                        # Init weights from 2D to 3D
+                        if 'conf_layer' in key:  # or 'prediction_layers' in key:
+                            continue
+
+                        device = model_dict[key].device
+                        if state_dict[key].dim() == 1:
+                            if model_dict[key].size(0) % state_dict[key].size(0) == 0:
+                                scale = model_dict[key].size(0)//state_dict[key].size(0)
+                                if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
+                                    model_dict[key] = state_dict[key].repeat(scale).to(device)
+                                else:
+                                    model_dict[key][self.flag_corr_channels] = state_dict[key].repeat(scale).to(device)
+                            else:
+                                print('Size is different in pre-trained model and current model:', key)
+                        elif state_dict[key].dim() == 4 and model_dict[key].dim() == 5:
+                            c_out_p, c_in_p, kh_p, kw_p = state_dict[key].size()
+                            c_out, c_in, t, kh, kw = model_dict[key].size()
+                            if [kh_p, kw_p] == [kh, kw] and c_out % c_out_p == 0:
+                                print('load 3D parameters from pre-trained models:', key)
+                                scale = model_dict[key].size(0)//state_dict[key].size(0)
+                                if t == 1:
+                                    model_dict[key] = state_dict[key].repeat(scale,1,1,1).unsqueeze(2).to(device)
+                                else:
+                                    # only init parameter for the center frame
+                                    # model_dict[key][:,:,model_dict[key].size(2)//2] = state_dict[key].repeat(scale,1,1,1).to(device)
+                                    # All frames with same weights
+                                    model_dict[key] = state_dict[key].unsqueeze(2).repeat(scale,1,t,1,1).to(device)/t
+                            else:
+                                print('Size is different in pre-trained model and current model:', key)
 
         self.load_state_dict(model_dict, strict=True)
 
@@ -366,9 +330,11 @@ class STMask(nn.Module):
         if self.training:
             return pred_outs
         else:
-
-            pred_outs['conf'] = pred_outs['conf'].sigmoid() if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS \
-                else pred_outs['conf'].softmax(dim=-1)
+            if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
+                pred_outs['conf'] = pred_outs['conf'].sigmoid()
+            else:
+                pred_outs['conf'] = pred_outs['conf'].sigmoid() if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS \
+                    else pred_outs['conf'].softmax(dim=-1)
 
             # Detection
             pred_outs_after_NMS = self.Detect(self, pred_outs)

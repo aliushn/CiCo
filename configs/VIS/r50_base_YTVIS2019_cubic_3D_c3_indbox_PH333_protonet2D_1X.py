@@ -8,11 +8,11 @@ MODEL = dict(
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
         CUBIC_CORRELATION_MODE=False,
-        CUBIC_MODE_ON_PROTONET=True,
+        CUBIC_MODE_ON_PROTONET=False,
         CUBIC_3D_MODE=True,
         CIRCUMSCRIBED_BOXES=False,
         # INITIALIZATION=reduced or inflated
-        CUBIC_MODE_WITH_INITIALIZATION='inflated'),
+        CUBIC_MODE_WITH_INITIALIZATION='inflated')
 )
 
 DATASETS = dict(
@@ -24,13 +24,14 @@ DATASETS = dict(
     TEST='test_YouTube_VOS2019_dataset')
 
 SOLVER = dict(
-    IMS_PER_BATCH=18,
-    NUM_CLIP_FRAMES=5,
+    IMS_PER_BATCH=4,
+    NUM_CLIP_FRAMES=3,
     NUM_CLIPS=1)
 
 TEST = dict(
     IMS_PER_BATCH=1,
-    NUM_CLIP_FRAMES=5)
+    NUM_CLIP_FRAMES=3,
+    NMS_CONF_THRESH=0.1,)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c5_indbox_1X'
+NAME = 'r50_base_YTVIS2019_cubic_3D_c3_indbox_PH333_protonet2D_1X'

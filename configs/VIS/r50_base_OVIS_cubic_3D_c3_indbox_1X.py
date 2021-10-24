@@ -8,6 +8,9 @@ MODEL = dict(
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
         CUBIC_CORRELATION_MODE=False,
+        CUBIC_MODE_ON_PROTONET=True,
+        CUBIC_3D_MODE=True,
+        CIRCUMSCRIBED_BOXES=False,
         # INITIALIZATION=reduced (even 2,4,6,8) or inflated
         CUBIC_MODE_WITH_INITIALIZATION='inflated')
 )
@@ -21,14 +24,13 @@ DATASETS = dict(
     TEST='test_OVIS_dataset')
 
 SOLVER = dict(
-    IMS_PER_BATCH=8,
-    NUM_CLIP_FRAMES=2,
-    LR_STEPS=(8, 10),
-    MAX_EPOCH=12)
+    IMS_PER_BATCH=4,
+    NUM_CLIP_FRAMES=3,
+    NUM_CLIPS=1)
 
 TEST = dict(
     IMS_PER_BATCH=1,
-    NUM_CLIP_FRAMES=2)
+    NUM_CLIP_FRAMES=3)
 
 OUTPUT_DIR = 'weights/OVIS/'
-NAME = 'r50_base_OVIS_cubic_c2_1X'
+NAME = 'r50_base_OVIS_cubic_3D_c3_indbox_1X'

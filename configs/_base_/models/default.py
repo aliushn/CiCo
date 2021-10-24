@@ -288,6 +288,14 @@ _C.STMASK.T2S_HEADS.MASKSHIFT_ALPHA = 6.125
 _C.STMASK.T2S_HEADS.FORWARD_FLOW = True
 _C.STMASK.T2S_HEADS.BACKWARD_FLOW = False
 
+# ---------------------------------------------------------------------------- #
+# Short-term temporal representation (CVPR2022) Options
+# ---------------------------------------------------------------------------- #
+_C.STR = CN()
+_C.STR.ST_CONSISTENCY = CN()
+_C.STR.ST_CONSISTENCY.CPH_WITH_TOWER133 = False
+_C.STR.ST_CONSISTENCY.MASK_WITH_COEFF = True
+_C.STR.ST_CONSISTENCY.MASK_WITH_PROTOS = False
 
 # ---------------------------------------------------------------------------- #
 # ResNe[X]t options (ResNets = {ResNet, ResNeXt}

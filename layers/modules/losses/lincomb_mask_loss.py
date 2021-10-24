@@ -31,13 +31,16 @@ class LincombMaskLoss(object):
         loss, loss_m_occluded = torch.tensor(0., device=idx_t.device), torch.tensor(0., device=idx_t.device)
         sparse_loss = torch.tensor(0., device=idx_t.device)
         loss_coeff_div = torch.tensor(0., device=idx_t.device)
+        if self.cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS:
+            coeff_temcons_loss = torch.tensor(0., device=idx_t.device)
+        dim_mask = proto_data.size(-1)
 
         for i in range(bs):
             pos_cur = pos[i] > 0
             # deal with the i-th clip
             if pos_cur.sum() > 0:
                 idx_t_cur = idx_t[i, pos_cur]
-                mask_coeff_cur = mask_coeff[i, pos_cur]
+                mask_coeff_cur = mask_coeff[i, pos_cur].reshape(-1, dim_mask)
                 # If the input is given frame by frame style, for example bboxes_gt [n_objs, 4],
                 # please expand them in temporal axis like: [n_objs, 1, 4] to better coding
                 masks_gt_cur = masks_gt[i].unsqueeze(1) if masks_gt[i].dim() == 3 else masks_gt[i]
@@ -85,6 +88,8 @@ class LincombMaskLoss(object):
 
                 # Mask coefficients sparse loss
                 sparse_loss += self.coeff_sparse_loss(mask_coeff_cur)
+                if self.cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS:
+                    coeff_temcons_loss += self.coeff_tempcons_loss(mask_coeff_cur.reshape(-1, n_frames, dim_mask))
 
                 # Mask coefficients diversity loss
                 if self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_LOSS:
@@ -93,8 +98,13 @@ class LincombMaskLoss(object):
 
                 # Mask combinated linearly by mask coefficients and prototypes
                 if not self.cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
-                    pred_masks = generate_mask(proto_data[i], mask_coeff_cur, boxes_cur,
-                                               proto_coeff_occlusion=self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION)
+                    if self.cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS:
+                        boxes_crop = boxes_cur.unsqueeze(1).repeat(1, n_frames, 1).reshape(-1, 4)
+                    else:
+                        boxes_crop = boxes_cur
+                    pred_masks = generate_mask(proto_data[i], mask_coeff_cur, boxes_crop,
+                                               proto_coeff_occlu=self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION)
+                    pred_masks = pred_masks.reshape(-1, n_frames, pred_masks.size(-2), pred_masks.size(-1))
                 else:
                     fpn_levels = prior_levels[i, pos_cur]
                     pred_masks = self.net.DynamicMaskHead(proto_data[i].permute(3, 0, 1, 2).contiguous().unsqueeze(0),
@@ -140,19 +150,29 @@ class LincombMaskLoss(object):
                         # pre_loss = pre_loss.sum(dim=(-1, -2, -3)) / pred_masks.size(-1)/pred_masks.size(-2)/n_frames
 
                 loss += pre_loss.mean()
-        loss = loss / bs * self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA * n_frames
+        loss = loss / max(bs, 1) * self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA * n_frames
         losses = {'M_dice': loss} if self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF else {'M_bce': loss}
-        losses['M_sparse'] = sparse_loss / bs
+        # losses['M_l1'] = sparse_loss / max(bs, 1)
         if self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_LOSS:
             losses['M_coeff'] = loss_coeff_div / max(bs, 1)
+        # if self.cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS:
+        #     losses['M_coeff_tc'] = coeff_temcons_loss / max(bs, 1)
         # Prototypes divergence loss
-        # if self.cfg.MODEL.MASK_HEADS.PROTO_DIVERGENCE_LOSS:
-        #     losses['M_proto'] = self.proto_divergence_loss(proto_data, masks_gt, boxes_gt, threshold=0.25)
+        if self.cfg.MODEL.MASK_HEADS.PROTO_DIVERGENCE_LOSS:
+            losses['M_proto'] = self.proto_divergence_loss(proto_data, masks_gt, boxes_gt, threshold=0.25)
     
         return losses
 
     def coeff_sparse_loss(self, coeffs):
-        return 0.01 * torch.abs(coeffs).sum(dim=-1).mean()
+        return 0.001 * torch.abs(coeffs).sum(dim=-1).mean()
+
+    def coeff_tempcons_loss(self, coeffs):
+        '''
+        Temporal consistency
+        :param coeffs: [n_objs, n_frames, d]
+        :return: L2 loss
+        '''
+        return 0.5 * torch.norm(coeffs-torch.mean(coeffs, dim=1, keepdim=True))
 
     def dice_coefficient(self, x, target):
         eps = 1e-5

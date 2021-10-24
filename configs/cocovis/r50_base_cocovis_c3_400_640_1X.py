@@ -1,4 +1,4 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VIS/base_VIS.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/cocovis/base_cocovis.py']
 
 MODEL = dict(
     BACKBONE=dict(
@@ -16,12 +16,12 @@ MODEL = dict(
 )
 
 DATASETS = dict(
-    TYPE='vis',
+    TYPE='cocovis',
     NUM_CLASSES=40,
-    TRAIN='train_YouTube_VOS2019_dataset',
-    VALID_SUB='valid_sub_YouTube_VOS2019_dataset',
-    VALID='valid_YouTube_VOS2019_dataset',
-    TEST='test_YouTube_VOS2019_dataset')
+    TRAIN='coco2017_train_dataset',
+    VALID_SUB='coco2017_valid_dataset',
+    VALID='coco2017_valid_dataset',
+    TEST='coco2017_testdev_dataset')
 
 SOLVER = dict(
     IMS_PER_BATCH=4,
@@ -30,8 +30,7 @@ SOLVER = dict(
 
 TEST = dict(
     IMS_PER_BATCH=1,
-    NUM_CLIP_FRAMES=3,
-    NMS_CONF_THRESH=0.1,)
+    NUM_CLIP_FRAMES=3)
 
-OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c3_indbox_1X'
+OUTPUT_DIR = 'weights/COCOVIS/'
+NAME = 'r50_base_cocovis_cubic_3D_c3_indbox_400_640_1X'

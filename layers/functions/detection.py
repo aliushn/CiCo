@@ -17,7 +17,7 @@ class Detect(object):
         self.cfg = cfg
         self.train_masks = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
         self.use_dynamic_mask = cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK
-        self.mask_coeff_occlusion = cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION
+        self.mask_coeff_occlu = cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION
         self.nms_with_miou = cfg.TEST.NMS_WITH_MIoU
         self.use_focal_loss = cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS
         self.num_classes = cfg.DATASETS.NUM_CLASSES
@@ -27,13 +27,12 @@ class Detect(object):
             raise ValueError('nms_threshold must be non negative.')
         self.conf_thresh = cfg.TEST.NMS_CONF_THRESH
 
-        self.use_cross_class_nms = True
+        self.use_cross_class_nms = True if cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS else False
         self.use_fast_nms = True
         self.cubic_mode = cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE
+        self.img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
         if cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-            self.img_level_keys = {'proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg', 'track'}
-        else:
-            self.img_level_keys = {'proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg'}
+            self.img_level_keys += ['track']
 
     def __call__(self, net, predictions):
         """
@@ -66,9 +65,9 @@ class Detect(object):
                     idx_out = idx_out[idx_sorted[:self.top_k]]
                 for k, v in predictions.items():
                     if k in self.img_level_keys:
-                        candidate_cur[k] = v[i]
+                        candidate_cur[k] = v[i].clone()
                     else:
-                        candidate_cur[k] = v[i][idx_out]
+                        candidate_cur[k] = v[i][idx_out].clone()
 
                 if len(idx_out) == 0:
                     candidate_cur['box'] = torch.Tensor()
@@ -88,16 +87,20 @@ class Detect(object):
                             candidate_cur['mask'] = pred_masks.permute(2, 0, 1).contiguous()
                         else:
                             if self.cfg.MODEL.MASK_HEADS.PROTO_CROP:
-                                det_masks_all = generate_mask(proto_data, masks_coeff, boxes_cir,
-                                                              proto_coeff_occlusion=self.mask_coeff_occlusion)
+                                if self.cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS:
+                                    boxes_crop = boxes_cir.unsqueeze(1).repeat(1, dim_boxes//4, 1).reshape(-1, 4)
+                                else:
+                                    boxes_crop = boxes_cir
                             else:
-                                det_masks_all = generate_mask(proto_data, masks_coeff,
-                                                              proto_coeff_occlusion=self.mask_coeff_occlusion)
-                            if self.mask_coeff_occlusion:
-                                candidate_cur['mask'] = det_masks_all[:, 0] - det_masks_all[:, 1]
+                                boxes_crop = None
+                            pred_masks = generate_mask(proto_data, masks_coeff.reshape(-1, proto_data.size(-1)),
+                                                       boxes_crop, proto_coeff_occlu=self.mask_coeff_occlu)
+                            pred_masks = pred_masks.reshape(-1, dim_boxes//4, pred_masks.size(-2), pred_masks.size(-1))
+                            if self.mask_coeff_occlu:
+                                candidate_cur['mask'] = pred_masks[:, 0] - pred_masks[:, 1]
                             else:
                                 # [n_objs, T, H, W]
-                                candidate_cur['mask'] = det_masks_all
+                                candidate_cur['mask'] = pred_masks
 
                 result.append(self.detect(candidate_cur))
 
@@ -123,7 +126,6 @@ class Detect(object):
             if candidate['box'].nelement() == 0:
                 out_aft_nms = self.return_empty_out()
             else:
-
                 if self.use_cross_class_nms:
                     out_aft_nms = self.cc_fast_nms(candidate, self.nms_thresh, self.top_k)
                 else:
@@ -255,6 +257,8 @@ class Detect(object):
         out_aft_nms = {'box': torch.Tensor(), 'score': torch.Tensor()}
         if not self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
             out_aft_nms['class'] = torch.Tensor()
+        else:
+            out_aft_nms['conf_feat'] = torch.Tensor()
         if self.train_masks:
             out_aft_nms['mask_coeff'] = torch.Tensor()
             out_aft_nms['mask'] = torch.Tensor()

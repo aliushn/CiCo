@@ -6,11 +6,9 @@ from ..utils import aligned_bilinear
 from ..visualization_temporal import display_cubic_weights
 
 
-class ProtoNet3D(nn.Module):
+class ProtoNetSTR(nn.Module):
     def __init__(self, cfg, in_channels):
         super().__init__()
-        self.cfg = cfg
-
         self.proto_src = cfg.MODEL.MASK_HEADS.PROTO_SRC
         if self.proto_src is not None and len(self.proto_src) > 1:
             self.mask_refine = nn.ModuleList([nn.Sequential(*[
@@ -21,23 +19,18 @@ class ProtoNet3D(nn.Module):
 
         # The include_last_relu=false here is because we might want to change it to another function
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-        self.use_3D = True if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE and cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_ON_PROTONET else False
+        self.n_clips = cfg.SOLVER.NUM_CLIPS
+        self.cubic_frames, self.use_3D = cfg.SOLVER.NUM_CLIP_FRAMES, True
+
+        layer1 = nn.Conv3d(in_channels, in_channels, kernel_size, padding=layer_cfg[2])
+        BN = nn.BatchNorm3d(in_channels)
+        nn.ReLU(inplace=True)
         self.proto_net, proto_channles = make_net(in_channels, cfg.MODEL.MASK_HEADS.PROTO_NET, use_3D=self.use_3D,
                                                   include_bn=True, include_last_relu=True)
         # the last two Conv layers for predicting prototypes
         self.mask_dim = cfg.MODEL.MASK_HEADS.MASK_DIM
-        if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_ON_PROTONET and cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS:
-            self.proto_conv = nn.Sequential(*[
-                nn.Conv3d(in_channels, in_channels, kernel_size=3, padding=1),
-                nn.BatchNorm3d(in_channels),
-                nn.ReLU(inplace=True),
-                nn.Conv3d(in_channels, self.mask_dim//3, kernel_size=1, padding=0),
-            ])
-
-        else:
-            proto_arch = [(proto_channles, 3, 1), (self.mask_dim, 1, 0)]
-            self.proto_conv, _ = make_net(proto_channles, proto_arch, use_3D=self.use_3D, include_bn=True,
-                                          include_last_relu=False)
+        proto_arch = [(proto_channles, 3, 1), (self.mask_dim, 1, 0)]
+        self.proto_conv, _ = make_net(proto_channles, proto_arch, use_3D=self.use_3D, include_bn=True, include_last_relu=False)
         if cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
             self.DynamicMaskHead = DynamicMaskHead()
 
@@ -60,26 +53,23 @@ class ProtoNet3D(nn.Module):
                         proto_x_p = aligned_bilinear(proto_x_p, factor)
                         proto_x = proto_x + proto_x_p
 
-        bs, C_in, H_in, W_in = proto_x.size()
-        bs = bs // self.clip_frames
+        C_in, H_in, W_in = proto_x.size()[-3:]
         if self.use_3D:
             # Unfold inputs from 4D to 5D: [bs*T, C, H, W]=>[bs, C, T, H, W]
-            proto_x = proto_x.reshape(-1, self.clip_frames, C_in, H_in, W_in).permute(0, 2, 1, 3, 4).contiguous()
+            proto_x = proto_x.reshape(-1, self.cubic_frames, C_in, H_in, W_in).permute(0, 2, 1, 3, 4).contiguous()
         proto_out_features = self.proto_net(proto_x)
         # Activation function is Relu
-        prototypes = F.relu(self.proto_conv(proto_out_features))
-        # display_cubic_weights(prototypes, 0, type=2, name='prototypes', img_meta=img_meta)
-
-        H_out, W_out = prototypes.size()[-2:]
-        if self.use_3D:
-            # Fold 5D t0 4D: [bs, C, T, H, W] => [bs*T, C, H, W]
-            prototypes = prototypes.permute(0, 2, 1, 3, 4).contiguous().reshape(-1, self.mask_dim, H_out, W_out)
         # Move the features last so the multiplication is easy
-        prototypes = prototypes.reshape(bs, -1, self.mask_dim, H_out, W_out).permute(0, 3, 4, 1, 2).contiguous()
+        prototypes = F.relu(self.proto_conv(proto_out_features))
+        _, H_out, W_out = prototypes.size()[-3:]
+        # display_cubic_weights(prototypes, 0, type=2, name='prototypes', img_meta=img_meta)
+        if self.use_3D:
+            prototypes = prototypes.permute(0, 2, 1, 3, 4).contiguous().reshape(-1, self.mask_dim, H_out, W_out)
+        prototypes = prototypes.reshape(-1, self.clip_frames, self.mask_dim, H_out, W_out).permute(0, 3, 4, 1, 2).contiguous()
 
+        # display_cubic_weights(proto_out_features, 0, type=2, name='proto', img_meta=img_meta)
         display_weights = False
         if display_weights:
-            display_cubic_weights(proto_out_features, 0, type=2, name='proto', img_meta=img_meta)
             for jdx in range(0,9,3):
                 display_cubic_weights(self.proto_net[jdx].weight, jdx, type=1, name='protonet')
             for jdx in range(0,6,3):

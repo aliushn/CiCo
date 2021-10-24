@@ -13,6 +13,10 @@ MODEL = dict(
         CIRCUMSCRIBED_BOXES=False,
         # INITIALIZATION=reduced or inflated
         CUBIC_MODE_WITH_INITIALIZATION='inflated'),
+
+    CLASS_HEADS=dict(
+        TRAIN_INTERCLIPS_CLASS=True)
+
 )
 
 DATASETS = dict(
@@ -24,13 +28,13 @@ DATASETS = dict(
     TEST='test_YouTube_VOS2019_dataset')
 
 SOLVER = dict(
-    IMS_PER_BATCH=18,
+    IMS_PER_BATCH=8,
     NUM_CLIP_FRAMES=5,
-    NUM_CLIPS=1)
+    NUM_CLIPS=2)
 
 TEST = dict(
     IMS_PER_BATCH=1,
     NUM_CLIP_FRAMES=5)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c5_indbox_1X'
+NAME = 'r50_base_YTVIS2019_cubic_3D_c5_s2_interclips_class_indbox_1X'

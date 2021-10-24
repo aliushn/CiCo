@@ -156,7 +156,7 @@ def bbox2result_video(results, preds, frame_idx, types=None):
                     if labels is not None:
                         results[obj_id]['category_id'] += [labels[idx]]
                     if type == 'segm':
-                        results[obj_id]['segmentations'][-1] =segm
+                        results[obj_id]['segmentations'][-1] = segm
                     elif type == 'bbox':
                         results[obj_id]['bbox'][-1] = bbox.tolist()
 

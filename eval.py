@@ -177,11 +177,11 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
                     _class = class_names[classes[j] - 1]
 
                 if score is not None:
-                    if 'conf_3D' in dets_out.keys():
-                        rescore = dets_out['conf_3D'][:args.top_k].detach().cpu().numpy()[j, classes[j]-1]
+                    if 'score_global' in dets_out.keys():
+                        rescore = dets_out['score_global'][:args.top_k].view(-1).detach().cpu().numpy()[j]
                         text_str = '%s: %.2f: %.2f: %s' % (_class, score, rescore, str(color_type[j].cpu().numpy())) \
                             if args.display_scores else _class
-                    # elif 'centerness' in dets_out.keys():
+                    # if 'centerness' in dets_out.keys():
                     #     rescore = dets_out['centerness'][:args.top_k].view(-1).detach().cpu().numpy()[j]
                     #     text_str = '%s: %.2f: %.2f: %s' % (_class, score, rescore, str(color_type[j].cpu().numpy())) \
                     #         if args.display_scores else _class
@@ -477,17 +477,17 @@ def evaluate(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval
     return json_results
 
 
-def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval_clip_frames=1, n_clips=1,
+def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, clip_frames=1, n_clips=1,
                   TRAIN_INTERCLIPS_CLASS=False, output_dir=None):
     '''
     :param net:
     :param dataset:
     :param data_type: 'vis' or 'vid'
-    :param eval_clip_frames:
+    :param clip_frames:
     :param output_dir:
     :return:
     '''
-    n_newly_frames = eval_clip_frames - args.overlap_frames
+    n_newly_frames = clip_frames - args.overlap_frames
     dataset_size = len(dataset.vid_ids)
 
     print()
@@ -514,6 +514,8 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
 
         if TRAIN_INTERCLIPS_CLASS:
             conf_feats_video = dict()
+            pred_frames_video, images_video, images_meta_video = [], [], []
+
         len_clips = (len_vid + n_newly_frames-1) // n_newly_frames
         progress_bar_clip = ProgressBar(len_clips, len_clips)
         for cdx in range(len_clips):
@@ -524,7 +526,11 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
 
             with timer.env('Load Data'):
                 left = cdx * n_newly_frames
-                clip_frame_ids = range(left, min(left+eval_clip_frames, len_vid))
+                if left+clip_frames > len_vid:
+                    clip_frame_ids = list(range(len_vid-clip_frames, len_vid))
+                else:
+                    clip_frame_ids = list(range(left, left+clip_frames))
+                # Just mask sure all frames have been processed
                 if cdx == len_clips-1:
                     assert clip_frame_ids[-1] == len_vid-1, \
                         'The last clip should include the last frame! Please double check!'
@@ -534,31 +540,49 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
                 pad_shape = {'pad_shape': (images.size(-2), images.size(-1), 3)}
                 for k in range(len(images_meta)):
                     images_meta[k].update(pad_shape)
-                if images.size(0) < eval_clip_frames:
-                    images = images.repeat(eval_clip_frames, 1, 1, 1)[:eval_clip_frames]
-                    images_meta = (images_meta*eval_clip_frames)[:eval_clip_frames]
+                if images.size(0) < clip_frames:
+                    images = images.repeat(clip_frames, 1, 1, 1)[:clip_frames]
+                    images_meta = (images_meta*clip_frames)[:clip_frames]
+                    clip_frame_ids = (clip_frame_ids * clip_frames)[:clip_frames]
 
             with timer.env('Network Extra'):
+                # Interesting tests inputs with different orders
+                # order_idx = list(range(clip_frames))[::-1]
+                # images = torch.flip(images, [0])
+                order_idx = range(clip_frames)
                 preds_clip = net(images, img_meta=[images_meta])
                 pred_clip = preds_clip[0]
 
-            if TRAIN_INTERCLIPS_CLASS:
+            # Here store all classification features for later inter-clips classification
+            if TRAIN_INTERCLIPS_CLASS and pred_clip['box_ids'].nelement() > 0:
                 box_ids = pred_clip['box_ids']
                 for obj_idx, obj_id in enumerate(box_ids):
-                    if obj_id not in conf_feats_video:
+                    if int(obj_id) not in conf_feats_video:
                         conf_feats_video[int(obj_id)] = [pred_clip['conf_feat'][obj_idx]]
                     else:
                         conf_feats_video[int(obj_id)] += [pred_clip['conf_feat'][obj_idx]]
 
-            temporal_dependent_keys = {'proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg', 'mask'}
+            dim_mask = pred_clip['proto'].size(-1)
+            temporal_dependent_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg', 'mask']
             pred_frame = dict()
             for k, v in pred_clip.items():
                 if k not in temporal_dependent_keys:
                     pred_frame[k] = v
+            if pred_clip['proto'].size(-2) == 1:
+                pred_frame['proto'] = pred_clip['proto'].squeeze(-1)
+                temporal_dependent_keys.pop(0)
             if 'priors' in pred_clip.keys():
                 pred_frame['priors'] = pred_clip['priors'][:, :4]
 
-            for batch_id, frame_id in enumerate(clip_frame_ids[:min(n_newly_frames, len_vid-left)]):
+            if cdx+1 == len_clips:
+                newly_clip_frame_ids = clip_frame_ids[left-len_vid:]
+                newly_idx = range(clip_frames)[left-len_vid:]
+            else:
+                newly_clip_frame_ids = clip_frame_ids[:n_newly_frames]
+                newly_idx = range(clip_frames)[:n_newly_frames]
+
+            for idx, frame_id in zip(newly_idx, newly_clip_frame_ids):
+                batch_id = order_idx[idx]
                 img_id = (vid, frame_id)
                 if pred_clip['box'].size(0) == 0:
                     if train_masks:
@@ -567,27 +591,35 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
                 else:
                     if pred_clip['box'].size(-1) != 4:
                         pred_frame['box'] = pred_clip['box'][:, batch_id*4:(batch_id+1)*4]
+                    if pred_clip['mask_coeff'].size(-1) != dim_mask:
+                        pred_frame['mask_coeff'] = pred_clip['mask_coeff'][:, batch_id*dim_mask:(batch_id+1)*dim_mask]
+
                     for k, v in pred_clip.items():
                         if k in temporal_dependent_keys:
-                            if k == 'mask':
-                                pred_frame[k] = v[:, batch_id]
-                            else:
-                                pred_frame[k] = v[..., batch_id, :]
+                            pred_frame[k] = v[:, batch_id] if k == 'mask' else v[..., batch_id, :]
 
                 if args.display:
-                    root_dir = os.path.join(output_dir, 'out', str(vid))
-                    if not os.path.exists(root_dir):
-                        os.makedirs(root_dir)
-                    img_numpy = prep_display(pred_frame, images[batch_id],
-                                             img_meta=images_meta[batch_id])
-                    plt.imshow(img_numpy)
-                    plt.axis('off')
-                    plt.title(str(img_id))
-                    plt.savefig(''.join([root_dir, '/', str(frame_id), '.png']))
-                    plt.clf()
+                    if not TRAIN_INTERCLIPS_CLASS:
+                        root_dir = os.path.join(output_dir, 'out', str(vid))
+                        if not os.path.exists(root_dir):
+                            os.makedirs(root_dir)
+                        img_numpy = prep_display(pred_frame, images[batch_id],
+                                                 img_meta=images_meta[idx])
+                        plt.imshow(img_numpy)
+                        plt.axis('off')
+                        plt.title(str(img_id))
+                        plt.savefig(''.join([root_dir, '/', str(frame_id), '.png']))
+                        plt.clf()
+                    else:
+                        pred_frame_single = dict()
+                        for k, v in pred_frame.items():
+                            pred_frame_single[k] = v.clone()
+                        pred_frames_video += [pred_frame_single]
+                        images_video += [images[batch_id]]
+                        images_meta_video += [images_meta[idx]]
 
                 else:
-                    preds_cur = postprocess_ytbvis(pred_frame, images_meta[batch_id], train_masks=train_masks,
+                    preds_cur = postprocess_ytbvis(pred_frame, images_meta[idx], train_masks=train_masks,
                                                    output_file=output_dir)
                     if data_type == 'vid' and use_vid_metric:
                         for k, v in preds_cur.items():
@@ -600,28 +632,58 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
 
         # Predict interclips classification or global classification for each objects
         if TRAIN_INTERCLIPS_CLASS:
-            category_ids_video = dict()
+            category_ids_vid = dict()
             for obj_id, conf_feats_obj in conf_feats_video.items():
-                selected_conf_feats_obj = []
-                if len(conf_feats_obj) < n_clips:
-                    conf_feats_obj = sum([conf_feats_obj for _ in range(n_clips)], [])[:n_clips]
-                for _ in range((len(conf_feats_obj)-1)//n_clips+1):
-                    selected_idx = random.sample(range(len(conf_feats_obj)), n_clips)
-                    selected_conf_feats_obj += [torch.cat([conf_feats_obj[idx] for idx in selected_idx], dim=-1)]
+                conf_feats_obj = torch.stack(conf_feats_obj, dim=0)
+                iters = (len(conf_feats_obj)-1)//n_clips+1
 
-                conf_data = net.InterclipsClass(torch.stack(selected_conf_feats_obj, dim=0))
-                conf, category_id_obj = torch.softmax(conf_data, dim=-1).mean(0).max(0)
-                category_ids_video[obj_id] = category_id_obj + 1
+                conf_all, category_id_obj_all = [], []
+                for _ in range(1):
+                    selected_idx = torch.randint(len(conf_feats_obj), (iters, n_clips))
+                    conf_data = net.InterclipsClass(conf_feats_obj[selected_idx.reshape(-1)].reshape(iters, -1))
+                    # conf_all, category_id_obj_all = torch.softmax(conf_data, dim=-1).max(-1)
+                    conf, category_id_obj = torch.softmax(conf_data, dim=-1).mean(0).max(0)
+                    if int(category_id_obj+1) not in category_id_obj_all:
+                        conf_all.append(conf)
+                        category_id_obj_all.append(int(category_id_obj+1))
+                    else:
+                        match_idx = category_id_obj_all.index(int(category_id_obj+1))
+                        conf_all[match_idx] = max(conf_all[match_idx], conf)
+
+                category_ids_vid[obj_id] = {'category_id': category_id_obj_all, 'score': conf_all}
+            # print()
+            # print(category_ids_vid)
+
+            if args.display:
+                root_dir = os.path.join(output_dir, 'out', str(vid))
+                if not os.path.exists(root_dir):
+                    os.makedirs(root_dir)
+                for pred_frame, image, image_meta in zip(pred_frames_video, images_video, images_meta_video):
+                    frame_id = image_meta['frame_id']
+                    pred_frame['class'] = torch.tensor([category_ids_vid[int(id)]['category_id'][0] for id in pred_frame['box_ids']])
+                    pred_frame['score_global'] = torch.tensor([category_ids_vid[int(id)]['score'][0] for id in pred_frame['box_ids']])
+                    img_numpy = prep_display(pred_frame, image, img_meta=image_meta)
+                    plt.imshow(img_numpy)
+                    plt.axis('off')
+                    plt.title(str((vid, frame_id)))
+                    plt.savefig(''.join([root_dir, '/', str(frame_id), '.png']))
+                    plt.clf()
 
         if not args.display and data_type == 'vis':
             for obj_id, vid_obj in vid_objs.items():
                 vid_obj['video_id'] = vid
-                vid_obj['score'] = np.array(vid_obj['score']).mean().item()
+                stuff_score = np.array(vid_obj['score']).mean().item()
                 if TRAIN_INTERCLIPS_CLASS:
-                    vid_obj['category_id'] = category_ids_video[obj_id]
+                    for cat_id, score in zip(category_ids_vid[obj_id]['category_id'], category_ids_vid[obj_id]['score']):
+                        vid_obj['category_id'] = cat_id
+                        vid_obj['score'] = stuff_score * score.cpu().numpy().item()
+                        assert len(vid_obj['segmentations']) == len_vid
+                        json_results.append(vid_obj)
                 else:
                     vid_obj['category_id'] = np.bincount(vid_obj['category_id']).argmax().item()
-                json_results.append(vid_obj)
+                    vid_obj['score'] = stuff_score
+                    assert len(vid_obj['segmentations']) == len_vid
+                    json_results.append(vid_obj)
 
     return json_results
 
@@ -697,7 +759,7 @@ def evaldatasets(net: STMask, val_dataset, data_type, output_dir, eval_clip_fram
         print('Begin Inference!')
         if cubic_mode:
             results = evaluate_clip(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,
-                                    eval_clip_frames=eval_clip_frames, n_clips=n_clips,
+                                    clip_frames=eval_clip_frames, n_clips=n_clips,
                                     TRAIN_INTERCLIPS_CLASS=TRAIN_INTERCLIPS_CLASS, output_dir=output_dir)
         else:
             results = evaluate(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,

@@ -10,30 +10,31 @@ class SpatioTemporalBlock(nn.Module):
     '''
     def __init__(self,
                  in_channels,
-                 kernel_size=(3, 3, 3),
                  deformable_groups=4,
                  cascaded=False):
         super(SpatioTemporalBlock, self).__init__()
         self.cascaded = cascaded
-        self.kernel_size = (kernel_size, kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
-        self.padding = ((self.kernel_size[0] - 1) // 2, (self.kernel_size[1] - 1) // 2, (self.kernel_size[2] - 1) // 2)
 
         # Spatial branch
-        offset_channels = self.kernel_size[1] * self.kernel_size[2] * 2
-        self.spatio_offset = nn.Conv3d(in_channels,
-                                       deformable_groups * offset_channels,
-                                       kernel_size=(1, self.kernel_size[1], self.kernel_size[2]),
-                                       padding=(0, self.padding[1], self.padding[2]),
-                                       bias=False)
+        self.spatio_kernel_size = (1, 5, 5)
+        self.spatio_padding = (0, (self.spatio_kernel_size[1] - 1) // 2, (self.spatio_kernel_size[2] - 1) // 2)
+        offset_channels = self.spatio_kernel_size[1] * self.spatio_kernel_size[2] * 2
+        self.spatio_offset1 = nn.Conv3d(in_channels,
+                                        deformable_groups * offset_channels,
+                                        kernel_size=self.spatio_kernel_size,
+                                        padding=self.spatio_padding,
+                                        bias=False)
 
-        self.spatio_adaption = DeformConv2d(in_channels,
-                                            in_channels,
-                                            kernel_size=(self.kernel_size[1], self.kernel_size[2]),
-                                            padding=(self.padding[1], self.padding[2]),
-                                            deform_groups=deformable_groups)
+        self.spatio_adaption1 = DeformConv2d(in_channels,
+                                             in_channels,
+                                             kernel_size=(self.kernel_size[1]+2, self.kernel_size[2]+2),
+                                             padding=(self.padding[1], self.padding[2]),
+                                             deform_groups=deformable_groups)
 
         # Temporal barnch
-        self.temporal = nn.Conv3d(in_channels, in_channels, kernel_size=self.kernel_size, padding=self.padding)
+        self.temporal_kernel_size = (3, 3, 3)
+        self.temporal_padding = ((self.temporal_kernel_size[0] - 1) // 2, (self.temporal_kernel_size[1] - 1) // 2, (self.temporal_kernel_size[2] - 1) // 2)
+        self.temporal = nn.Conv3d(in_channels, in_channels, kernel_size=self.temporal_kernel_size, padding=self.temporal_padding)
 
         # Init deformable convolution
         self.init_weights()

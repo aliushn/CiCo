@@ -2,7 +2,7 @@ from datasets import *
 from utils.functions import MovingAverage, SavePath, ProgressBar
 from utils.logger import Log
 from utils import timer
-from layers.modules import MultiBoxLoss
+from layers import MultiBoxLoss
 from STMask import STMask
 import os
 import time
@@ -141,7 +141,7 @@ def train(cfg):
 
     if cfg.DATASETS.TYPE == 'coco':
         detection_collate = detection_collate_coco
-    elif cfg.DATASETS.TYPE == 'vis':
+    elif cfg.DATASETS.TYPE in {'vis', 'cocovis'}:
         detection_collate = detection_collate_vis
     elif cfg.DATASETS.TYPE in {'vid', 'det'}:
         detection_collate = detection_collate_vid
@@ -172,7 +172,8 @@ def train(cfg):
 
     global loss_types  # Forms the print order
     loss_types = ['B', 'BIoU', 'B_cir', 'BIoU_cir', 'center', 'Rep', 'C', 'C_focal', 'stuff', 'CI', 'M_bce', 'M_dice',
-                  'M_coeff', 'M_proto', 'M_sparse', 'T', 'B_shift', 'BIoU_shift', 'M_shift', 'P', 'D', 'S', 'I']
+                  'M_coeff', 'M_coeff_tc', 'M_proto', 'M_l1', 'T', 'B_shift', 'BIoU_shift', 'M_shift', 'P', 'D',
+                  'S', 'I']
     loss_avgs = {k: MovingAverage(100) for k in loss_types}
 
     if args.local_rank == 0:
@@ -252,7 +253,7 @@ def train(cfg):
                             print('Deleting old save...')
                             os.remove(latest)
 
-                    do_inference = False if 'DET' in args.config else True
+                    do_inference = False if 'DET' in args.config or 'cocovis' in args.config else True
                     if do_inference:
                         if cfg.DATASETS.TYPE == 'coco':
                             setup_eval_coco()
@@ -428,5 +429,10 @@ if __name__ == '__main__':
         if getattr(args, name) == None: setattr(args, name, getattr(cfg, name))
     # This is managed by set_lr
     cur_lr = cfg.SOLVER.LR
+
+    # Auto epochs to adapt the number of clips
+    if cfg.SOLVER.NUM_CLIPS > 1 and cfg.SOLVER.NUM_CLIP_FRAMES > 1:
+        cfg.SOLVER.LR_STEPS = tuple([step//cfg.SOLVER.NUM_CLIPS+1 for step in cfg.SOLVER.LR_STEPS])
+        cfg.SOLVER.MAX_EPOCH = cfg.SOLVER.MAX_EPOCH // cfg.SOLVER.NUM_CLIPS+1
 
     train(cfg)

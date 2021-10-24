@@ -129,7 +129,7 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
         ids_t[idx] = ids[valid_best_truth_idx]
 
 
-def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t, idx_t,
+def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t, idx_t,
                obj_ids_t, idx, pos_thresh=0.5, neg_thresh=0.3, circumscribed_boxes=False):
     """Match each prior box with the ground truth box of the highest jaccard
     overlap, encode the bounding boxes, then return the matched indices
@@ -150,7 +150,7 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
     Return:
         The matched indices corresponding to 1)location and 2)confidence preds.
     """
-
+    gt_labels = gt_labels.long()
     n_anchors = loc_data.size(0)
     n_objs, n_clip_frames, _ = gt_boxes.size()
     
@@ -259,7 +259,7 @@ def match_clip(cfg, gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, co
     # filter out those predicted boxes with inf or nan
     keep = (torch.isinf(loc_data).sum(-1) + torch.isnan(loc_data).sum(-1)) > 0
     if keep.sum() > 0:
-        print('Num of Inf or Nan in loc_data when matching samples:', len(torch.nonzero(keep)))
+        print('Num of Inf or Nan in loc_data when matching samples:', len(torch.nonzero(keep, as_tuple=False)))
         conf[keep] = -1
     loc_t[idx, keep_pos_cir] = loc_pos                           # [num_priors, 4*clip_frames] encoded offsets to learn
     conf_t[idx] = conf                                           # [num_priors] top class label for each prior

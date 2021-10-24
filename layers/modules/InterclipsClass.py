@@ -13,7 +13,7 @@ class InterclipsClass(nn.Module):
         self.fc3 = nn.Linear(1024, num_classes)
 
     def forward(self, cla_fea):
-        x = torch.flatten(cla_fea, start_dim=1)
+        x = F.relu(torch.flatten(cla_fea, start_dim=1))
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)

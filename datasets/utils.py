@@ -150,6 +150,7 @@ def get_dataset(data_type, data_name, input, num_clip_frame, num_clips=1, infere
     from configs._base_.datasets import get_dataset_config
     from .ytvos import YTVOSDataset
     from .coco import COCODetection
+    from .cocovis import COCOVISDetection
     from .VID import VIDDataset
 
     dataset_config = get_dataset_config(data_name, data_type)
@@ -204,6 +205,18 @@ def get_dataset(data_type, data_name, input, num_clip_frame, num_clips=1, infere
                                    resize_gt=resize_gt,
                                    pad_gt=pad_gt))
 
+    elif data_type == 'cocovis':
+        dataset = COCOVISDetection(image_path=dataset_config['img_prefix'],
+                                   info_file=dataset_config['ann_file'],
+                                   frames=num_clip_frame,
+                                   transform=BaseTransform_coco(
+                                    min_size=min_size,
+                                    max_size=max_size,
+                                    Flip=flip,
+                                    MS_train=MS_train,
+                                    backbone_transform=backbone_transform,
+                                    resize_gt=resize_gt,
+                                    pad_gt=pad_gt))
     elif data_type == 'coco':
         dataset = COCODetection(image_path=dataset_config['img_prefix'],
                                 info_file=dataset_config['ann_file'],

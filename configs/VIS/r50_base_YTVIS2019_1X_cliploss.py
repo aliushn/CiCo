@@ -3,16 +3,7 @@ _base_ = ['configs/_base_/models/r50_base.yaml', 'configs/VIS/base_VIS.py']
 MODEL = dict(
     BACKBONE=dict(
         CONV_BODY='ResNet50',
-        PATH='STMask_resnet50_coco_960_46_340000.pth'),
-
-    PREDICTION_HEADS=dict(
-        CUBIC_MODE=True,
-        CUBIC_CORRELATION_MODE=False,
-        CUBIC_MODE_ON_PROTONET=True,
-        CUBIC_3D_MODE=True,
-        CIRCUMSCRIBED_BOXES=False,
-        # INITIALIZATION=reduced or inflated
-        CUBIC_MODE_WITH_INITIALIZATION='inflated'),
+        PATH='STMask_resnet50_coco_960_46_340000.pth')
 )
 
 DATASETS = dict(
@@ -25,12 +16,14 @@ DATASETS = dict(
 
 SOLVER = dict(
     IMS_PER_BATCH=2,
-    NUM_CLIP_FRAMES=7,
-    NUM_CLIPS=1)
+    NUM_CLIP_FRAMES=1,
+    NUM_CLIPS=3)
 
 TEST = dict(
     IMS_PER_BATCH=1,
-    NUM_CLIP_FRAMES=7)
+    NUM_CLIP_FRAMES=3)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c7_indbox_woinitCPH_1X'
+NAME = 'r50_base_YTVIS2019_1X_cliploss'
+
+

@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 from layers.utils import center_size, decode, generate_mask, correlate_operator, generate_track_gaussian, point_form
 from layers.modules import bbox_feat_extractor
 from ..visualization_temporal import display_box_shift, display_correlation_map_patch, display_correlation_map

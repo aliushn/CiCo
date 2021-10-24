@@ -10,7 +10,7 @@ import pyximport
 pyximport.install(setup_args={"include_dirs": np.get_include()}, reload_support=True)
 
 
-class Track_TF(object):
+class Track_Interclips(object):
     """At test time, Detect is the final layer of SSD.  Decode location preds,
     apply non-maximum suppression to location predictions based on conf
     scores and threshold to a top_k number of output predictions for both
@@ -20,24 +20,24 @@ class Track_TF(object):
 
     def __init__(self, net, cfg):
         self.prev_candidate = None
+        self.last_candidate = None
         self.cfg = cfg
-        self.clip_frames = self.cfg.SOLVER.NUM_CLIP_FRAMES
         self.match_coeff = cfg.MODEL.TRACK_HEADS.MATCH_COEFF
         self.correlation_patch_size = cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE
         self.conf_thresh = cfg.TEST.NMS_CONF_THRESH
         self.track_by_Gaussian = cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN
-        self.proto_coeff_occlu = cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION
+        self.proto_coeff_occlusion = cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION
         self.img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
         if self.track_by_Gaussian:
             self.img_level_keys += 'track'
         self.video_mask_coeffs = None
-        self.use_cubic_TF = False if self.cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS else True
+        self.use_cubic_TF = False
 
         self.CandidateShift = CandidateShift(net, cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE,
                                              train_maskshift=cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT,
                                              train_masks=cfg.MODEL.MASK_HEADS.TRAIN_MASKS,
                                              track_by_Gaussian=self.track_by_Gaussian,
-                                             proto_coeff_occlusion=self.proto_coeff_occlu)
+                                             proto_coeff_occlusion=self.proto_coeff_occlusion)
 
     def __call__(self, candidates, imgs_meta, img=None):
         """
@@ -74,28 +74,20 @@ class Track_TF(object):
             is_first = img_meta['is_first']
             candidate['img_ids'] = img_meta['frame_id']
         if is_first:
-            self.prev_candidate = None
-
-            # if self.video_mask_coeffs is not None:
-            #     self.video_mask_coeffs = F.normalize(torch.cat(self.video_mask_coeffs, dim=0), dim=-1)
-            #     sim = self.video_mask_coeffs @ self.video_mask_coeffs.t()
-            #     sim = (sim + 1) / 2
-                # sim = torch.triu(sim, diagonal=1)
-                # sim_max, _ = torch.max(sim, dim=0)
-                # idx_out = sim_max < 0.5
+            self.prev_candidate, self.last_candidate = None, None
 
         # compared bboxes in current frame with bboxes in previous frame to achieve tracking
         if is_first or (not is_first and self.prev_candidate is None):
-            self.video_mask_coeffs = []
             if candidate['box'].nelement() == 0:
                 candidate['box_ids'] = torch.Tensor()
             else:
                 candidate['box_ids'] = torch.arange(candidate['box'].size(0))
                 candidate['tracked_mask'] = torch.zeros(candidate['box'].size(0))
                 # save bbox and features for later matching
-                self.prev_candidate = dict()
+                self.prev_candidate, self.last_candidate = dict(), dict()
                 for k, v in candidate.items():
                     self.prev_candidate[k] = v.clone()
+                    self.last_candidate[k] = v.clone()
 
                 self.video_mask_coeffs.append(candidate['mask_coeff'])
             return candidate
@@ -103,17 +95,55 @@ class Track_TF(object):
         else:
 
             self.video_mask_coeffs.append(candidate['mask_coeff'])
-            assert self.prev_candidate is not None
-            # Tracked mask: to track masks from previous frames to current frame
-            if self.cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
-                self.CandidateShift(candidate, self.prev_candidate, img=img, img_meta=img_meta)
+            assert self.prev_candidate is not None and self.last_candidate is not None
+
+            # Combine detected masks and tracked masks
+            if candidate['box'].nelement() == 0:
+                det_obj_ids = None
+            else:
+                # get bbox and class after NMS
+                det_bbox, det_score = candidate['box'], candidate['score']
+                n_dets, n_last = det_bbox.size(0), self.last_candidate['box'].size(0)
+                det_obj_ids = torch.ones(n_dets, dtype=torch.int64) * (-1)
+                best_match_scores_last = torch.ones(n_last) * (-1)
+
+                # Step 1, if there are overlapped frames between the current clip and last clip clip,
+                # match instances between them according to the overlapped frames; otherwise go to Step 2 directly.
+                img_ids_overlapped_idx = torch.nonzero(self.last_candidate['img_ids'].unsqueeze(1) == candidate['img_ids'],
+                                                       as_tuple=False)
+                if img_ids_overlapped_idx.nelement() > 0:
+                    prev_overlapped_idx = img_ids_overlapped_idx[:, 0]
+                    cur_overlapped_idx = img_ids_overlapped_idx[:, 1]
+
+                    ious = torch.stack([jaccard(det_bbox[:, cur_idx*4:(cur_idx+1)*4],
+                                                self.prev_candidate['box'][:, prev_idx*4:(prev_idx+1)*4])
+                                        for prev_idx, cur_idx in zip(prev_overlapped_idx, cur_overlapped_idx)
+                                        ]).mean(dim=0)
+                    if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
+                        det_masks, prev_masks = candidate['mask'].gt(0.5).float(), self.prev_candidate['mask'].gt(0.5).float()
+                        mask_ious = torch.stack([mask_iou(det_masks[:, cur_idx], prev_masks[:, prev_idx])
+                                                 for prev_idx, cur_idx in zip(prev_overlapped_idx, cur_overlapped_idx)
+                                                 ]).mean(dim=0)
+                        ious = 0.5 * ious + 0.5 * mask_ious
+
+                    for _ in range(min(n_dets, n_last)):
+                        if ious.max() < 0.8:
+                            break
+                        max_iou_idx = torch.nonzero(ious == ious.max(), as_tuple=False).reshape(-1)
+                        det_obj_ids[max_iou_idx[0]] = self.last_candidate['box_ids'][max_iou_idx[1]]
+                        ious[max_iou_idx[0], :] = -1
+                        ious[:, max_iou_idx[1]] = -1
+
+                # Step 2, update these dismatched instances in Step 1 to the previous candidate
+                prev_overlapped_idx, cur_overlapped_idx = [candidate['proto'].size(2)-1], [0]
+
             if self.use_cubic_TF:
                 # Tracked masks without crop: P_t * coeff_{t-1}
                 prev_boxes_cir = center_size(self.prev_candidate['box_cir'])
                 prev_boxes_cir[:, 2:] *= 1.2
-                prev_boxes_crop = point_form(prev_boxes_cir)
                 self.prev_candidate['mask'] = generate_mask(candidate['proto'], self.prev_candidate['mask_coeff'],
-                                                            prev_boxes_crop, proto_coeff_occlu=self.proto_coeff_occlu)
+                                                            point_form(prev_boxes_cir),
+                                                            proto_coeff_occlusion=self.proto_coeff_occlusion)
                 self.prev_candidate['score'] *= 0.9**(self.prev_candidate['mask'].size(1))
             for k, v in candidate.items():
                 if k in self.img_level_keys:
@@ -197,7 +227,7 @@ class Track_TF(object):
                                                       add_bbox_dummy=True,
                                                       bbox_dummy_iou=bbox_dummy_iou,
                                                       match_coeff=self.match_coeff)
-                    # only need to do that for isntances whose Mask IoU is lower than 0.9
+                    # only need to do that for instances whose Mask IoU is lower than 0.9
                     match_likelihood, match_ids = torch.max(comp_scores, dim=1)
                 else:
                     comp_scores = F.normalize(candidate['mask_coeff'], dim=-1) @ F.normalize(self.prev_candidate['mask_coeff'], dim=-1).t()
