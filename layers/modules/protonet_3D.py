@@ -31,7 +31,7 @@ class ProtoNet3D(nn.Module):
                 nn.Conv3d(in_channels, in_channels, kernel_size=3, padding=1),
                 nn.BatchNorm3d(in_channels),
                 nn.ReLU(inplace=True),
-                nn.Conv3d(in_channels, self.mask_dim//3, kernel_size=1, padding=0),
+                nn.Conv3d(in_channels, self.mask_dim, kernel_size=3, padding=(0,1,1)),
             ])
 
         else:

@@ -206,8 +206,11 @@ class STMask(nn.Module):
                         print('Size is different in pre-trained model and current model:', key)
                     else:
                         # Init weights from 2D to 3D
-                        if 'conf_layer' in key:  # or 'prediction_layers' in key:
+                        if 'conf_layer' in key:
                             continue
+                        if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_SPATIOTEMPORAL_BLOCK:
+                            if 'prediction_layers' in key:
+                                continue
 
                         device = model_dict[key].device
                         if state_dict[key].dim() == 1:

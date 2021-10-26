@@ -41,6 +41,9 @@ class MultiBoxLoss(nn.Module):
         self.num_classes = num_classes if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS else num_classes + 1
         self.pos_threshold = pos_threshold
         self.neg_threshold = neg_threshold
+        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
+        self.use_cir_boxes = self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES
+        self.expand_proposals_clip = cfg.STR.ST_CONSISTENCY.EXPAND_PROPOSALS_CLIP
 
         self.T2SLoss = T2SLoss(cfg, net)
         self.LincombMaskLoss = LincombMaskLoss(cfg, net)
@@ -100,7 +103,9 @@ class MultiBoxLoss(nn.Module):
         track_data = predictions['track'] if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK else None
         priors, prior_levels = predictions['priors'], predictions['prior_levels']
         if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE and not self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
-            priors = priors.repeat(1, 1, self.cfg.SOLVER.NUM_CLIP_FRAMES)
+            priors = priors.repeat(1, 1, self.clip_frames)
+            if self.expand_proposals_clip:
+                priors = priors.repeat(batch_size//len(gt_boxes), 1, 1)
 
         # Match priors (default boxes) and ground truth boxes
         # These tensors will be created with the same device as loc_data
@@ -111,7 +116,7 @@ class MultiBoxLoss(nn.Module):
 
         # Matcher: assign positive samples
         crowd_boxes = None
-        for idx in range(batch_size):
+        for idx in range(len(gt_boxes)):
             # Split the crowd annotations because they come bundled in
             if num_crowds is not None:
                 cur_crowds = num_crowds[idx]
@@ -124,9 +129,16 @@ class MultiBoxLoss(nn.Module):
                     _, gt_masks[idx] = split(gt_masks[idx])
 
             if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
-                gt_boxes[idx] = match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[idx], loc_data[idx],
-                                           loc_t, conf_t, idx_t, ids_t, idx, self.pos_threshold, self.neg_threshold,
-                                           circumscribed_boxes=self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES)
+                if self.expand_proposals_clip:
+                    for jdx in range(self.clip_frames):
+                        kdx = idx*self.clip_frames + jdx
+                        gt_boxes[idx] = match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[idx], loc_data[kdx],
+                                                   loc_t, conf_t, idx_t, ids_t, idx, self.pos_threshold, self.neg_threshold,
+                                                   use_cir_boxes=self.use_cir_boxes, jdx=jdx)
+                else:
+                    gt_boxes[idx] = match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[idx], loc_data[idx],
+                                               loc_t, conf_t, idx_t, ids_t, idx, self.pos_threshold, self.neg_threshold,
+                                               use_cir_boxes=self.use_cir_boxes)
             else:
                 gt_ids_cur = gt_ids[idx] if gt_ids is not None else None
                 match(self.cfg, gt_boxes[idx], gt_labels[idx], gt_ids_cur, crowd_boxes, priors[idx], loc_data[idx],
@@ -147,7 +159,7 @@ class MultiBoxLoss(nn.Module):
             losses.update(losses_loc)
             
             # Split boxes of positive samples frame-by-frame to form a list
-            num_objs_per_frame = pos.sum(dim=1).reshape(-1).tolist()
+            num_objs_per_frame = pos.sum(dim=1).reshape(len(gt_boxes), -1).sum(-1).tolist()
             pred_boxes_p_split = torch.split(pred_boxes_p.reshape(-1, box_dim), num_objs_per_frame, dim=0)
             pred_boxes_p_split = [box.reshape(box.size(0), -1) for box in pred_boxes_p_split]
             gt_boxes_p_split = torch.split(gt_boxes_p.reshape(-1, box_dim), num_objs_per_frame, dim=0)
@@ -280,10 +292,7 @@ class MultiBoxLoss(nn.Module):
             IoU_loss = DIoU_loss(decoded_loc_p, decoded_loc_t, reduction='none')
         else:
             IoU_loss = giou_loss(decoded_loc_p, decoded_loc_t, reduction='none')
-
-        for i in range(len(IoU_loss)):
-            if torch.isinf(IoU_loss[i]) or torch.isnan(IoU_loss[i]):
-                print(decoded_loc_p[i], decoded_loc_t[i])
+        IoU_loss = IoU_loss.reshape(pos.sum(), -1).mean(-1)
 
         if self.cfg.MODEL.BOX_HEADS.USE_BOXIOU_LOSS:
             losses['BIoU'] = IoU_loss.mean() * self.cfg.MODEL.BOX_HEADS.BIoU_ALPHA

@@ -9,30 +9,37 @@ MODEL = dict(
         CUBIC_MODE=True,
         CUBIC_3D_MODE=True,
         CUBIC_MODE_ON_PROTONET=False,
-        CIRCUMSCRIBED_BOXES=False,
-        CUBIC_SPATIOTEMPORAL_BLOCK=True,
         CUBIC_CORRELATION_MODE=False,
         # INITIALIZATION=reduced or inflated
-        CUBIC_MODE_WITH_INITIALIZATION='inflated',
-    )
+        CUBIC_MODE_WITH_INITIALIZATION='inflated'),
+
+    CLASS_HEADS=dict(
+        USE_FOCAL_LOSS=False)
 )
 
 DATASETS = dict(
     TYPE='vis',
-    NUM_CLASSES=40,
-    TRAIN='train_YouTube_VOS2019_dataset',
-    VALID_SUB='valid_sub_YouTube_VOS2019_dataset',
-    VALID='valid_YouTube_VOS2019_dataset',
-    TEST='test_YouTube_VOS2019_dataset')
+    NUM_CLASSES=25,
+    TRAIN='train_OVIS_dataset',
+    VALID_SUB='valid_sub_OVIS_dataset',
+    VALID='valid_OVIS_dataset',
+    TEST='test_OVIS_dataset')
+
+STR = dict(
+    ST_CONSISTENCY=dict(
+        CPH_WITH_TOWER133=True)
+)
 
 SOLVER = dict(
-    IMS_PER_BATCH=2,
+    IMS_PER_BATCH=18,
     NUM_CLIP_FRAMES=3,
-    NUM_CLIPS=1)
+    NUM_CLIPS=1,
+    LR_STEPS=(8, 12),
+    MAX_EPOCH=16)
 
 TEST = dict(
     IMS_PER_BATCH=1,
     NUM_CLIP_FRAMES=3)
 
-OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c3_indbox_spblock_proto2d_1X'
+OUTPUT_DIR = 'weights/OVIS/'
+NAME = 'r50_base_OVIS_cubic_3D_c3_indbox_CPH133_proto2d_ohem_1X'

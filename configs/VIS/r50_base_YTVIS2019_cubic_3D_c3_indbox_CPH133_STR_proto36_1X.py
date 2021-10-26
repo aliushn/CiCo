@@ -13,6 +13,10 @@ MODEL = dict(
         CIRCUMSCRIBED_BOXES=False,
         # INITIALIZATION=reduced or inflated
         CUBIC_MODE_WITH_INITIALIZATION='inflated'),
+
+    MASK_HEADS=dict(
+        TRAIN_MASKS=True,
+        MASK_DIM=36)
 )
 
 DATASETS = dict(
@@ -40,4 +44,4 @@ TEST = dict(
     NMS_CONF_THRESH=0.1,)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c3_indbox_CPH133_STR_proto_1X'
+NAME = 'r50_base_YTVIS2019_cubic_3D_c3_indbox_CPH133_STR_proto36_1X'

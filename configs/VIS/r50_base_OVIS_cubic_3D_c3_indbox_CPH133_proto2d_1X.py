@@ -7,37 +7,40 @@ MODEL = dict(
 
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
-        CUBIC_CORRELATION_MODE=False,
-        CUBIC_MODE_ON_PROTONET=True,
         CUBIC_3D_MODE=True,
-        CIRCUMSCRIBED_BOXES=False,
+        CUBIC_MODE_ON_PROTONET=False,
+        CUBIC_CORRELATION_MODE=False,
         # INITIALIZATION=reduced or inflated
         CUBIC_MODE_WITH_INITIALIZATION='inflated'),
+
+    CLASS_HEADS=dict(
+        USE_FOCAL_LOSS=True)
 )
 
 DATASETS = dict(
     TYPE='vis',
-    NUM_CLASSES=40,
-    TRAIN='train_YouTube_VOS2019_dataset',
-    VALID_SUB='valid_sub_YouTube_VOS2019_dataset',
-    VALID='valid_YouTube_VOS2019_dataset',
-    TEST='test_YouTube_VOS2019_dataset')
+    NUM_CLASSES=25,
+    TRAIN='train_OVIS_dataset',
+    VALID_SUB='valid_sub_OVIS_dataset',
+    VALID='valid_OVIS_dataset',
+    TEST='test_OVIS_dataset')
 
 STR = dict(
     ST_CONSISTENCY=dict(
-        CPH_WITH_TOWER133=True,
-        MASK_WITH_PROTOS=True)
+        CPH_WITH_TOWER133=True)
 )
 
 SOLVER = dict(
-    IMS_PER_BATCH=4,
+    IMS_PER_BATCH=18,
     NUM_CLIP_FRAMES=3,
-    NUM_CLIPS=1)
+    NUM_CLIPS=1,
+    LR_STEPS=(8, 14),
+    MAX_EPOCH=16)
 
 TEST = dict(
     IMS_PER_BATCH=1,
     NUM_CLIP_FRAMES=3,
-    NMS_CONF_THRESH=0.1,)
+    NMS_CONF_THRESH=0.2)
 
-OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c3_indbox_CPH133_STR_proto_1X'
+OUTPUT_DIR = 'weights/OVIS/'
+NAME = 'r50_base_OVIS_cubic_3D_c3_indbox_CPH133_proto2d_1X'

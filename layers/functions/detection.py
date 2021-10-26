@@ -26,6 +26,8 @@ class Detect(object):
         if self.nms_thresh <= 0:
             raise ValueError('nms_threshold must be non negative.')
         self.conf_thresh = cfg.TEST.NMS_CONF_THRESH
+        self.expand_proposals_clip = cfg.STR.ST_CONSISTENCY.EXPAND_PROPOSALS_CLIP
+        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
 
         self.use_cross_class_nms = True if cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS else False
         self.use_fast_nms = True
@@ -48,16 +50,24 @@ class Detect(object):
 
         with timer.env('Detect'):
             result = []
-            batch_size = predictions['loc'].size(0)
+            batch_size, num_priors = predictions['loc'].size()[:2]
+            if self.expand_proposals_clip:
+                predictions.pop('prior_levels')
+                predictions['priors'] = predictions['priors'].repeat(self.clip_frames, 1, 1)
+                batch_size //= self.clip_frames
+                self.top_k *= self.clip_frames
+
             for i in range(batch_size):
+                ind = i if not self.expand_proposals_clip else range(i*self.clip_frames, (i+1)*self.clip_frames)
                 candidate_cur = dict()
                 if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
                     scores = predictions['conf'][i].reshape(-1)
                 else:
-                    scores, _ = torch.max(predictions['conf'][i], dim=1) if self.use_focal_loss else \
-                        torch.max(predictions['conf'][i, :, 1:], dim=-1)
+                    scores, _ = torch.max(predictions['conf'][ind], dim=-1) if self.use_focal_loss else \
+                        torch.max(predictions['conf'][ind, :, 1:], dim=-1)
 
                 # Remove proposals whose confidences are lower than the threshold
+                scores = scores.reshape(-1)
                 keep = scores > self.conf_thresh
                 idx_out = torch.arange(len(scores))[keep]
                 if len(idx_out) > self.top_k:
@@ -67,7 +77,7 @@ class Detect(object):
                     if k in self.img_level_keys:
                         candidate_cur[k] = v[i].clone()
                     else:
-                        candidate_cur[k] = v[i][idx_out].clone()
+                        candidate_cur[k] = v[ind].reshape(len(scores), -1)[idx_out].clone()
 
                 if len(idx_out) == 0:
                     candidate_cur['box'] = torch.Tensor()
@@ -77,6 +87,7 @@ class Detect(object):
                     dim_boxes = candidate_cur['loc'].size(-1)
                     priors = candidate_cur['priors'].repeat(1, dim_boxes//4).reshape(-1, 4)
                     candidate_cur['box'] = decode(candidate_cur['loc'].reshape(-1, 4), priors).reshape(-1, dim_boxes)
+                    predictions.pop('loc')
                     boxes_cir = circum_boxes(candidate_cur['box'])
                     candidate_cur['box_cir'] = boxes_cir
                     if self.train_masks:

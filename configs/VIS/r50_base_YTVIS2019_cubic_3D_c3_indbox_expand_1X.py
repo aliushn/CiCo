@@ -7,12 +7,17 @@ MODEL = dict(
 
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
-        CUBIC_CORRELATION_MODE=False,
-        CUBIC_MODE_ON_PROTONET=True,
         CUBIC_3D_MODE=True,
+        CUBIC_MODE_ON_PROTONET=True,
+        CUBIC_CORRELATION_MODE=False,
         CIRCUMSCRIBED_BOXES=False,
         # INITIALIZATION=reduced or inflated
-        CUBIC_MODE_WITH_INITIALIZATION='inflated'),
+        CUBIC_MODE_WITH_INITIALIZATION='inflated')
+)
+
+STR = dict(
+    ST_CONSISTENCY=dict(
+        EXPAND_PROPOSALS_CLIP=True)
 )
 
 DATASETS = dict(
@@ -22,12 +27,6 @@ DATASETS = dict(
     VALID_SUB='valid_sub_YouTube_VOS2019_dataset',
     VALID='valid_YouTube_VOS2019_dataset',
     TEST='test_YouTube_VOS2019_dataset')
-
-STR = dict(
-    ST_CONSISTENCY=dict(
-        CPH_WITH_TOWER133=True,
-        MASK_WITH_PROTOS=True)
-)
 
 SOLVER = dict(
     IMS_PER_BATCH=4,
@@ -40,4 +39,4 @@ TEST = dict(
     NMS_CONF_THRESH=0.1,)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c3_indbox_CPH133_STR_proto_1X'
+NAME = 'r50_base_YTVIS2019_cubic_3D_c3_indbox_expand_1X'

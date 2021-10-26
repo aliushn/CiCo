@@ -151,9 +151,9 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
         for j in reversed(range(num_dets_to_consider)):
             color = get_color(j, color_type)
             # get the bbox_idx to know box's layers (after FPN): p3-p7
-            if 'priors' in dets_out.keys():
-                px1, py1, px2, py2 = dets_out['priors'][j, :]
-                draw_dotted_rectangle(img_numpy, px1, py1, px2, py2, color, 3, gap=10)
+            # if 'priors' in dets_out.keys():
+            #     px1, py1, px2, py2 = dets_out['priors'][j, :]
+            #     draw_dotted_rectangle(img_numpy, px1, py1, px2, py2, color, 3, gap=10)
 
             if args.display_bboxes_cir and boxes_cir is not None:
                 x1, y1, x2, y2 = boxes_cir[j, :]
