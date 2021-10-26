@@ -8,7 +8,6 @@ class LincombMaskLoss(object):
         super(LincombMaskLoss, self).__init__()
         self.cfg = cfg
         self.net = net
-        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
         self.expand_proposals_clip = cfg.STR.ST_CONSISTENCY.EXPAND_PROPOSALS_CLIP
     
     def __call__(self, pos, idx_t, pred_boxes_pos, boxes_t_pos, mask_coeff, prior_levels, proto_data,
@@ -36,14 +35,16 @@ class LincombMaskLoss(object):
         if self.cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS:
             coeff_temcons_loss = torch.tensor(0., device=idx_t.device)
         dim_mask = proto_data.size(-1)
+        T_out = mask_coeff.size(0) // bs
 
         for i in range(bs):
-            pos_cur = pos[i*self.clip_frames:(i+1)*self.clip_frames] > 0 if self.expand_proposals_clip else pos[i] > 0
+            ind_range = range(i*T_out, (i+1)*T_out)
+            pos_cur = pos[ind_range] > 0
 
             # deal with the i-th clip
             if pos_cur.sum() > 0:
-                idx_t_cur = idx_t[i*self.clip_frames:(i+1)*self.clip_frames][pos_cur]
-                mask_coeff_cur = mask_coeff[i*self.clip_frames:(i+1)*self.clip_frames][pos_cur].reshape(-1, dim_mask)
+                idx_t_cur = idx_t[ind_range][pos_cur]
+                mask_coeff_cur = mask_coeff[ind_range][pos_cur].reshape(-1, dim_mask)
                 # If the input is given frame by frame style, for example bboxes_gt [n_objs, 4],
                 # please expand them in temporal axis like: [n_objs, 1, 4] to better coding
                 masks_gt_cur = masks_gt[i].unsqueeze(1) if masks_gt[i].dim() == 3 else masks_gt[i]

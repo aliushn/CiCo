@@ -24,7 +24,7 @@ DATASETS = dict(
     TEST='test_YouTube_VOS2019_dataset')
 
 SOLVER = dict(
-    IMS_PER_BATCH=18,
+    IMS_PER_BATCH=2,
     NUM_CLIP_FRAMES=5,
     NUM_CLIPS=1)
 

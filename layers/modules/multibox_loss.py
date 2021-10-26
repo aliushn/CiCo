@@ -97,26 +97,26 @@ class MultiBoxLoss(nn.Module):
 
     def multibox_loss(self, predictions, gt_boxes, gt_labels, gt_masks, gt_ids, num_crowds):
         # ----------------------------------  Prepare Data ----------------------------------
+        batch_size = len(gt_boxes)
         loc_data = predictions['loc']
-        batch_size, num_priors, box_dim = loc_data.size()
+        num_bsT, num_priors, box_dim = loc_data.size()
+        T_out = num_bsT//batch_size
         centerness_data = predictions['centerness'] if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS else None
         track_data = predictions['track'] if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK else None
         priors, prior_levels = predictions['priors'], predictions['prior_levels']
         if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE and not self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
-            priors = priors.repeat(1, 1, self.clip_frames)
-            if self.expand_proposals_clip:
-                priors = priors.repeat(batch_size//len(gt_boxes), 1, 1)
+            priors = priors.repeat(T_out, 1, self.clip_frames)
 
         # Match priors (default boxes) and ground truth boxes
         # These tensors will be created with the same device as loc_data
         loc_t = loc_data.new(loc_data.shape)
-        conf_t = loc_data.new(batch_size, num_priors).long()
-        idx_t = loc_data.new(batch_size, num_priors).long()
-        ids_t = loc_data.new(batch_size, num_priors).long() if gt_ids is not None else None  # object ids for tracking
+        conf_t = loc_data.new(num_bsT, num_priors).long()
+        idx_t = loc_data.new(num_bsT, num_priors).long()
+        ids_t = loc_data.new(num_bsT, num_priors).long() if gt_ids is not None else None  # object ids for tracking
 
         # Matcher: assign positive samples
         crowd_boxes = None
-        for idx in range(len(gt_boxes)):
+        for idx in range(batch_size):
             # Split the crowd annotations because they come bundled in
             if num_crowds is not None:
                 cur_crowds = num_crowds[idx]
@@ -129,16 +129,13 @@ class MultiBoxLoss(nn.Module):
                     _, gt_masks[idx] = split(gt_masks[idx])
 
             if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
-                if self.expand_proposals_clip:
-                    for jdx in range(self.clip_frames):
-                        kdx = idx*self.clip_frames + jdx
-                        gt_boxes[idx] = match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[idx], loc_data[kdx],
-                                                   loc_t, conf_t, idx_t, ids_t, idx, self.pos_threshold, self.neg_threshold,
-                                                   use_cir_boxes=self.use_cir_boxes, jdx=jdx)
-                else:
-                    gt_boxes[idx] = match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[idx], loc_data[idx],
-                                               loc_t, conf_t, idx_t, ids_t, idx, self.pos_threshold, self.neg_threshold,
-                                               use_cir_boxes=self.use_cir_boxes)
+                for jdx in range(T_out):
+                    kdx = idx*T_out + jdx
+                    interval = 1 if self.expand_proposals_clip else 2
+                    gt_boxes[idx] = match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[idx], loc_data[kdx],
+                                               loc_t, conf_t, idx_t, ids_t, kdx, jdx, self.pos_threshold,
+                                               self.neg_threshold, use_cir_boxes=self.use_cir_boxes, interval=interval)
+
             else:
                 gt_ids_cur = gt_ids[idx] if gt_ids is not None else None
                 match(self.cfg, gt_boxes[idx], gt_labels[idx], gt_ids_cur, crowd_boxes, priors[idx], loc_data[idx],
