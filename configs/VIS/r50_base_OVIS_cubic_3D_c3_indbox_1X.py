@@ -7,9 +7,9 @@ MODEL = dict(
 
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
+        CUBIC_3D_MODE=True,
         CUBIC_CORRELATION_MODE=False,
         CUBIC_MODE_ON_PROTONET=True,
-        CUBIC_3D_MODE=True,
         CIRCUMSCRIBED_BOXES=False,
         # INITIALIZATION=reduced (even 2,4,6,8) or inflated
         CUBIC_MODE_WITH_INITIALIZATION='inflated')
@@ -26,7 +26,7 @@ DATASETS = dict(
 SOLVER = dict(
     IMS_PER_BATCH=4,
     NUM_CLIP_FRAMES=3,
-    NUM_CLIPS=1)
+    NUM_CLIPS=2)
 
 TEST = dict(
     IMS_PER_BATCH=1,
