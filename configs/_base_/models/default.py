@@ -298,6 +298,11 @@ _C.STR.ST_CONSISTENCY.CPH_WITH_TOWER133 = False
 _C.STR.ST_CONSISTENCY.MASK_WITH_COEFF = True
 _C.STR.ST_CONSISTENCY.MASK_WITH_PROTOS = False
 
+_C.Cubic_VIS = CN()
+_C.Cubic_VIS.PHL_KERNEL_SIZE = (3, 3, 3)
+_C.Cubic_VIS.PHL_PADDING = (0, 1, 1)
+_C.Cubic_VIS.PHL_STRIDE = (1, 1, 1)
+
 # ---------------------------------------------------------------------------- #
 # ResNe[X]t options (ResNets = {ResNet, ResNeXt}
 # Note that parts of a resnet may be used for both the backbone and the head

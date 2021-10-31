@@ -1,6 +1,6 @@
 from datasets import *
 from STMask import STMask
-from utils.functions import ProgressBar
+from utils.functions import MovingAverage, ProgressBar
 from utils import timer
 from utils.functions import SavePath
 from layers.utils.output_utils import postprocess_ytbvis, undo_image_transformation
@@ -494,7 +494,7 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
     json_results = []
 
     # Main eval loop
-    timer.reset()
+    frame_times = MovingAverage()
     for vdx, vid in enumerate(dataset.vid_ids):
         progress = (vdx + 1) / dataset_size * 100
         print()
@@ -519,10 +519,15 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
         len_clips = (len_vid + n_newly_frames-1) // n_newly_frames
         progress_bar_clip = ProgressBar(len_clips, len_clips)
         for cdx in range(len_clips):
+            timer.reset()
             progress_clip = (cdx + 1) / len_clips * 100
             progress_bar_clip.set_val(cdx+1)
-            print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)     '
-              % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip), end='')
+            if vdx > 0 or cdx > 0:
+                avg_fps = 1. / (frame_times.get_avg() / clip_frames)
+            else:
+                avg_fps = 0
+            print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)  %5.2f fps   '
+              % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip, avg_fps), end='')
 
             with timer.env('Load Data'):
                 left = cdx * n_newly_frames
@@ -545,13 +550,13 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
                     images_meta = (images_meta*clip_frames)[:clip_frames]
                     clip_frame_ids = (clip_frame_ids * clip_frames)[:clip_frames]
 
-            with timer.env('Network Extra'):
-                # Interesting tests inputs with different orders
-                # order_idx = list(range(clip_frames))[::-1]
-                # images = torch.flip(images, [0])
-                order_idx = range(clip_frames)
-                preds_clip = net(images, img_meta=[images_meta])
-                pred_clip = preds_clip[0]
+            # Interesting tests inputs with different orders
+            # order_idx = list(range(clip_frames))[::-1]
+            # images = torch.flip(images, [0])
+            order_idx = range(clip_frames)
+            preds_clip = net(images, img_meta=[images_meta])
+            pred_clip = preds_clip[0]
+            frame_times.add(timer.total_time())
 
             # Here store all classification features for later inter-clips classification
             if TRAIN_INTERCLIPS_CLASS and pred_clip['box_ids'].nelement() > 0:
@@ -685,6 +690,7 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
                     assert len(vid_obj['segmentations']) == len_vid
                     json_results.append(vid_obj)
 
+    timer.print_stats()
     return json_results
 
 
@@ -833,7 +839,7 @@ if __name__ == '__main__':
             torch.set_default_tensor_type('torch.FloatTensor')
 
         print('Loading model from {}'.format(args.trained_model))
-        net = STMask(cfg)
+        net = STMask(cfg, args.display)
         net.load_weights(args.trained_model)
         net.eval()
         print('Loading model Done.')

@@ -13,7 +13,7 @@ class Detect(object):
 
     # TODO: Refactor this whole class away. It needs to go.
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, display=False):
         self.cfg = cfg
         self.train_masks = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
         self.use_dynamic_mask = cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK
@@ -29,14 +29,18 @@ class Detect(object):
         self.expand_proposals_clip = cfg.STR.ST_CONSISTENCY.EXPAND_PROPOSALS_CLIP
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
 
-        self.use_cross_class_nms = True if cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS else False
+        if display or cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
+            self.use_cross_class_nms = True
+        else:
+            self.use_cross_class_nms = False
+        self.use_cross_class_nms = False
         self.use_fast_nms = True
         self.cubic_mode = cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE
         self.img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
         if cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
             self.img_level_keys += ['track']
 
-    def __call__(self, net, predictions):
+    def __call__(self, net, predictions, inference=False):
         """
         Args:
                     net:  network
@@ -48,13 +52,12 @@ class Detect(object):
             Note that the outputs are sorted only if cross_class_nms is False
         """
 
-        with timer.env('Detect'):
+        if isinstance(predictions, dict):
             result = []
             batch_size = predictions['proto'].size(0)
             T_out = predictions['loc'].size(0)//batch_size
             predictions.pop('prior_levels')
             predictions['priors'] = predictions['priors'].repeat(T_out, 1, 1)
-            self.top_k *= T_out
 
             for i in range(batch_size):
                 ind = range(i*T_out, (i+1)*T_out)
@@ -209,9 +212,8 @@ class Detect(object):
         if not self.use_focal_loss:
             scores = scores[1:]
         rescores = candidate['centerness'].mean(-1).reshape(1, -1) * scores if 'centerness' in candidate.keys() else scores
-        rescores, idx = rescores.sort(1, descending=True)  # [num_classes, num_dets]
+        _, idx = rescores.sort(1, descending=True)  # [num_classes, num_dets]
         idx = idx[:, :top_k].contiguous()
-        rescores = rescores[:, :top_k]
 
         num_classes, n_objs = idx.size()
         # TODO: double check repeated bboxes, mask_coeff, track_data...
@@ -226,16 +228,18 @@ class Detect(object):
         iou = 0.5 * box_iou + 0.5 * box_cir_iou
         if self.train_masks and self.nms_with_miou:
             m_iou = []
+            masks = candidate['mask'].gt(0.5).float().permute(1, 0, 2, 3).contiguous()
+            # In case of out of memory when the length of the clip T >= 5
+            miou_ori = torch.stack([mask_iou(masks[i], masks[i]) for i in range(masks.size(0))])
             for c in range(idx.size(0)):
-                masks_idx = candidate['mask'][idx[c]].gt(0.5).float().permute(1,0,2,3).contiguous()
-                flag = masks_idx.sum(dim=[-1, -2]) > 0
-                m_iou.append(mask_iou(masks_idx, masks_idx).sum(dim=0) / flag.sum(dim=0))
-                # m_iou.append(mask_iou(masks_idx, masks_idx).mean(0))
-            m_iou = torch.stack(m_iou, dim=0)     # [n_class, num_dets, num_dets]
+                masks_idx = masks[:, idx[c]]
+                flag = (masks_idx.sum(dim=[-1, -2]) > 0).sum(dim=0)
+                m_iou.append(miou_ori[:, idx[c]][:, :, idx[c]].sum(dim=0) / flag)
+            m_iou = torch.stack(m_iou, dim=0)      # [n_class, num_dets, num_dets]
             iou = iou * 0.5 + m_iou * 0.5
 
         iou.triu_(diagonal=1)
-        iou_max, _ = iou.max(dim=1)               # [num_classes, num_dets]
+        iou_max, _ = iou.max(dim=1)                # [num_classes, num_dets]
 
         # Now just filter out the ones higher than the threshold
         keep = (iou_max <= iou_threshold)          # [num_classes, num_dets]
@@ -245,14 +249,15 @@ class Detect(object):
         # have such a minimal amount of computation per detection (matrix mulitplication only),
         # this increase doesn't affect us much (+0.2 mAP for 34 -> 33 fps), so we leave it out.
         # However, when you implement this in your method, you should do this second threshold.
+        scores = torch.stack([scores[c][idx[c]] for c in range(idx.size(0))], dim=0)
         if second_threshold:
-            keep *= (rescores > self.conf_thresh)
+            keep *= (scores > self.conf_thresh)
 
         # Assign each kept detection to its corresponding class
         classes = torch.arange(num_classes, device=scores.device)[:, None].expand_as(keep)[keep]
-        rescores = rescores[keep]
+        scores = scores[keep]
 
-        out_after_NMS = {'class': classes+1, 'score': rescores}
+        out_after_NMS = {'class': classes+1, 'score': scores}
         for k, v in candidate.items():
             if k not in self.img_level_keys and k not in {'conf', 'loc'}:
                 if k == 'mask':

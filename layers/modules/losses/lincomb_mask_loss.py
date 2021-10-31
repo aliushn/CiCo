@@ -168,7 +168,7 @@ class LincombMaskLoss(object):
         return losses
 
     def coeff_sparse_loss(self, coeffs):
-        return 0.001 * torch.abs(coeffs).sum(dim=-1).mean()
+        return 0.01 * torch.abs(coeffs).sum(dim=-1).mean()
 
     def coeff_tempcons_loss(self, coeffs):
         '''

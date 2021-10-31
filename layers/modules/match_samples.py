@@ -130,7 +130,7 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
 
 
 def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t, idx_t,
-               obj_ids_t, idx, jdx, pos_thresh=0.5, neg_thresh=0.3, use_cir_boxes=False, interval=1):
+               obj_ids_t, idx, jdx, pos_thresh=0.5, neg_thresh=0.3, use_cir_boxes=False, ind_range=None):
     """Match each prior box with the ground truth box of the highest jaccard
     overlap, encode the bounding boxes, then return the matched indices
     corresponding to both confidence and location preds.
@@ -154,7 +154,7 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
     n_proposals = loc_data.size(0)
     n_objs, n_clip_frames, _ = gt_boxes.size()
 
-    ind_range = jdx if interval == 1 else range(jdx*interval, (jdx+1)*interval+1)
+    ind_range = [jdx] if ind_range is None else ind_range
     gt_boxes_hw = ((gt_boxes[:, ind_range, 2:]-gt_boxes[:, ind_range, :2]) > 0).reshape(n_objs, -1, 2).float()
     # At least occur once in the selected frames
     valid = (gt_boxes_hw.sum(dim=-1) == 2).sum(dim=-1) > 0

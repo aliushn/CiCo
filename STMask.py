@@ -29,7 +29,7 @@ class STMask(nn.Module):
         - pred_aspect_ratios: A list of lists of aspect ratios with len(selected_layers) (see PredictionModule)
     """
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, display=False):
         super().__init__()
 
         self.cfg = cfg
@@ -95,7 +95,7 @@ class STMask(nn.Module):
                                                    cfg.SOLVER.NUM_CLIP_FRAMES, cfg.DATASETS.NUM_CLASSES)
 
         # ---------------- Build detection ----------------
-        self.Detect = Detect(cfg)
+        self.Detect = Detect(cfg, display)
 
         # ---------------- Build track head ----------------
         if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
@@ -291,20 +291,19 @@ class STMask(nn.Module):
     def forward_single(self, x, img_meta=None):
         """ The input should be of size [batch_size, 3, img_h, img_w] """
 
-        with timer.env('backbone'):
+        with timer.env('Backbone+FPN'):
             bb_outs = self.backbone(x)
 
-        with timer.env('fpn'):
             # Use backbone.selected_layers because we overwrote self.selected_layers
             outs = [bb_outs[i] for i in self.cfg.MODEL.BACKBONE.SELECTED_LAYERS]
             fpn_outs = self.fpn(outs)
             if self.cfg.MODEL.FPN.USE_BIFPN:
                 fpn_outs = self.bifpn(fpn_outs)
 
-        with timer.env('pred_heads'):
+        with timer.env('Pred_heads'):
             pred_outs = self.prediction_layers(fpn_outs, img_meta)
 
-        with timer.env('proto '):
+        with timer.env('Protonet'):
             if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
                 pred_outs['proto'] = self.ProtoNet(x, fpn_outs, img_meta=img_meta)
 
@@ -340,11 +339,13 @@ class STMask(nn.Module):
                     else pred_outs['conf'].softmax(dim=-1)
 
             # Detection
-            pred_outs_after_NMS = self.Detect(self, pred_outs)
+            with timer.env('Detect'):
+                pred_outs_after_NMS = self.Detect(self, pred_outs)
 
             # track instances frame-by-frame
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
-                pred_outs_after_track = self.Track(pred_outs_after_NMS, img_meta, x)
+                with timer.env('Track_TF'):
+                    pred_outs_after_track = self.Track(pred_outs_after_NMS, img_meta, x)
                 return pred_outs_after_track
 
             else:

@@ -44,6 +44,8 @@ class MultiBoxLoss(nn.Module):
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
         self.use_cir_boxes = self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES
         self.expand_proposals_clip = cfg.STR.ST_CONSISTENCY.EXPAND_PROPOSALS_CLIP
+        self.PHL_kernel_size, self.PHL_padding = cfg.Cubic_VIS.PHL_KERNEL_SIZE[0], cfg.Cubic_VIS.PHL_PADDING[0]
+        self.PHL_stride = 1 if self.expand_proposals_clip else cfg.Cubic_VIS.PHL_STRIDE[0]
 
         self.T2SLoss = T2SLoss(cfg, net)
         self.LincombMaskLoss = LincombMaskLoss(cfg, net)
@@ -131,10 +133,13 @@ class MultiBoxLoss(nn.Module):
             if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
                 for jdx in range(T_out):
                     kdx = idx*T_out + jdx
-                    interval = 1 if self.expand_proposals_clip else 2
+                    if self.expand_proposals_clip:
+                        ind_range = [jdx]
+                    else:
+                        ind_range = range(jdx*self.PHL_stride, jdx*self.PHL_stride+self.PHL_kernel_size)
                     gt_boxes[idx] = match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[idx], loc_data[kdx],
                                                loc_t, conf_t, idx_t, ids_t, kdx, jdx, self.pos_threshold,
-                                               self.neg_threshold, use_cir_boxes=self.use_cir_boxes, interval=interval)
+                                               self.neg_threshold, use_cir_boxes=self.use_cir_boxes, ind_range=ind_range)
 
             else:
                 gt_ids_cur = gt_ids[idx] if gt_ids is not None else None

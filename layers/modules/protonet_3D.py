@@ -21,8 +21,8 @@ class ProtoNet3D(nn.Module):
 
         # The include_last_relu=false here is because we might want to change it to another function
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-        self.use_3D = True if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE and cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_ON_PROTONET else False
-        self.proto_net, proto_channles = make_net(in_channels, cfg.MODEL.MASK_HEADS.PROTO_NET, use_3D=self.use_3D,
+        self.use_3D = True if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_ON_PROTONET else False
+        self.proto_net, proto_channels = make_net(in_channels, cfg.MODEL.MASK_HEADS.PROTO_NET, use_3D=self.use_3D,
                                                   include_bn=True, include_last_relu=True)
         # the last two Conv layers for predicting prototypes
         self.mask_dim = cfg.MODEL.MASK_HEADS.MASK_DIM
@@ -31,12 +31,12 @@ class ProtoNet3D(nn.Module):
                 nn.Conv3d(in_channels, in_channels, kernel_size=3, padding=1),
                 nn.BatchNorm3d(in_channels),
                 nn.ReLU(inplace=True),
-                nn.Conv3d(in_channels, self.mask_dim, kernel_size=3, padding=(0,1,1)),
+                nn.Conv3d(in_channels, self.mask_dim, kernel_size=3, padding=(0, 1, 1)),
             ])
 
         else:
-            proto_arch = [(proto_channles, 3, 1), (self.mask_dim, 1, 0)]
-            self.proto_conv, _ = make_net(proto_channles, proto_arch, use_3D=self.use_3D, include_bn=True,
+            proto_arch = [(proto_channels, 3, 1), (self.mask_dim, 1, 0)]
+            self.proto_conv, _ = make_net(proto_channels, proto_arch, use_3D=self.use_3D, include_bn=True,
                                           include_last_relu=False)
         if cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
             self.DynamicMaskHead = DynamicMaskHead()

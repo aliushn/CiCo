@@ -52,11 +52,10 @@ class Track_TF(object):
             Note that the outputs are sorted only if cross_class_nms is False
         """
 
-        with timer.env('Track_TF'):
-            # only support batch_size = 1 for video test
-            outputs_aft_track = []
-            for batch_idx in range(len(candidates)):
-                outputs_aft_track.append(self.track(candidates[batch_idx], imgs_meta[batch_idx], img=img[batch_idx]))
+        # only support batch_size = 1 for video test
+        outputs_aft_track = []
+        for batch_idx in range(len(candidates)):
+            outputs_aft_track.append(self.track(candidates[batch_idx], imgs_meta[batch_idx], img=img[batch_idx]))
 
         return outputs_aft_track
 

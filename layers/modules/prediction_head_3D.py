@@ -51,6 +51,18 @@ class PredictionModule_3D(nn.Module):
         self.conf_feat_dim = cfg.MODEL.CLASS_HEADS.INTERCLIPS_CLAFEAT_DIM
         self.expand_proposals_clip = cfg.STR.ST_CONSISTENCY.EXPAND_PROPOSALS_CLIP
 
+        # generate anchors
+        self.img_h = ((max(cfg.INPUT.MIN_SIZE_TRAIN)-1)//32+1) * 32
+        self.img_w = cfg.INPUT.MAX_SIZE_TRAIN
+        layers_idx = range(min(cfg.MODEL.BACKBONE.SELECTED_LAYERS), min(cfg.MODEL.BACKBONE.SELECTED_LAYERS)+len(self.pred_scales))
+        self.priors_list, self.prior_levels_list = [], []
+        for idx, ldx in enumerate(layers_idx):
+            priors, prior_levels = self.make_priors(idx, self.img_h//(2**(ldx+2)), self.img_w//(2**(ldx+2)))
+            self.priors_list += [priors]
+            self.prior_levels_list += [prior_levels]
+        self.priors_list = torch.cat(self.priors_list, dim=1).cpu()
+        self.prior_levels_list = torch.cat(self.prior_levels_list, dim=1).cpu()
+
         if cfg.MODEL.MASK_HEADS.USE_SIPMASK:
             self.mask_dim = self.mask_dim * cfg.MODEL.MASK_HEADS.SIPMASK_HEAD
         elif cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION:
@@ -66,7 +78,8 @@ class PredictionModule_3D(nn.Module):
         if self.expand_proposals_clip:
             kernel_size, padding, stride = (1, 3, 3), (0, 1, 1), (1, 1, 1)
         else:
-            kernel_size, padding, stride = 3, (0, 1, 1), (2, 1, 1)
+            kernel_size, padding = cfg.Cubic_VIS.PHL_KERNEL_SIZE, cfg.Cubic_VIS.PHL_PADDING
+            stride = cfg.Cubic_VIS.PHL_STRIDE
 
         offset_channels = 18
         if cfg.MODEL.PREDICTION_HEADS.USE_SPATIO_DCN:
@@ -155,7 +168,7 @@ class PredictionModule_3D(nn.Module):
             - prior_boxes: [conv_h*conv_w*num_priors, 4]
         """
 
-        preds = {'priors': [], 'prior_levels': []}
+        preds = dict()
         if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
             preds['mask_coeff'] = []
         if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
@@ -169,7 +182,6 @@ class PredictionModule_3D(nn.Module):
             if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
                 preds['conf_feat'] = []
 
-        x_list, bbox_x_list, conf_x_list, track_x_list = [], [], [], []
         for idx in range(len(fpn_outs)):
             if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
                 _, c, h, w = fpn_outs[idx].size()
@@ -205,31 +217,23 @@ class PredictionModule_3D(nn.Module):
                 x = fpn_outs[idx]
             # flip temporal information
             # x = 0.5*x + 0.5*torch.flip(x, [2])
-            x_list += [x]
-
-            bbox_x_list.append(self.bbox_extra(x))
-            if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
-                conf_x_list.append(self.conf_extra(x))
-            # Tracking
-            if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-                track_x_list.append(self.track_extra(x))
 
             # generate anchors
-            bs, _, T, conv_h, conv_w = x.size()
-            priors, prior_levels = self.make_priors(idx, conv_h, conv_w, x.device)
-            preds['priors'] += [priors]
-            preds['prior_levels'] += [prior_levels]
+            # bs, _, T, conv_h, conv_w = x.size()
+            # priors, prior_levels = self.make_priors(idx, conv_h, conv_w, x.device)
+            # preds['priors'] += [priors]
+            # preds['prior_levels'] += [prior_levels]
 
-        for idx in range(len(fpn_outs)):
-            bs, _, T, conv_h, conv_w = x_list[idx].size()
+            bs, _, T, conv_h, conv_w = x.size()
             n_proposals = conv_h*conv_w*self.num_priors
-            bbox_x_4D = bbox_x_list[idx].permute(0, 2, 1, 3, 4).contiguous().reshape(bs*T, -1, conv_h, conv_w)
+            bbox_x = self.bbox_extra(x)
+            bbox_x_4D = bbox_x.permute(0, 2, 1, 3, 4).contiguous().reshape(bs*T, -1, conv_h, conv_w)
             if self.cfg.MODEL.PREDICTION_HEADS.USE_SPATIO_DCN:
                 bbox = self.bbox_spatio_layer(bbox_x_4D, self.bbox_spatio_offset(bbox_x_4D))
                 bbox = bbox.reshape(bs, T, -1, conv_h, conv_w).permute(0, 2, 1, 3, 4).contiguous()
                 bbox = self.bbox_layer(bbox)
             else:
-                bbox = self.bbox_layer(bbox_x_list[idx])
+                bbox = self.bbox_layer(bbox_x)
             bbox_4D = bbox.permute(0, 2, 1, 3, 4).contiguous().reshape(bs*bbox.size(2), -1, conv_h, conv_w).detach()
             T_out = bbox.size(2)
             preds['loc'] += [bbox.permute(0, 2, 3, 4, 1).contiguous().reshape(bs*T_out, n_proposals, -1)]
@@ -241,15 +245,16 @@ class PredictionModule_3D(nn.Module):
                     centerness = centerness.reshape(bs, T, -1, conv_h, conv_w).permute(0, 2, 1, 3, 4).contiguous()
                     centerness = self.centerness_layer(centerness).permute(0, 2, 3, 4, 1).contiguous()
                 else:
-                    centerness = self.centerness_layer(bbox_x_list[idx]).permute(0, 2, 3, 4, 1).contiguous()
+                    centerness = self.centerness_layer(bbox_x).permute(0, 2, 3, 4, 1).contiguous()
                 preds['centerness'] += [torch.sigmoid(centerness.reshape(bs*T_out, n_proposals, -1))]
 
             # Classification
             if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
-                conf = self.conf_layer(conf_x_list[idx]).permute(0, 2, 3, 4, 1).contiguous()
+                conf_x = self.conf_extra(x)
+                conf = self.conf_layer(conf_x).permute(0, 2, 3, 4, 1).contiguous()
                 preds['conf'] += [conf.reshape(bs*T_out, n_proposals, -1)]
                 if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
-                    conf_feature = self.conf_feature_layer(conf_x_list[idx]).permute(0, 2, 3, 4, 1).contiguous()
+                    conf_feature = self.conf_feature_layer(conf_x).permute(0, 2, 3, 4, 1).contiguous()
                     preds['conf_feat'] += [conf_feature.reshape(bs*T_out, n_proposals, -1)]
                 # display_pixle_similarity(conf, bbox_x, img_meta[0], idx=idx)
 
@@ -260,13 +265,14 @@ class PredictionModule_3D(nn.Module):
                     mask = mask.reshape(bs, T, -1, conv_h, conv_w).permute(0, 2, 1, 3, 4).contiguous()
                     mask = self.mask_layer(mask).permute(0, 2, 3, 4, 1).contiguous()
                 else:
-                    mask = self.mask_layer(bbox_x_list[idx]).permute(0, 2, 3, 4, 1).contiguous()
+                    mask = self.mask_layer(bbox_x).permute(0, 2, 3, 4, 1).contiguous()
                 # Activation function is Tanh
                 preds['mask_coeff'] += [mask.tanh().reshape(bs*T_out, n_proposals, -1)]
 
             # Tracking
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-                track = self.track_layer(track_x_list[idx]).permute(0, 2, 3, 4, 1).contiguous()
+                track_x = self.track_extra(x)
+                track = self.track_layer(track_x).permute(0, 2, 3, 4, 1).contiguous()
                 preds['track'] += [F.normalize(track.reshape(bs*T_out, -1, self.track_dim), dim=-1)]
 
             # Visualization
@@ -287,33 +293,39 @@ class PredictionModule_3D(nn.Module):
 
         for k, v in preds.items():
             preds[k] = torch.cat(v, 1)
+
+        preds['priors'] = self.priors_list.to(x.device).detach()
+        preds['prior_levels'] = self.prior_levels_list.to(x.device).detach()
         return preds
 
-    def make_priors(self, idx, conv_h, conv_w, device):
+    def make_priors(self, idx, conv_h, conv_w, device=None):
         """ Note that priors are [x,y,width,height] where (x,y) is the center of the box. """
-        with timer.env('makepriors'):
-            prior_data = []
-            prior_levels = []
-            # Iteration order is important (it has to sync up with the convout)
-            for j, i in product(range(conv_h), range(conv_w)):
-                # +0.5 because priors are in center-size notation
-                x = (i + 0.5) / conv_w
-                y = (j + 0.5) / conv_h
+        # with timer.env('make priors'):
+        prior_data = []
+        prior_levels = []
+        # Iteration order is important (it has to sync up with the convout)
+        for j, i in product(range(conv_h), range(conv_w)):
+            # +0.5 because priors are in center-size notation
+            x = (i + 0.5) / conv_w
+            y = (j + 0.5) / conv_h
 
-                for scale in self.pred_scales[idx]:
-                    for ar in self.pred_aspect_ratios[idx]:
-                        # [1, 0.5, 2]
-                        ar = sqrt(ar)
-                        r = scale / self.pred_scales[idx][0] * 3
-                        w = r * ar / conv_w
-                        h = r / ar / conv_h
+            for scale in self.pred_scales[idx]:
+                for ar in self.pred_aspect_ratios[idx]:
+                    # [1, 0.5, 2]
+                    ar = sqrt(ar)
+                    r = scale / self.pred_scales[idx][0] * 3
+                    w = r * ar / conv_w
+                    h = r / ar / conv_h
 
-                        prior_data += [x, y, w, h]
-                        prior_levels += [idx]
+                    prior_data += [x, y, w, h]
+                    prior_levels += [idx]
 
+        if device is None:
+            priors = torch.Tensor(prior_data).reshape(1, -1, 4)
+            prior_levels = torch.Tensor(prior_levels).reshape(1, -1)
+        else:
             priors = torch.Tensor(prior_data, device=device).reshape(1, -1, 4).detach()
             priors.requires_grad = False
-
             prior_levels = torch.Tensor(prior_levels, device=device).reshape(1, -1).detach()
             prior_levels.requires_grad = False
 

@@ -241,6 +241,8 @@ def train(cfg):
                     log.log('train', loss=loss_info, epoch=epoch, iter=iteration,
                             lr=round(cur_lr, 10), elapsed=elapsed)
 
+                last_time = cur_time
+                # Save models and run valid set
                 if iteration % cfg.SOLVER.SAVE_INTERVAL == 0 and iteration > 0 and args.local_rank == 0:
                     if args.keep_latest:
                         latest = SavePath.get_latest(cfg.OUTPUT_DIR, cfg.DATASETS.TYPE)
@@ -273,7 +275,6 @@ def train(cfg):
                                 compute_validation_map(net, valid_dataset)
 
                 iteration += 1
-                last_time = cur_time
 
     except KeyboardInterrupt:
         print('Stopping early. Saving network...')
