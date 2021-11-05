@@ -43,9 +43,9 @@ class MultiBoxLoss(nn.Module):
         self.neg_threshold = neg_threshold
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
         self.use_cir_boxes = self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES
-        self.expand_proposals_clip = cfg.STR.ST_CONSISTENCY.EXPAND_PROPOSALS_CLIP
-        self.PHL_kernel_size, self.PHL_padding = cfg.Cubic_VIS.PHL_KERNEL_SIZE[0], cfg.Cubic_VIS.PHL_PADDING[0]
-        self.PHL_stride = 1 if self.expand_proposals_clip else cfg.Cubic_VIS.PHL_STRIDE[0]
+        self.frame2clip_expand_proposals = cfg.CiCo.FRAME2CLIP_EXPAND_PROPOSALS
+        self.PHL_kernel_size, self.PHL_padding = cfg.CiCo.CPH_LAYER_KERNEL_SIZE[0], cfg.CiCo.CPH_LAYER_PADDING[0]
+        self.PHL_stride = 1 if self.frame2clip_expand_proposals else cfg.CiCo.CPH_LAYER_STRIDE[0]
 
         self.T2SLoss = T2SLoss(cfg, net)
         self.LincombMaskLoss = LincombMaskLoss(cfg, net)
@@ -90,6 +90,24 @@ class MultiBoxLoss(nn.Module):
                 gt_ids = sum([[ids]*self.cfg.SOLVER.NUM_CLIPS for ids in gt_ids], [])
                 num_crowds = sum([[num]*self.cfg.SOLVER.NUM_CLIPS for num in num_crowds], [])
 
+            # A instance may disappear in some frames of the clip due to occlusion or fast object/camera motion.
+            # Thus we have to distinguish whether an instance exists in a frame, called pos_frames.
+            # If the anchor is matched ground-truth bounding boxes at least one frame, called pos_clip.
+            # When clip_frames=1, pos_clip (clip-level) is same as pos_frames (frame-level)
+            # if the object disappears in the clip due to occlusion or other cases, the box is supplemented
+            # from the most adjacent frames
+            if self.clip_frames > 1:
+                for idx in range(len(gt_boxes)):
+                    missed_flag = ((gt_boxes[idx][:, :, 2:] - gt_boxes[idx][:, :, :2]) <= 0).sum(dim=-1) > 1
+                    exist_missed_objects = missed_flag.sum(dim=-1) > 0
+                    if exist_missed_objects.sum() > 0:
+                        for kdx, missed in enumerate(exist_missed_objects):
+                            if missed and (~missed_flag[kdx]).sum() > 0:
+                                missed_cdx = torch.arange(self.clip_frames)[missed_flag[kdx, :] == 1]
+                                occur_cdx = torch.arange(self.clip_frames)[missed_flag[kdx, :] == 0]
+                                supp_cdx = torch.abs(missed_cdx.reshape(-1, 1) - occur_cdx.reshape(1, -1)).min(dim=-1)[1]
+                                gt_boxes[idx][kdx, missed_cdx] = gt_boxes[idx][kdx, occur_cdx[supp_cdx]]
+
         losses, ids_t = self.multibox_loss(predictions, gt_boxes, gt_labels, gt_masks, gt_ids, num_crowds)
         for k, v in losses.items():
             if torch.isinf(v) or torch.isnan(v):
@@ -102,7 +120,7 @@ class MultiBoxLoss(nn.Module):
         batch_size = len(gt_boxes)
         loc_data = predictions['loc']
         num_bsT, num_priors, box_dim = loc_data.size()
-        T_out = num_bsT//batch_size
+        T_out = num_bsT // batch_size
         centerness_data = predictions['centerness'] if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS else None
         track_data = predictions['track'] if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK else None
         priors, prior_levels = predictions['priors'], predictions['prior_levels']
@@ -133,13 +151,18 @@ class MultiBoxLoss(nn.Module):
             if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
                 for jdx in range(T_out):
                     kdx = idx*T_out + jdx
-                    if self.expand_proposals_clip:
+
+                    # To define the positive and negative matcher
+                    if self.frame2clip_expand_proposals:
                         ind_range = [jdx]
+                    elif self.cfg.CiCo.MATCHER_CENTER:
+                        ind_range = range(self.clip_frames//2-1, self.clip_frames//2+1) if self.clip_frames % 2 == 0 \
+                            else range(self.clip_frames//2-1, self.clip_frames//2+2)
                     else:
                         ind_range = range(jdx*self.PHL_stride, jdx*self.PHL_stride+self.PHL_kernel_size)
-                    gt_boxes[idx] = match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[idx], loc_data[kdx],
-                                               loc_t, conf_t, idx_t, ids_t, kdx, jdx, self.pos_threshold,
-                                               self.neg_threshold, use_cir_boxes=self.use_cir_boxes, ind_range=ind_range)
+                    match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[idx], loc_data[kdx],
+                               loc_t, conf_t, idx_t, ids_t, kdx, jdx, self.pos_threshold,
+                               self.neg_threshold, use_cir_boxes=self.use_cir_boxes, ind_range=ind_range)
 
             else:
                 gt_ids_cur = gt_ids[idx] if gt_ids is not None else None

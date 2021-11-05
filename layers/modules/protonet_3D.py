@@ -26,18 +26,9 @@ class ProtoNet3D(nn.Module):
                                                   include_bn=True, include_last_relu=True)
         # the last two Conv layers for predicting prototypes
         self.mask_dim = cfg.MODEL.MASK_HEADS.MASK_DIM
-        if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_ON_PROTONET and cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS:
-            self.proto_conv = nn.Sequential(*[
-                nn.Conv3d(in_channels, in_channels, kernel_size=3, padding=1),
-                nn.BatchNorm3d(in_channels),
-                nn.ReLU(inplace=True),
-                nn.Conv3d(in_channels, self.mask_dim, kernel_size=3, padding=(0, 1, 1)),
-            ])
-
-        else:
-            proto_arch = [(proto_channels, 3, 1), (self.mask_dim, 1, 0)]
-            self.proto_conv, _ = make_net(proto_channels, proto_arch, use_3D=self.use_3D, include_bn=True,
-                                          include_last_relu=False)
+        proto_arch = [(proto_channels, 3, 1), (self.mask_dim, 1, 0)]
+        self.proto_conv, _ = make_net(proto_channels, proto_arch, use_3D=self.use_3D, include_bn=True,
+                                      include_last_relu=False)
         if cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
             self.DynamicMaskHead = DynamicMaskHead()
 

@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 from layers.utils import jaccard, mask_iou, crop, generate_mask, point_form, center_size, decode, circum_boxes
-from utils import timer
 
 
 class Detect(object):
@@ -26,15 +25,12 @@ class Detect(object):
         if self.nms_thresh <= 0:
             raise ValueError('nms_threshold must be non negative.')
         self.conf_thresh = cfg.TEST.NMS_CONF_THRESH
-        self.expand_proposals_clip = cfg.STR.ST_CONSISTENCY.EXPAND_PROPOSALS_CLIP
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
 
         if display or cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
             self.use_cross_class_nms = True
         else:
             self.use_cross_class_nms = False
-        self.use_cross_class_nms = False
-        self.use_fast_nms = True
         self.cubic_mode = cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE
         self.img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
         if cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
@@ -99,16 +95,10 @@ class Detect(object):
                             _, pred_masks = crop(det_masks_soft.permute(1, 2, 0).contiguous(), boxes_cir)
                             candidate_cur['mask'] = pred_masks.permute(2, 0, 1).contiguous()
                         else:
-                            if self.cfg.MODEL.MASK_HEADS.PROTO_CROP:
-                                if self.cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS:
-                                    boxes_crop = boxes_cir.unsqueeze(1).repeat(1, dim_boxes//4, 1).reshape(-1, 4)
-                                else:
-                                    boxes_crop = boxes_cir
-                            else:
-                                boxes_crop = None
+                            boxes_crop = boxes_cir if self.cfg.MODEL.MASK_HEADS.PROTO_CROP else None
                             pred_masks = generate_mask(proto_data, masks_coeff.reshape(-1, proto_data.size(-1)),
                                                        boxes_crop, proto_coeff_occlu=self.mask_coeff_occlu)
-                            pred_masks = pred_masks.reshape(-1, dim_boxes//4, pred_masks.size(-2), pred_masks.size(-1))
+                            # pred_masks = pred_masks.reshape(-1, dim_boxes//4, pred_masks.size(-2), pred_masks.size(-1))
                             if self.mask_coeff_occlu:
                                 candidate_cur['mask'] = pred_masks[:, 0] - pred_masks[:, 1]
                             else:
@@ -167,21 +157,23 @@ class Detect(object):
         n_objs = len(idx)
 
         # Compute the pairwise IoU between the boxes
-        boxes_idx = candidate['box'][idx].reshape(n_objs, -1, 4).permute(1,0,2).contiguous()
+        boxes_idx = candidate['box'][idx].reshape(n_objs, -1, 4).permute(1, 0, 2).contiguous()
         box_iou = jaccard(boxes_idx, boxes_idx).mean(0)
         boxes_cir_idx = candidate['box_cir'][idx]
         box_cir_iou = jaccard(boxes_cir_idx, boxes_cir_idx)
         iou = 0.5*box_iou + 0.5*box_cir_iou
 
         if self.train_masks and self.nms_with_miou:
-            masks_idx = candidate['mask'][idx].gt(0.5).float().permute(1,0,2,3).contiguous()
+            masks_idx = candidate['mask'][idx].gt(0.5).float().permute(1, 0, 2, 3).contiguous()
             flag = masks_idx.sum(dim=[-1, -2]) > 0
-            m_iou = mask_iou(masks_idx, masks_idx)
+            # In case of out of memory when the length of the clip T >= 5
+            m_iou = torch.stack([mask_iou(masks_idx[i], masks_idx[i]) for i in range(masks_idx.size(0))], dim=0)
+            # m_iou = mask_iou(masks_idx, masks_idx)
             m_iou = m_iou.sum(dim=0) / flag.sum(dim=0)
             # Calculate similarity of mask coefficients
             masks_coeff_idx = F.normalize(candidate['mask_coeff'][idx], dim=-1)
             sim = masks_coeff_idx @ masks_coeff_idx.t()
-            iou = 0.4*iou + 0.4*m_iou + 0.2*sim if self.cubic_mode else 0.5*iou + 0.5*m_iou
+            iou = 0.45*iou + 0.45*m_iou + 0.1*sim if self.cubic_mode else 0.5*iou + 0.5*m_iou
             # iou = 0.8*m_iou + 0.2*sim if self.cubic_mode else m_iou
 
         # Zero out the lower triangle of the cosine similarity matrix and diagonal
@@ -212,8 +204,9 @@ class Detect(object):
         if not self.use_focal_loss:
             scores = scores[1:]
         rescores = candidate['centerness'].mean(-1).reshape(1, -1) * scores if 'centerness' in candidate.keys() else scores
-        _, idx = rescores.sort(1, descending=True)  # [num_classes, num_dets]
+        rescores, idx = rescores.sort(1, descending=True)  # [num_classes, num_dets]
         idx = idx[:, :top_k].contiguous()
+        rescores = rescores[:, :top_k].contiguous()
 
         num_classes, n_objs = idx.size()
         # TODO: double check repeated bboxes, mask_coeff, track_data...
@@ -249,13 +242,12 @@ class Detect(object):
         # have such a minimal amount of computation per detection (matrix mulitplication only),
         # this increase doesn't affect us much (+0.2 mAP for 34 -> 33 fps), so we leave it out.
         # However, when you implement this in your method, you should do this second threshold.
-        scores = torch.stack([scores[c][idx[c]] for c in range(idx.size(0))], dim=0)
         if second_threshold:
-            keep *= (scores > self.conf_thresh)
+            keep *= (rescores > self.conf_thresh)
 
         # Assign each kept detection to its corresponding class
         classes = torch.arange(num_classes, device=scores.device)[:, None].expand_as(keep)[keep]
-        scores = scores[keep]
+        scores = torch.stack([scores[c][idx[c]] for c in range(idx.size(0))], dim=0)[keep]
 
         out_after_NMS = {'class': classes+1, 'score': scores}
         for k, v in candidate.items():

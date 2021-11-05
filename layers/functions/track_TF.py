@@ -31,7 +31,7 @@ class Track_TF(object):
         if self.track_by_Gaussian:
             self.img_level_keys += 'track'
         self.video_mask_coeffs = None
-        self.use_cubic_TF = False if self.cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS else True
+        self.use_cubic_TF = True
 
         self.CandidateShift = CandidateShift(net, cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE,
                                              train_maskshift=cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT,

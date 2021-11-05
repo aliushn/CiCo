@@ -289,19 +289,15 @@ _C.STMASK.T2S_HEADS.FORWARD_FLOW = True
 _C.STMASK.T2S_HEADS.BACKWARD_FLOW = False
 
 # ---------------------------------------------------------------------------- #
-# Short-term temporal representation (CVPR2022) Options
+# clip-in clip-out (CVPR2022) Options
 # ---------------------------------------------------------------------------- #
-_C.STR = CN()
-_C.STR.ST_CONSISTENCY = CN()
-_C.STR.ST_CONSISTENCY.EXPAND_PROPOSALS_CLIP = False
-_C.STR.ST_CONSISTENCY.CPH_WITH_TOWER133 = False
-_C.STR.ST_CONSISTENCY.MASK_WITH_COEFF = True
-_C.STR.ST_CONSISTENCY.MASK_WITH_PROTOS = False
-
-_C.Cubic_VIS = CN()
-_C.Cubic_VIS.PHL_KERNEL_SIZE = (3, 3, 3)
-_C.Cubic_VIS.PHL_PADDING = (0, 1, 1)
-_C.Cubic_VIS.PHL_STRIDE = (1, 1, 1)
+_C.CiCo = CN()
+_C.CiCo.CPH_TOWER133 = False
+_C.CiCo.CPH_LAYER_KERNEL_SIZE = (3, 3, 3)
+_C.CiCo.CPH_LAYER_PADDING = (0, 1, 1)
+_C.CiCo.CPH_LAYER_STRIDE = (1, 1, 1)
+_C.CiCo.FRAME2CLIP_EXPAND_PROPOSALS = False
+_C.CiCo.MATCHER_CENTER = True
 
 # ---------------------------------------------------------------------------- #
 # ResNe[X]t options (ResNets = {ResNet, ResNeXt}

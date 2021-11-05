@@ -8,15 +8,12 @@ MODEL = dict(
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
         CUBIC_3D_MODE=True,
-        CUBIC_MODE_ON_PROTONET=True,
+        CUBIC_MODE_ON_PROTONET=False,
         CUBIC_CORRELATION_MODE=False,
         CIRCUMSCRIBED_BOXES=False,
         # INITIALIZATION=reduced or inflated
         CUBIC_MODE_WITH_INITIALIZATION='inflated')
 )
-
-CiCo = dict(
-    MATCHER_CENTER=True)
 
 DATASETS = dict(
     TYPE='vis',
@@ -37,4 +34,4 @@ TEST = dict(
     NMS_CONF_THRESH=0.1,)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'r50_base_YTVIS2019_cubic_3D_c3_indbox_cen3_1X'
+NAME = 'r50_base_YTVIS2019_cubic_3D_c3_indbox_proto2d_wol1_1X'

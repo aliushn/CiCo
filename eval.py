@@ -521,13 +521,6 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
         for cdx in range(len_clips):
             timer.reset()
             progress_clip = (cdx + 1) / len_clips * 100
-            progress_bar_clip.set_val(cdx+1)
-            if vdx > 0 or cdx > 0:
-                avg_fps = 1. / (frame_times.get_avg() / clip_frames)
-            else:
-                avg_fps = 0
-            print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)  %5.2f fps   '
-              % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip, avg_fps), end='')
 
             with timer.env('Load Data'):
                 left = cdx * n_newly_frames
@@ -557,6 +550,13 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
             preds_clip = net(images, img_meta=[images_meta])
             pred_clip = preds_clip[0]
             frame_times.add(timer.total_time())
+            progress_bar_clip.set_val(cdx+1)
+            # if vdx > 0 or cdx > 0:
+            #     avg_fps = 1. / (frame_times.get_avg() / clip_frames)
+            # else:
+            avg_fps = 0
+            print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)  %5.2f fps   '
+                  % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip, avg_fps), end='')
 
             # Here store all classification features for later inter-clips classification
             if TRAIN_INTERCLIPS_CLASS and pred_clip['box_ids'].nelement() > 0:
@@ -690,7 +690,7 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
                     assert len(vid_obj['segmentations']) == len_vid
                     json_results.append(vid_obj)
 
-    timer.print_stats()
+    # timer.print_stats()
     return json_results
 
 

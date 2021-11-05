@@ -15,10 +15,8 @@ MODEL = dict(
         CUBIC_MODE_WITH_INITIALIZATION='inflated')
 )
 
-STR = dict(
-    ST_CONSISTENCY=dict(
-        EXPAND_PROPOSALS_CLIP=True)
-)
+CiCo = dict(
+    FRAME2CLIP_EXPAND_PROPOSALS=True)
 
 DATASETS = dict(
     TYPE='vis',

@@ -8,7 +8,6 @@ class LincombMaskLoss(object):
         super(LincombMaskLoss, self).__init__()
         self.cfg = cfg
         self.net = net
-        self.expand_proposals_clip = cfg.STR.ST_CONSISTENCY.EXPAND_PROPOSALS_CLIP
     
     def __call__(self, pos, idx_t, pred_boxes_pos, boxes_t_pos, mask_coeff, prior_levels, proto_data,
                  masks_gt, boxes_gt, obj_ids_gt):
@@ -32,8 +31,6 @@ class LincombMaskLoss(object):
         loss, loss_m_occluded = torch.tensor(0., device=idx_t.device), torch.tensor(0., device=idx_t.device)
         sparse_loss = torch.tensor(0., device=idx_t.device)
         loss_coeff_div = torch.tensor(0., device=idx_t.device)
-        if self.cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS:
-            coeff_temcons_loss = torch.tensor(0., device=idx_t.device)
         dim_mask = proto_data.size(-1)
         T_out = mask_coeff.size(0) // bs
 
@@ -87,13 +84,11 @@ class LincombMaskLoss(object):
                         # Design weights for background and objects pixels
                         masks_gt_weights = masks_gt_cur.new_ones(N_gt, n_frames, H_gt, W_gt) * (1./H_gt/W_gt)
                         tar_obj_idx = crop(masks_gt_cur.new_ones(H_gt, W_gt, N_gt), boxes_gt_cir_cur).permute(2,0,1).contiguous().unsqueeze(1)
-                        masks_gt_weights += 1./N_gt/torch.sum(tar_obj_idx, dim=(-2,-1), keepdim=True) * tar_obj_idx
+                        masks_gt_weights += 1./N_gt/torch.sum(tar_obj_idx, dim=(-2, -1), keepdim=True) * tar_obj_idx
                         masks_gt_weights = masks_gt_weights[idx_t_cur]
 
                 # Mask coefficients sparse loss
                 sparse_loss += self.coeff_sparse_loss(mask_coeff_cur)
-                if self.cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS:
-                    coeff_temcons_loss += self.coeff_tempcons_loss(mask_coeff_cur.reshape(-1, n_frames, dim_mask))
 
                 # Mask coefficients diversity loss
                 if self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_LOSS:
@@ -102,10 +97,7 @@ class LincombMaskLoss(object):
 
                 # Mask combinated linearly by mask coefficients and prototypes
                 if not self.cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
-                    if self.cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS:
-                        boxes_crop = boxes_cur.unsqueeze(1).repeat(1, n_frames, 1).reshape(-1, 4)
-                    else:
-                        boxes_crop = boxes_cur
+                    boxes_crop = boxes_cur
                     pred_masks = generate_mask(proto_data[i], mask_coeff_cur, boxes_crop,
                                                proto_coeff_occlu=self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION)
                     pred_masks = pred_masks.reshape(-1, n_frames, pred_masks.size(-2), pred_masks.size(-1))
@@ -159,11 +151,6 @@ class LincombMaskLoss(object):
         # losses['M_l1'] = sparse_loss / max(bs, 1)
         if self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_LOSS:
             losses['M_coeff'] = loss_coeff_div / max(bs, 1)
-        # if self.cfg.STR.ST_CONSISTENCY.MASK_WITH_PROTOS:
-        #     losses['M_coeff_tc'] = coeff_temcons_loss / max(bs, 1)
-        # Prototypes divergence loss
-        if self.cfg.MODEL.MASK_HEADS.PROTO_DIVERGENCE_LOSS:
-            losses['M_proto'] = self.proto_divergence_loss(proto_data, masks_gt, boxes_gt, threshold=0.25)
     
         return losses
 
