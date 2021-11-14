@@ -1,11 +1,11 @@
-# OSTMask
-
-The code is implmented for our paper submitted in CVPR2021:
+# CiCo
+An anonymous code repository for our paper submitted in CVPR2022: 
+- Clip-in Clip-out: An Alignment-free One-stage Video Instance Segmentation Approach 
  
 # Installation
  - Clone this repository and enter it:
    ```Shell
-   git clone https://github.com/MinghanLi/STMask.git
+   git clone https://MinghanLi/CiCo.git
    cd CiCo
    ```
  - Set up the environment using one of the following methods:
@@ -37,41 +37,21 @@ The code is implmented for our paper submitted in CVPR2021:
       # To install library to Python site-packages 
       python setup.py build_ext install
       ```
+    
+# Run
 
- - Install spatial-correlation-sampler 
-      ```Shell
-      pip install spatial-correlation-sampler
-      ```
- 
- - Complie DCNv2 code (see [Installation](https://github.com/dbolya/yolact#installation))
-   - Download code for deformable convolutional layers from [here](https://github.com/CharlesShang/DCNv2/tree/pytorch_1.0)
-     ```Shell
-     git clone https://github.com/CharlesShang/DCNv2.git
-     cd DCNv2
-     python setup.py build develop
-     ```
+## Dataset
+If you'd like to train or test CiCo, please download the datasets from the official web: [YTVIS2019](https://youtube-vos.org/dataset/), [YTVIS2021](https://youtube-vos.org/dataset/vis/) and [OVIS](http://songbai.site/ovis/).
 
-# Dataset
- - If you'd like to train STMask, please download the datasets from the official web: [YTVIS2019](https://youtube-vos.org/dataset/), [YTVIS2021](https://youtube-vos.org/dataset/vis/) and [OVIS](http://songbai.site/ovis/).
- 
-# Inference
+## Inference
 ```Shell
-# Output a YTVOSEval json to submit to the website.
-# This command will create './weights/results.json' for instance segmentation.
-python eval.py --config=CiCo_r50_f3_multiple.py --trained_model=weights/STMask_plus_base_ada.pth --mask_det_file=weights/results.json
+# Display instance masks
+python eval.py --config=cico_r50_f3_multiple_yt19.py --trained_model=weights/YTVIS2019/cico_r50_f3_multiple_yt19_e12.pth --display
 ```
 
-# Training
-By default, we train on YouTubeVOS2019 dataset. Make sure to download the entire dataset using the commands above.
- - To train, grab an COCO-pretrained model and put it in `./weights`.
-   - [Yolcat++]: For Resnet-50/-101, download `yolact_plus_base_54_80000.pth` or `yolact_plus_resnet_54_80000.pth` from Yolact++ [here](https://github.com/dbolya/yolact).
-   - [Yolcat++ & FC]: Alternatively, you can use those Yolact++ with FC models on Table. 2 for training, which can obtain a relative higher performance than that of Yolact++ models.
-
-
-- Run one of the training commands below.
-   - Note that you can press ctrl+c while training and it will save an `*_interrupt.pth` file at the current iteration.
-   - All weights are saved in the `./weights` directory by default with the file name `<config>_<epoch>_<iter>.pth`.
+## Training
+Make sure to download the entire dataset using the commands above. To train, grab an COCO-pretrained model and put it in `./weights`.
 ```Shell
 # Trains STMask_plus_base_config with a batch_size of 8.
-CUDA_VISIBLE_DEVICES=0,1 python train.py --config=STMask_plus_base_config --batch_size=8 --lr=1e-4 --save_folder=weights/weights_r101
+CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py --config=configs/CiCo/cico_r50_f3_multiple_yt19.py
 ```

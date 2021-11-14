@@ -173,10 +173,7 @@ class CoreNet(nn.Module):
                         if state_dict[key].dim() == 1:
                             if model_dict[key].size(0) % state_dict[key].size(0) == 0:
                                 scale = model_dict[key].size(0)//state_dict[key].size(0)
-                                if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
-                                    model_dict[key] = state_dict[key].repeat(scale).to(device)
-                                else:
-                                    model_dict[key][self.flag_corr_channels] = state_dict[key].repeat(scale).to(device)
+                                model_dict[key] = state_dict[key].repeat(scale).to(device)
                             else:
                                 print('Size is different in pre-trained model and current model:', key)
                         elif state_dict[key].dim() == 4 and model_dict[key].dim() == 5:
