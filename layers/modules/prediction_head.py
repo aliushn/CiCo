@@ -191,31 +191,30 @@ class PredictionModule(nn.Module):
 
     def make_priors(self, idx, conv_h, conv_w, device):
         """ Note that priors are [x,y,width,height] where (x,y) is the center of the box. """
-        with timer.env('makepriors'):
-            prior_data = []
-            prior_levels = []
-            # Iteration order is important (it has to sync up with the convout)
-            for j, i in product(range(conv_h), range(conv_w)):
-                # +0.5 because priors are in center-size notation
-                x = (i + 0.5) / conv_w
-                y = (j + 0.5) / conv_h
+        prior_data = []
+        prior_levels = []
+        # Iteration order is important (it has to sync up with the convout)
+        for j, i in product(range(conv_h), range(conv_w)):
+            # +0.5 because priors are in center-size notation
+            x = (i + 0.5) / conv_w
+            y = (j + 0.5) / conv_h
 
-                for scale in self.pred_scales[idx]:
-                    for ar in self.pred_aspect_ratios[idx]:
-                        # [1, 1/2, 2]
-                        ar = sqrt(ar)
-                        r = scale / self.pred_scales[idx][0] * 3
-                        w = r * ar / conv_w
-                        h = r / ar / conv_h
+            for scale in self.pred_scales[idx]:
+                for ar in self.pred_aspect_ratios[idx]:
+                    # [1, 1/2, 2]
+                    ar = sqrt(ar)
+                    r = scale / self.pred_scales[idx][0] * 3
+                    w = r * ar / conv_w
+                    h = r / ar / conv_h
 
-                        prior_data += [x, y, w, h]
-                        prior_levels += [idx]
+                    prior_data += [x, y, w, h]
+                    prior_levels += [idx]
 
-            priors = torch.Tensor(prior_data, device=device).reshape(1, -1, 4).detach()
-            priors.requires_grad = False
+        priors = torch.Tensor(prior_data, device=device).reshape(1, -1, 4).detach()
+        priors.requires_grad = False
 
-            prior_levels = torch.Tensor(prior_levels, device=device).reshape(1, -1).detach()
-            prior_levels.requires_grad = False
+        prior_levels = torch.Tensor(prior_levels, device=device).reshape(1, -1).detach()
+        prior_levels.requires_grad = False
 
         return priors, prior_levels
 

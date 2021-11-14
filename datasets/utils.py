@@ -155,11 +155,11 @@ def get_dataset(data_type, data_name, input, num_clip_frame, num_clips=1, infere
 
     dataset_config = get_dataset_config(data_name, data_type)
     if not inference:
-        flip, MS_train = True, input.MULTISCALE_TRAIN
+        flip, expand, MS_train = True, True, input.MULTISCALE_TRAIN
         resize_gt, pad_gt = True, True
         min_size, max_size = input.MIN_SIZE_TRAIN, input.MAX_SIZE_TRAIN
     else:
-        flip, MS_train = False, False
+        flip, expand, MS_train = False, False, False
         resize_gt, pad_gt = False, False
         min_size, max_size = input.MIN_SIZE_TEST, input.MAX_SIZE_TEST
 
@@ -184,6 +184,7 @@ def get_dataset(data_type, data_name, input, num_clip_frame, num_clips=1, infere
                                     min_size=min_size,
                                     max_size=max_size,
                                     Flip=flip,
+                                    Expand=expand,
                                     MS_train=MS_train,
                                     backbone_transform=backbone_transform,
                                     resize_gt=resize_gt,

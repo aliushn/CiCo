@@ -16,7 +16,8 @@ from utils.functions import ProgressBar
 
 from collections import defaultdict
 import matplotlib.pyplot as plt
-from layers.utils import undo_image_transformation, center_size, jaccard
+from layers.utils import undo_image_transformation, center_size, jaccard, mask_iou
+from layers.visualization_temporal import get_color
 
 
 def str2bool(v):
@@ -46,7 +47,7 @@ color_cache = defaultdict(lambda: {})
 
 
 def count_temporal_BIoU(cfg):
-    type = 0
+    type = 1
     if type == 0:
         train_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.TRAIN, cfg.INPUT,
                                     cfg.SOLVER.NUM_CLIP_FRAMES, cfg.SOLVER.NUM_CLIPS)
@@ -55,93 +56,106 @@ def count_temporal_BIoU(cfg):
                                       collate_fn=detection_collate_vis,
                                       shuffle=False,
                                       pin_memory=True)
-        biou_objs = [[], [], []]
+        biou_objs = [[], [], [], []]
         for i, data_batch in enumerate(data_loader):
-            # if i > 20:
-            #     break
-            if i % 1000 == 0:
+            if i > 60000:
+                break
+            if i % 500 == 0:
                 print('processing %6d images' % (i))
             images, gt_bboxes, gt_labels, gt_masks, gt_ids, num_crowds, img_metas = prepare_data_vis(data_batch,
                                                                                                      devices=[torch.cuda.current_device()])
-            boxes = gt_bboxes[0][0]
-            for j in range(boxes.size(0)):
-                CT = boxes.size(1) // 2
-                ccbox = torch.prod(center_size(boxes[j].reshape(-1, 4))[:, 2:], dim=-1)
+            masks = gt_masks[0][0]
+            n_objs, n_T, h, w = masks.size()
+            CT = n_T // 2
+            for j in range(n_objs):
+                ccbox = masks[j].sum(dim=(-1, -2))
                 if ccbox[CT] > 0:
-                    if ccbox[0] > 0 or ccbox[-1] > 0:
-                        biou = 0
-                        if ccbox[0] > 0:
-                            biou = jaccard(boxes[j, CT].reshape(1, 4), boxes[j, 0].reshape(1, 4))
-                        if ccbox[-1] > 0:
-                            biou += jaccard(boxes[j, CT].reshape(1, 4), boxes[j, -1].reshape(1, 4))
-                        biou_objs[2] += [float(biou/((ccbox[0] > 0).float()+(ccbox[-1] > 0).float()))]
-                    if ccbox[1] > 0 or ccbox[-2] > 0:
-                        biou = 0
-                        if ccbox[1] > 0:
-                            biou = jaccard(boxes[j, CT].reshape(1, 4), boxes[j, 1].reshape(1, 4))
-                        if ccbox[-2] > 0:
-                            biou += jaccard(boxes[j, CT].reshape(1, 4), boxes[j, -2].reshape(1, 4))
-                        biou_objs[1] += [float(biou/((ccbox[1] > 0).float()+(ccbox[-2] > 0).float()))]
-
-                    if ccbox[2] > 0 or ccbox[-3] > 0:
-                        biou = 0
-                        if ccbox[2] > 0:
-                            biou = jaccard(boxes[j, CT].reshape(1, 4), boxes[j, 2].reshape(1, 4))
-                        if ccbox[-3] > 0:
-                            biou += jaccard(boxes[j, CT].reshape(1, 4), boxes[j, -3].reshape(1, 4))
-                        biou_objs[0] += [float(biou/((ccbox[2] > 0).float()+(ccbox[-3] > 0).float()))]
+                    for t in range(CT):
+                        if ccbox[t] > 0 or ccbox[-(t+1)] > 0:
+                            biou = 0
+                            if ccbox[t] > 0:
+                                # biou = jaccard(boxes[j, CT].reshape(1, 4), boxes[j, 0].reshape(1, 4))
+                                biou = mask_iou(masks[j, CT].unsqueeze(0), masks[j, t].unsqueeze(0))
+                            if ccbox[-(t+1)] > 0:
+                                # biou += jaccard(boxes[j, CT].reshape(1, 4), boxes[j, -1].reshape(1, 4))
+                                biou += mask_iou(masks[j, CT].unsqueeze(0), masks[j, -(t+1)].unsqueeze(0))
+                            biou_objs[CT-t-1] += [float(biou/((ccbox[t] > 0).float()+(ccbox[-t-1] > 0).float()))]
         print('Finish all images!')
 
-        for i in range(3):
+        for i in range(CT):
             data_numpy = np.asarray(biou_objs[i])
-            print('Save counts as %2d.csv file!'%(2*(i+8)+1))
+            print('Save counts as %2d.csv file!'%(2*(i+1)+1))
             x_df = pd.DataFrame(data_numpy)
-            x_df.to_csv('../datasets/YouTube_VOS2019/temporal_BIoU_c%1d_train.csv'%(2*(i+8)+1))
+            x_df.to_csv('../datasets/YouTube_VOS2019/T_MIoU_c%1d_train.csv'%(2*(i+1)+1))
             print('Plot histogram!')
             bins = np.arange(0, 1.05, 0.05)   # fixed bin size
             plt.hist(data_numpy, bins=bins, alpha=0.5, facecolor='blue')
-            plt.xlabel('BIoU of temporal boxes (bin size = 0.02)')
+            plt.xlabel('T-MIoU (bin size = 0.05)')
             plt.ylabel('count')
-            plt.savefig('../datasets/YouTube_VOS2019/temporal_BIoU_c%1d_train_hist.png'%(2*(i+8)+1))
+            plt.savefig('../datasets/YouTube_VOS2019/T_MIoU_c%1d_train_hist.png'%(2*(i+1)+1))
             plt.clf()
     else:
-        x, y = [], []
-        for i in range(3, 16, 4):
+        x, y, x_m, y_m = [], [], [], []
+        bins = np.arange(0, 1.05, 0.05)   # fixed bin size
+        for i in range(3, 10, 2):
             if i < 10:
                 file = open('../datasets/YouTube_VOS2019/temporal_BIoU_c%1d_train.csv'%(i))
+                file_m = open('../datasets/YouTube_VOS2019/T_MIoU_c%1d_train.csv'%(i))
             else:
                 file = open('../datasets/YouTube_VOS2019/temporal_BIoU_c%2d_train.csv'%(i))
             csvreader = csv.reader(file)
             data_numpy = np.asarray([float(row[1]) for row in csvreader])
             file.close()
-
-            bins = np.arange(0, 1.05, 0.05)   # fixed bin size
             fig, ax = plt.subplots(figsize=(5, 5))
-            ax.hist(data_numpy, bins=bins, alpha=0.5, facecolor='gray')
+            ax.hist(data_numpy, bins=bins, alpha=0.5)
             x1, y1 = [], []
             for rect in ax.patches:
                 x1 += [rect.get_x()+rect.get_width()/2]
                 y1 += [float(rect.get_height())/1000.]
             x += [x1]
-            y += [y1]
+            y += [[temp/sum(y1)*100 for temp in y1]]
             plt.clf()
 
-        line_types = ['-', '--', '-.', ':', '*-', '*--', '*-.',  '*:']
-        fig, ax = plt.subplots(figsize=(6, 5))
+            csvreader_m = csv.reader(file_m)
+            data_numpy_m = np.asarray([float(row[1]) for row in csvreader_m])
+            file.close()
+            fig, ax = plt.subplots(figsize=(5, 5))
+            ax.hist(data_numpy_m, bins=bins, alpha=0.5, facecolor='gray')
+            x1, y1 = [], []
+            for rect in ax.patches:
+                x1 += [rect.get_x()+rect.get_width()/2]
+                y1 += [float(rect.get_height())/1000.]
+            x_m += [x1]
+            y_m += [[temp/sum(y1)*100 for temp in y1]]
+            plt.clf()
+
+        line_types = ['-', '--', '-.', ':.', '*--', '*-.',  '*:']
         print('Plot figures!')
-        for i, interval in enumerate(range(3, 16, 4)):
-            precent = str(round(sum(y[i][15:])/sum(y[i])*100, 1))+'%'
-            if i < 10:
-                ax.plot(x[i], y[i], line_types[i], label=r'$\delta$=%1d, '%(interval//2)+precent, LineWidth=2)
-                # ax.text(x[i][-3], y[i][-2], str(round(sum(y[i][15:])/sum(y[i])*100, 1))+'%')
-            else:
-                ax.plot(x[i], y[i], line_types[i], label=r'$\delta$=%2d, '%(interval//2)+precent, LineWidth=2)
-        legend = ax.legend(loc='upper left', shadow=True, fontsize='medium')
-        # Put a nicer background color on the legend.
-        legend.get_frame().set_facecolor('white')
-        plt.xlabel('Temporal Box IoU')
-        plt.ylabel('Count (K)')
-        plt.savefig('../datasets/YouTube_VOS2019/temporal_BIoU_train_lines.png')
+        fig, axes = plt.subplots(2, 2, sharex=True, sharey=True, figsize=(6.5, 4.7))
+        fig.tight_layout()
+        plt.subplots_adjust(wspace=0, hspace=0)
+        for j, ax_col in enumerate(axes):
+            for k, ax in enumerate(ax_col):
+                i = j*2+k
+                interval = range(3, 10, 2)[i]
+                precent = str(round(sum(y[i][15:]), 1))+'%'
+                precent_m = str(round(sum(y_m[i][15:]), 1))+'%'
+                print(x[i][15], precent, precent_m)
+                if i < 10:
+                    ax.bar(x[i], y[i], width=0.05, Alpha=0.8, label='T-BIoU', color='blue')
+                    ax.bar(x_m[i], y_m[i], width=0.05, Alpha=0.6, label='T-MIoU', color='red')
+                else:
+                    ax.bar(x[i], y[i], width=0.05, label=r'$\delta$=%2d'%(interval//2))
+                ax.legend(loc='upper left', fontsize=11)
+                ax.text(0.015, 13.3, 'PB $_{\geq 0.75}$ = '+precent, fontsize=14)
+                ax.text(0.015, 11.3, 'PM $_{\geq 0.75}$ = '+precent_m, fontsize=14)
+                # ax.set_xlabel(r'$\delta$=%1d'%(interval//2))
+                ax.text(0.55, 18.7, r'$\delta$=%1d'%(interval//2), fontsize=16)
+
+        plt.xlim(0, 1.05)
+        plt.xticks([0, 0.25, 0.5, 0.75, 1])
+        plt.yticks([0, 5, 10, 15, 20])
+        plt.savefig('../datasets/YouTube_VOS2019/TIoU_train_bar4.png')
         print('Finish All!')
 
 
@@ -163,7 +177,12 @@ def plt_masks_from_json(dataset, type='vis', anns=None, mask_alpha=0.45):
                   % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip), end='')
 
             clip_frame_ids = range(cdx*n_frames, min((cdx+1)*n_frames, len_vid))
-            imgs, imgs_meta, targets = dataset.pull_clip_from_video(vid, clip_frame_ids)
+            imgs_list, imgs_meta, targets = dataset.pull_clip_from_video(vid, clip_frame_ids)
+            imgs = torch.stack([torch.from_numpy(img).permute(2, 0, 1) for img in imgs_list])
+            # images = ImageList_from_tensors(imgs, size_divisibility=32, pad_h=pad_h, pad_w=pad_w).cuda()
+            # pad_shape = {'pad_shape': (images.size(-2), images.size(-1), 3)}
+            # for k in range(len(images_meta)):
+            #     images_meta[k].update(pad_shape)
 
             batch_size = imgs.size(0)
             for i in range(batch_size):
@@ -179,109 +198,99 @@ def plt_masks_from_json(dataset, type='vis', anns=None, mask_alpha=0.45):
                             mask_binary = torch.zeros(ori_h, ori_w)
                         else:
                             mask_binary = torch.tensor(mask_util.decode(mask_rle)).float()
+                        if mask_binary.sum() > 2:
+                            gt_masks.append(mask_binary)
+                            gt_labels.append(ann['category_id'])
+                            id += 1
+                            gt_ids.append(id)
 
-                        gt_masks.append(mask_binary)
-                        gt_labels.append(ann['category_id'])
-                        id += 1
-                        gt_ids.append(id)
-                gt_ids_cur = gt_ids
-                gt_masks_cur = torch.stack(gt_masks, dim=0).cuda()
-                labels_cur = gt_labels
+                if len(gt_ids) > 0:
+                    gt_ids_cur = torch.tensor(gt_ids).view(-1)
+                    gt_masks_cur = torch.stack(gt_masks, dim=0).cuda()
+                    labels_cur = gt_labels
+                    iou = mask_iou(gt_masks_cur, gt_masks_cur)
+                    iou = torch.triu(iou, diagonal=1)
+                    iou_max, _ = torch.max(iou, dim=0)
+                    gt_masks_cur = gt_masks_cur[iou_max <= 0.7]
 
-                n_cur = gt_masks_cur.size(0)
-                if args.display_single_mask:
-                    for j in range(n_cur):
-                        colors = get_color(j, gt_ids_cur, on_gpu=imgs.device.index).view(1, 1, 3)
-                        gt_masks_cur_color = gt_masks_cur[j].unsqueeze(-1) * colors * mask_alpha
-
-                        if args.display_ori_shape:
-                            gt_masks_cur_color = gt_masks_cur_color.permute(2, 0, 1).contiguous()
-                            gt_masks_cur_color = F.interpolate(gt_masks_cur_color.unsqueeze(0), (ori_h, ori_w),
-                                                               mode='bilinear',
-                                                               align_corners=False).squeeze(0)
-                            gt_masks_cur_color = gt_masks_cur_color.permute(1, 2, 0).contiguous()
-                        img_numpy = gt_masks_cur_color.cpu().numpy()
-
-                        plt.imshow(img_numpy)
-                        plt.axis('off')
-                        root_dir = os.path.join(args.save_path, 'out', str(vid))
-                        if not os.path.exists(root_dir):
-                            os.makedirs(root_dir)
-                        plt.savefig(''.join([root_dir, '/', str(frame_id), '_', str(j), '_mask.png']))
-                        plt.clf()
-
-                else:
-                    img_numpy = undo_image_transformation(img_cur, imgs_meta[i])
-                    img_cur = torch.Tensor(img_numpy).cuda()  # [360, 640, 3]
-
-                    gt_masks_cur = gt_masks_cur.unsqueeze(-1).repeat(1, 1, 1, 3)
-                    # This is 1 everywhere except for 1-mask_alpha where the mask is
-                    inv_alph_masks = gt_masks_cur.sum(0) * (-mask_alpha) + 1
-                    gt_masks_cur_color = []
-
-                    if args.display_masks:
-                        # Prepare the RGB images for each mask given their color (size [num_dets, h, w, 1])
+                    n_cur = gt_masks_cur.size(0)
+                    if args.display_single_mask:
                         for j in range(n_cur):
                             colors = get_color(j, gt_ids_cur, on_gpu=imgs.device.index).view(1, 1, 3)
-                            gt_masks_cur_color.append(gt_masks_cur[j] * colors * mask_alpha)
-                        gt_masks_cur_color = torch.stack(gt_masks_cur_color, dim=0).sum(0)
+                            gt_masks_cur_color = gt_masks_cur[j].unsqueeze(-1) * colors * mask_alpha
 
-                        img_color = (img_cur * inv_alph_masks + gt_masks_cur_color)
+                            if args.display_ori_shape:
+                                gt_masks_cur_color = gt_masks_cur_color.permute(2, 0, 1).contiguous()
+                                gt_masks_cur_color = F.interpolate(gt_masks_cur_color.unsqueeze(0), (ori_h, ori_w),
+                                                                   mode='bilinear',
+                                                                   align_corners=False).squeeze(0)
+                                gt_masks_cur_color = gt_masks_cur_color.permute(1, 2, 0).contiguous()
+                            img_numpy = gt_masks_cur_color.cpu().numpy()
+
+                            plt.imshow(img_numpy)
+                            plt.axis('off')
+                            root_dir = os.path.join(args.save_path, 'out', str(vid))
+                            if not os.path.exists(root_dir):
+                                os.makedirs(root_dir)
+                            plt.savefig(''.join([root_dir, '/', str(frame_id), '_', str(j), '_mask.png']))
+                            plt.clf()
+
                     else:
-                        img_color = img_cur
-                    img_numpy = img_color.cpu().numpy()
+                        ori_h, ori_w, _ = imgs_meta[i]['ori_shape']
+                        img_h, img_w, _ = imgs_meta[i]['img_shape']
+                        img_numpy = undo_image_transformation(img_cur, ori_h, ori_w, img_h, img_w)
+                        img_cur = torch.Tensor(img_numpy).cuda()   # [360, 640, 3]
 
-                    if args.display_bboxes:
-                        bboxes_cur = gt_bboxes[i]
-                        bboxes_cur = torch.clamp(bboxes_cur, min=1e-3, max=1-1e-3)
-                        bboxes_cur[:, ::2] = bboxes_cur[:, ::2] * ori_w
-                        bboxes_cur[:, 1::2] = bboxes_cur[:, 1::2] * ori_h
-                        for j in reversed(range(n_cur)):
-                            x1, y1, x2, y2 = bboxes_cur[j, :]
-                            color = get_color(j, gt_ids_cur)
-                            color = [c / 255. for c in color]
-                            cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 2)
+                        gt_masks_cur = gt_masks_cur.unsqueeze(-1).repeat(1, 1, 1, 3)
+                        # This is 1 everywhere except for 1-mask_alpha where the mask is
+                        inv_alph_masks = gt_masks_cur.sum(0) * (-mask_alpha) + 1
+                        gt_masks_cur_color = []
 
-                            _class = cfg.classes[labels_cur[j] - 1]
-                            text_str = '%s' % _class
-                            font_face = cv2.FONT_HERSHEY_DUPLEX
-                            font_scale = int(max(ori_h, ori_w) / 360.) * 0.5
-                            font_thickness = 2
-                            text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
+                        if args.display_masks:
+                            # Prepare the RGB images for each mask given their color (size [num_dets, h, w, 1])
+                            for j in range(n_cur):
+                                colors = torch.tensor(list(get_color(j, gt_ids_cur, undo_transform=True))).view(1,1,3).cuda()
+                                gt_masks_cur_color.append(gt_masks_cur[j] * colors * mask_alpha)
+                            gt_masks_cur_color = torch.stack(gt_masks_cur_color, dim=0).sum(0)
 
-                            text_pt = (max(x1, 10), max(y1 - 3, 10))
-                            text_color = [1, 1, 1]
-                            cv2.rectangle(img_numpy, (max(x1, 10), max(y1, 10)), (x1 + text_w, y1 - text_h - 4), color, -1)
-                            cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness,
-                                        cv2.LINE_AA)
+                            img_color = (img_cur * inv_alph_masks * 255 + gt_masks_cur_color)
+                        else:
+                            img_color = img_cur
+                        img_numpy = img_color.byte().cpu().numpy()
 
-                plt.imshow(img_numpy)
-                plt.axis('off')
-                plt.title(str(frame_id))
-                root_dir = os.path.join(args.save_path, 'out', str(vid))
-                if not os.path.exists(root_dir):
-                    os.makedirs(root_dir)
-                plt.savefig(''.join([root_dir, '/', str(frame_id), '.png']))
-                plt.clf()
+                        if args.display_bboxes:
+                            bboxes_cur = gt_bboxes[i]
+                            bboxes_cur = torch.clamp(bboxes_cur, min=1e-3, max=1-1e-3)
+                            bboxes_cur[:, ::2] = bboxes_cur[:, ::2] * ori_w
+                            bboxes_cur[:, 1::2] = bboxes_cur[:, 1::2] * ori_h
+                            for j in reversed(range(n_cur)):
+                                x1, y1, x2, y2 = bboxes_cur[j, :]
+                                color = get_color(j, gt_ids_cur)
+                                color = [c / 255. for c in color]
+                                cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 2)
 
+                                _class = cfg.classes[labels_cur[j] - 1]
+                                text_str = '%s' % _class
+                                font_face = cv2.FONT_HERSHEY_DUPLEX
+                                font_scale = int(max(ori_h, ori_w) / 360.) * 0.5
+                                font_thickness = 2
+                                text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
 
-# Quick and dirty lambda for selecting the color for a particular index
-# Also keeps track of a per-gpu color cache for maximum speed
-def get_color(j, color_type, on_gpu=None, undo_transform=True):
-    global color_cache
-    color_idx = color_type[j] * 5 % len(cfg.COLORS)
+                                text_pt = (max(x1, 10), max(y1 - 3, 10))
+                                text_color = [1, 1, 1]
+                                cv2.rectangle(img_numpy, (max(x1, 10), max(y1, 10)), (x1 + text_w, y1 - text_h - 4), color, -1)
+                                cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness,
+                                            cv2.LINE_AA)
 
-    if on_gpu is not None and color_idx in color_cache[on_gpu]:
-        return color_cache[on_gpu][color_idx]
-    else:
-        color = cfg.COLORS[color_idx]
-        if not undo_transform:
-            # The image might come in as RGB or BRG, depending
-            color = (color[2], color[1], color[0])
-        if on_gpu is not None:
-            color = torch.Tensor(color).to(on_gpu).float() / 255.
-            color_cache[on_gpu][color_idx] = color
-        return color
+                    plt.imshow(img_numpy)
+                    plt.axis('off')
+                    plt.title(str(frame_id))
+                    root_dir = os.path.join(args.save_path, 'out', str(vid))
+                    if not os.path.exists(root_dir):
+                        os.makedirs(root_dir)
+                    plt.savefig(''.join([root_dir, '/', str(frame_id), '.png']))
+                    plt.clf()
+
 
 
 # display motion path of instance in the video
@@ -411,11 +420,39 @@ def plot_path(mask_alpha=0.45):
                 key_img = img_numpy
 
 
+def plot_line():
+    x = [1, 2, 3, 4, 5, 6, 7]
+    y1 = [30.7, 33.6, 33.8, 32.6, 34.0, 33.6, 31.9]
+    y2 = [30.7, 34.2, 36.0, 35.6, 34.9, 34.6, 33.5]
+    plt.figure(figsize=(5, 3))
+    plt.tight_layout()
+    plt.subplots_adjust(wspace=0.25, hspace=0, bottom=0.15)
+    plt.rcParams['xtick.direction'] = 'in'
+    plt.rcParams['ytick.direction'] = 'in'
+    plt.plot(x, y2, 'r-o', label='Multiple', LineWidth=2)
+    plt.plot(x, y1, 'b-p', label='Single', LineWidth=2)
+    for i in range(len(x)):
+        if i == 0:
+            plt.text(x[i]-0.2, y2[i]-0.5, str(y2[i]), fontsize=10)
+        else:
+            plt.text(x[i]-0.2, y1[i]-0.7, str(y1[i]), fontsize=10)
+            plt.text(x[i]-0.2, y2[i]+0.3, str(y2[i]), fontsize=10)
+    plt.xlabel('Length of clip', fontsize=10)
+    plt.ylabel('mask AP', fontsize=10)
+    plt.xticks(fontsize=10)
+    plt.yticks([30, 31, 32, 33, 34, 35, 36, 37], fontsize=10)
+    plt.legend(loc='upper right', fontsize=9)
+    plt.savefig('weights/results_2022/YT19.png')
+    print('Finish!')
+
+
 if __name__ == '__main__':
     cfg = load_config(args.config)
-    type = 0
+    type = -1
     if type == 0:
         count_temporal_BIoU(cfg)
+    elif type == 1:
+        plot_line()
     else:
         if args.data_type == 'valid_sub':
             dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.VALID_SUB, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES,
@@ -426,6 +463,8 @@ if __name__ == '__main__':
                                   inference=True)
 
         # path of the .json file that stores your predicted masks
-        ann_file = '/data/VIS/VisTR_OVIS/weights/r50/results.json'
+        # ann_file = '/data/VIS/VisTR_OVIS/weights/r50/results.json'
+        ann_file = '/data/VIS/VisTR/weights/weights_valid.json'
+        args.save_path = ann_file[:-5]
         anns = json.load(open(ann_file, 'r'))
         plt_masks_from_json(dataset, anns=anns)

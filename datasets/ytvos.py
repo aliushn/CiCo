@@ -114,7 +114,7 @@ class YTVOSDataset(data.Dataset):
         new_sizes = sizes * resize_ratios
         new_x1y1 = new_centers - new_sizes/2.
         new_x2y2 = new_centers + new_sizes/2.
-        c_min = [0,0]
+        c_min = [0, 0]
         c_max = [img_size[1], img_size[0]]
         new_x1y1 = np.clip(new_x1y1, c_min, c_max)
         new_x2y2 = np.clip(new_x2y2, c_min, c_max)
@@ -193,7 +193,7 @@ class YTVOSDataset(data.Dataset):
         imgs = np.concatenate(imgs, axis=-1)
         if self.has_gt:
             clip_obj_ids = list(set([id for ids in obj_ids for id in ids]))
-            clip_masks, clip_boxes, clip_labels = [], [], []
+            clip_masks, clip_boxes, clip_labels, clip_ids = [], [], [], []
             for id in clip_obj_ids:
                 masks_obj, boxes_obj, labels_obj = [], [], []
                 for ids, mask, box, label in zip(obj_ids, masks, bboxes, labels):
@@ -205,16 +205,22 @@ class YTVOSDataset(data.Dataset):
                         # -1 means object do not exist in the frame
                         masks_obj.append(np.zeros((imgs.shape[0], imgs.shape[1])))
                         boxes_obj.append(np.array([0.]*4))
-                clip_masks.append(np.stack(masks_obj, axis=0))
-                clip_boxes.append(np.stack(boxes_obj, axis=0))
-                clip_labels.append(np.argmax(np.bincount(np.array(labels_obj))))
+                boxes_obj = np.stack(boxes_obj, axis=0)
+                if (((boxes_obj[:, 2:] - boxes_obj[:, :2]) > 0).sum(-1) == 2).sum() > 0:
+                    clip_masks.append(np.stack(masks_obj, axis=0))
+                    clip_boxes.append(boxes_obj)
+                    clip_labels.append(np.argmax(np.bincount(np.array(labels_obj))))
+                    clip_ids.append(id)
 
-            clip_masks = np.stack(clip_masks, axis=0)
-            clip_boxes = np.stack(clip_boxes, axis=0)
-            clip_labels = np.array(clip_labels)
-            clip_obj_ids = np.array(clip_obj_ids)
+            if len(clip_ids) == 0:
+                return self.pull_item(idx)
+            else:
+                clip_masks = np.stack(clip_masks, axis=0)
+                clip_boxes = np.stack(clip_boxes, axis=0)
+                clip_labels = np.array(clip_labels)
+                clip_obj_ids = np.array(clip_ids)
 
-            return imgs, img_meta, (clip_masks, clip_boxes, clip_labels, clip_obj_ids)
+                return imgs, img_meta, (clip_masks, clip_boxes, clip_labels, clip_obj_ids)
         else:
             return imgs, img_meta, (masks, bboxes, labels, obj_ids)
 

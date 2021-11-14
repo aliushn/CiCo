@@ -1,7 +1,6 @@
 import torch, torchvision
 import torch.nn as nn
 import torch.nn.functional as F
-from .SpatioTemporalBlock import SpatioTemporalBlock
 from utils import timer
 from itertools import product
 from math import sqrt
@@ -89,10 +88,14 @@ class PredictionModule_3D(nn.Module):
         else:
             self.bbox_layer = nn.Conv3d(self.in_channels, self.num_priors*4*self.clip_frames,
                                         kernel_size=kernel_size, padding=padding, stride=stride)
+            # self.bbox_layer = nn.Conv3d(self.in_channels, self.num_priors*4,
+            #                             kernel_size=(1,3,3), padding=padding, stride=stride)
 
         if cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
             self.centerness_layer = nn.Conv3d(self.in_channels, self.num_priors,
                                               kernel_size=kernel_size, padding=padding, stride=stride)
+            # self.centerness_layer = nn.Conv3d(self.in_channels, self.num_priors,
+            #                                   kernel_size=(1,3,3), padding=padding, stride=stride)
 
         if cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
             if cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:

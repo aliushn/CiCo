@@ -2,7 +2,7 @@ MODEL:
   BACKBONE:
     CONV_BODY: 'ResNet101'
     PATH: 'resnet101_reducedfc.pth'
-    ARGS: ([3, 4, 24, 3]),
+    ARGS: ([3, 4, 23, 3]),
 
 OUTPUT_DIR: 'weights/'
 NAME: 'r101_base'

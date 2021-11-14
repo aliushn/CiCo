@@ -1,7 +1,7 @@
 from datasets import *
 from utils import timer
 import argparse
-from layers.functions import Track_TF_Clip_json
+# from layers.functions import Track_TF_Clip_json
 import numpy as np
 import json
 import mmcv

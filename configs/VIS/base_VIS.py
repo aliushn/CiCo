@@ -66,6 +66,6 @@ TEST = dict(
     NMS_WITH_MIoU=True)
 
 OUTPUT_DIR = 'weights/'
-NAME = 'r50_base_VIS'
+NAME = 'base_VIS'
 
 

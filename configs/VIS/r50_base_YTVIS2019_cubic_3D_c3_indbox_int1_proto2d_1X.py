@@ -10,9 +10,7 @@ MODEL = dict(
         CUBIC_3D_MODE=True,
         CUBIC_MODE_ON_PROTONET=False,
         CUBIC_CORRELATION_MODE=False,
-        CIRCUMSCRIBED_BOXES=False,
-        # INITIALIZATION=reduced or inflated
-        CUBIC_MODE_WITH_INITIALIZATION='inflated')
+        CIRCUMSCRIBED_BOXES=False)
 )
 
 CiCo = dict(

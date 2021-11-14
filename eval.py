@@ -7,6 +7,7 @@ from layers.utils.output_utils import postprocess_ytbvis, undo_image_transformat
 from layers.visualization_temporal import draw_dotted_rectangle, get_color
 from configs.load_config import load_config
 
+import time
 import mmcv
 import torch
 import torch.backends.cudnn as cudnn
@@ -151,9 +152,9 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
         for j in reversed(range(num_dets_to_consider)):
             color = get_color(j, color_type)
             # get the bbox_idx to know box's layers (after FPN): p3-p7
-            # if 'priors' in dets_out.keys():
-            #     px1, py1, px2, py2 = dets_out['priors'][j, :]
-            #     draw_dotted_rectangle(img_numpy, px1, py1, px2, py2, color, 3, gap=10)
+            if 'priors' in dets_out.keys():
+                px1, py1, px2, py2 = dets_out['priors'][j, :]
+                draw_dotted_rectangle(img_numpy, px1, py1, px2, py2, color, 3, gap=10)
 
             if args.display_bboxes_cir and boxes_cir is not None:
                 x1, y1, x2, y2 = boxes_cir[j, :]
@@ -197,9 +198,9 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
 
                 text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
 
-                text_pt = (max(x1, 10), max(y1 - 3, 10))
+                text_pt = (max(x1, 0), max(y1 - 3, 30))
                 text_color = [255, 255, 255]
-                cv2.rectangle(img_numpy, (max(x1, 10), max(y1, 10)), (x1 + text_w, y1 - text_h - 4), color, -1)
+                cv2.rectangle(img_numpy, (max(x1, 0), max(y1, 30)), (x1 + text_w, y1 - text_h - 4), color, -1)
                 cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness,
                             cv2.LINE_AA)
 
@@ -369,9 +370,10 @@ def evaluate(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval
 
     print()
     json_results = []
-
-    timer.reset()
+    frame_times = MovingAverage()
     for vdx, vid in enumerate(dataset.vid_ids):
+        if vdx > 50:
+            break
         progress = (vdx + 1) / dataset_size * 100
         print()
         print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
@@ -395,9 +397,8 @@ def evaluate(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval
         for cdx in range(len_clips):
             progress_clip = (cdx + 1) / len_clips * 100
             progress_bar_clip.set_val(cdx+1)
-            print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)     '
-                  % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip), end='')
 
+            timer.reset()
             with timer.env('Load Data'):
                 if eval_clip_frames == 1:
                     clip_frame_ids = range(cdx*args.batch_size, min((cdx+1)*args.batch_size, len_vid))
@@ -414,8 +415,15 @@ def evaluate(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval
                 for k in range(len(images_meta)):
                     images_meta[k].update(pad_shape)
 
-            with timer.env('Network Extra'):
-                preds = net(images, img_meta=images_meta)
+            preds = net(images, img_meta=images_meta)
+            frame_times.add(timer.total_time())
+            progress_bar_clip.set_val(cdx+1)
+            if vdx > 0 or cdx > 0:
+                avg_fps = 1. / (frame_times.get_avg() / args.batch_size)
+            else:
+                avg_fps = 0
+            print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)   %5.2f FPS  '
+                  % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip, avg_fps), end='')
 
             # Remove overlapped frames
             if eval_clip_frames > 1 and cdx > 0:
@@ -474,6 +482,7 @@ def evaluate(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval
                 result_obj['category_id'] = np.bincount(result_obj['category_id']).argmax().item()
                 json_results.append(result_obj)
 
+    timer.print_stats()
     return json_results
 
 
@@ -547,16 +556,18 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
             # order_idx = list(range(clip_frames))[::-1]
             # images = torch.flip(images, [0])
             order_idx = range(clip_frames)
+            t = time.time()
             preds_clip = net(images, img_meta=[images_meta])
+            avg_fps_wodata = 1. / ((time.time()-t)/clip_frames)
             pred_clip = preds_clip[0]
             frame_times.add(timer.total_time())
             progress_bar_clip.set_val(cdx+1)
-            # if vdx > 0 or cdx > 0:
-            #     avg_fps = 1. / (frame_times.get_avg() / clip_frames)
-            # else:
-            avg_fps = 0
-            print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)  %5.2f fps   '
-                  % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip, avg_fps), end='')
+            if vdx > 0 or cdx > 0:
+                avg_fps = 1. / (frame_times.get_avg() / clip_frames)
+            else:
+                avg_fps = 0
+            print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)  %5.2f fps  %5.2f fps '
+                  % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip, avg_fps, avg_fps_wodata), end='')
 
             # Here store all classification features for later inter-clips classification
             if TRAIN_INTERCLIPS_CLASS and pred_clip['box_ids'].nelement() > 0:
@@ -656,8 +667,6 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
                         conf_all[match_idx] = max(conf_all[match_idx], conf)
 
                 category_ids_vid[obj_id] = {'category_id': category_id_obj_all, 'score': conf_all}
-            # print()
-            # print(category_ids_vid)
 
             if args.display:
                 root_dir = os.path.join(output_dir, 'out', str(vid))
@@ -690,7 +699,7 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
                     assert len(vid_obj['segmentations']) == len_vid
                     json_results.append(vid_obj)
 
-    # timer.print_stats()
+    timer.print_stats()
     return json_results
 
 

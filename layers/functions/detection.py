@@ -18,6 +18,7 @@ class Detect(object):
         self.use_dynamic_mask = cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK
         self.mask_coeff_occlu = cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION
         self.nms_with_miou = cfg.TEST.NMS_WITH_MIoU
+        self.nms_with_biou = cfg.TEST.NMS_WITH_BIoU
         self.use_focal_loss = cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS
         self.num_classes = cfg.DATASETS.NUM_CLASSES
         self.top_k = cfg.TEST.DETECTIONS_PER_IMG
@@ -85,7 +86,6 @@ class Detect(object):
                     dim_boxes = candidate_cur['loc'].size(-1)
                     priors = candidate_cur['priors'].repeat(1, dim_boxes//4).reshape(-1, 4)
                     candidate_cur['box'] = decode(candidate_cur['loc'].reshape(-1, 4), priors).reshape(-1, dim_boxes)
-                    predictions.pop('loc')
                     boxes_cir = circum_boxes(candidate_cur['box'])
                     candidate_cur['box_cir'] = boxes_cir
                     if self.train_masks:
@@ -208,17 +208,16 @@ class Detect(object):
         idx = idx[:, :top_k].contiguous()
         rescores = rescores[:, :top_k].contiguous()
 
+        iou = None
         num_classes, n_objs = idx.size()
-        # TODO: double check repeated bboxes, mask_coeff, track_data...
-        box_iou = []
-        for c in range(idx.size(0)):
-            boxes_idx = candidate['box'][idx[c]].reshape(n_objs, -1, 4).permute(1,0,2).contiguous()
-            box_iou.append(jaccard(boxes_idx, boxes_idx).mean(0))
-        box_iou = torch.stack(box_iou, dim=0)
-        # [num_classes, num_dets, num_dets]
-        boxes_cir_idx = candidate['box_cir'][idx.view(-1)].reshape(-1, n_objs, 4)
-        box_cir_iou = jaccard(boxes_cir_idx, boxes_cir_idx)
-        iou = 0.5 * box_iou + 0.5 * box_cir_iou
+        if self.nms_with_biou or not self.nms_with_miou:
+            boxes_idx = candidate['box'].reshape(n_objs, -1, 4).permute(1,0,2).contiguous()
+            box_iou_ori = jaccard(boxes_idx, boxes_idx).mean(0)
+            box_iou = torch.stack([box_iou_ori[idx[c]][:, idx[c]] for c in range(idx.size(0))], dim=0)
+            # [num_classes, num_dets, num_dets]
+            boxes_cir_idx = candidate['box_cir'][idx.view(-1)].reshape(-1, n_objs, 4)
+            box_cir_iou = jaccard(boxes_cir_idx, boxes_cir_idx)
+            iou = 0.5 * box_iou + 0.5 * box_cir_iou
         if self.train_masks and self.nms_with_miou:
             m_iou = []
             masks = candidate['mask'].gt(0.5).float().permute(1, 0, 2, 3).contiguous()
@@ -229,7 +228,7 @@ class Detect(object):
                 flag = (masks_idx.sum(dim=[-1, -2]) > 0).sum(dim=0)
                 m_iou.append(miou_ori[:, idx[c]][:, :, idx[c]].sum(dim=0) / flag)
             m_iou = torch.stack(m_iou, dim=0)      # [n_class, num_dets, num_dets]
-            iou = iou * 0.5 + m_iou * 0.5
+            iou = iou * 0.5 + m_iou * 0.5 if iou is not None else m_iou
 
         iou.triu_(diagonal=1)
         iou_max, _ = iou.max(dim=1)                # [num_classes, num_dets]

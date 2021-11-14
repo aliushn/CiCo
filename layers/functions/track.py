@@ -36,13 +36,10 @@ class Track(object):
 
             Note that the outputs are sorted only if cross_class_nms is False
         """
-
-        with timer.env('Track'):
-
-            results = []
-            for batch_idx in range(len(pred_outs_after_NMS)):
-                results.append(self.track(pred_outs_after_NMS[batch_idx],
-                                          img_meta[batch_idx*self.clip_frames:(batch_idx+1)*self.clip_frames]))
+        results = []
+        for batch_idx in range(len(pred_outs_after_NMS)):
+            results.append(self.track(pred_outs_after_NMS[batch_idx],
+                                      img_meta[batch_idx*self.clip_frames:(batch_idx+1)*self.clip_frames]))
 
         return results
 

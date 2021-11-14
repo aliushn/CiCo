@@ -98,10 +98,10 @@ class MultiBoxLoss(nn.Module):
             # from the most adjacent frames
             if self.clip_frames > 1:
                 for idx in range(len(gt_boxes)):
-                    missed_flag = ((gt_boxes[idx][:, :, 2:] - gt_boxes[idx][:, :, :2]) <= 0).sum(dim=-1) > 1
-                    exist_missed_objects = missed_flag.sum(dim=-1) > 0
-                    if exist_missed_objects.sum() > 0:
-                        for kdx, missed in enumerate(exist_missed_objects):
+                    missed_flag = ((gt_boxes[idx][:, :, 2:] - gt_boxes[idx][:, :, :2]) > 0).sum(dim=-1) != 2
+                    missed_objects = missed_flag.sum(dim=-1) > 0
+                    if missed_objects.sum() > 0:
+                        for kdx, missed in enumerate(missed_objects):
                             if missed and (~missed_flag[kdx]).sum() > 0:
                                 missed_cdx = torch.arange(self.clip_frames)[missed_flag[kdx, :] == 1]
                                 occur_cdx = torch.arange(self.clip_frames)[missed_flag[kdx, :] == 0]
@@ -160,6 +160,7 @@ class MultiBoxLoss(nn.Module):
                             else range(self.clip_frames//2-1, self.clip_frames//2+2)
                     else:
                         ind_range = range(jdx*self.PHL_stride, jdx*self.PHL_stride+self.PHL_kernel_size)
+
                     match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[idx], loc_data[kdx],
                                loc_t, conf_t, idx_t, ids_t, kdx, jdx, self.pos_threshold,
                                self.neg_threshold, use_cir_boxes=self.use_cir_boxes, ind_range=ind_range)

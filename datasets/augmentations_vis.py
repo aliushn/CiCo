@@ -81,6 +81,66 @@ class Resize(object):
         return image, masks, boxes, labels
 
 
+class expand(object):
+    def __init__(self, expand_gt=True, mean=MEANS):
+        self.expand_gt = expand_gt
+        self.mean = mean
+
+    def __call__(self, image, masks, boxes, labels=None):
+        if random.randint(2):
+            n_f = len(image)
+            height, width, depth = image[0].shape
+            scale = random.uniform(0.5, 1.5, 1)
+            img_w, img_h = int(width*scale), int(height*scale)
+
+            # the input of cv2.resize() should be 3-dimention with (h, w, c)
+            image = [cv2.resize(image[i], (img_w, img_h)) for i in range(n_f)]
+            if self.expand_gt:
+                # Act like each object is a color channel
+                for i in range(n_f):
+                    masks_resize = cv2.resize(masks[i].transpose((1, 2, 0)), (img_w, img_h))
+
+                    # OpenCV resizes a (w,h,1) array to (s,s), so fix that
+                    if len(masks_resize.shape) == 2:
+                        masks[i] = np.expand_dims(masks_resize, 0)
+                    else:
+                        masks[i] = masks_resize.transpose((2, 0, 1))
+
+                    # for precent coords, bboxes do not need resize
+
+            if scale <= 1:
+                # padding
+                for i in range(n_f):
+                    expand_image = np.zeros((height, width, depth), dtype=image[i].dtype)
+                    expand_image[:, :, :] = self.mean
+                    expand_image[:img_h, :img_w] = image[i]
+                    image[i] = expand_image
+
+                if self.expand_gt:
+                    for i in range(n_f):
+                        expand_masks = np.zeros((masks[i].shape[0], height, width), dtype=masks[i].dtype)
+                        expand_masks[:, :img_h, :img_w] = masks[i]
+                        masks[i] = expand_masks
+
+                        # Scale bounding boxes (which are currently percent coordinates)
+                        boxes[i][:, [0, 2]] *= (img_w / width)
+                        boxes[i][:, [1, 3]] *= (img_h / height)
+
+            else:
+                # crop
+                str_h = 0 if img_h-height == 0 else int(random.randint(img_h-height, size=1))
+                str_w = 0 if img_w-width == 0 else int(random.randint(img_w-width, size=1))
+                image = [image[i][str_h:str_h+height, str_w:str_w+width] for i in range(n_f)]
+                if self.expand_gt:
+                    masks = [masks[i][:, str_h:str_h+height, str_w:str_w+width] for i in range(n_f)]
+                    for i in range(n_f):
+                        boxes[i][:, [0, 2]] = (boxes[i][:, [0, 2]] * img_w - str_w) / width
+                        boxes[i][:, [1, 3]] = (boxes[i][:, [1, 3]] * img_h - str_h) / height
+                        boxes[i] = np.clip(boxes[i], 0, 1)
+
+        return image, masks, boxes, labels
+
+
 class Pad(object):
     """
     Pads the image to the input width and height, filling the
@@ -159,13 +219,14 @@ def enable_if(condition, obj):
 class BaseTransform_vis(object):
     """ Transorm to be used when evaluating. """
 
-    def __init__(self, min_size, max_size, Flip=False, MS_train=False, backbone_transform=None,
+    def __init__(self, min_size, max_size, Flip=False, Expand=True, MS_train=False, backbone_transform=None,
                  resize_gt=True, pad_gt=True, mean=MEANS, std=STD):
         self.augment = Compose([
             ConvertFromInts(),
             ToPercentCoords(),
             enable_if(Flip, RandomFlip()),
             Resize(min_size, max_size, MS_train=MS_train, resize_gt=resize_gt),
+            enable_if(Expand, expand(expand_gt=True)),
             # Pad(min_size, max_size, mean, pad_gt=pad_gt),
             BackboneTransform(backbone_transform, mean, std, 'BGR')
         ])
