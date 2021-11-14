@@ -33,9 +33,7 @@ weights/
 external/
 results/ 
 configs/
-#configs/cocovis/
-#configs/VID/
-#configs/VIS/
+others/
 .idea/
 
 # PyInstaller
