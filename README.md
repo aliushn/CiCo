@@ -1,32 +1,15 @@
 # CiCo
-An anonymous code repository for our paper submitted in CVPR2022: 
+An anonymous code repository for our paper submitted in CVPR2022. Unfortunately, Anonymous Github does not support downloading source code now. 
 - Clip-in Clip-out: An Alignment-free One-stage Video Instance Segmentation Approach 
  
 # Installation
- - Clone this repository and enter it:
-   ```Shell
-   git clone https://MinghanLi/CiCo.git
-   cd CiCo
-   ```
- - Set up the environment using one of the following methods:
-   - Using [Anaconda](https://www.anaconda.com/distribution/)
+ - Clone this repository 
+ - Set up the environment using [Anaconda](https://www.anaconda.com/distribution/):
      - Run `conda env create -f environment.yml`
-     - conda activate STMask-env
-   - Manually with pip
-     - Set up a Python3 environment.
-     - Install [Pytorch](http://pytorch.org/) 1.0.1 (or higher) and TorchVision.
-     - Install some other packages:
-       ```Shell
-       # Cython needs to be installed before pycocotools
-       pip install cython
-       pip install opencv-python pillow pycocotools matplotlib 
-       ```
+     - conda activate cico-env
        
- - Install mmcv and mmdet
-    - According to your Cuda and pytorch version to install mmcv or mmcv-full from [here](https://github.com/open-mmlab/mmcv). Here my cuda and torch version are 10.1 and 1.5.0 respectively. 
-      ```Shell
-      pip install mmcv-full==1.1.2 -f https://download.openmmlab.com/mmcv/dist/cu101/torch1.5.0/index.html
-      ```
+ - Install mmcv and compile cocoapi
+    - According to your Cuda and pytorch version to install mmcv or mmcv-full from [here](https://github.com/open-mmlab/mmcv). 
     - install cocoapi and a customized COCO API for YouTubeVIS dataset from [here](https://github.com/youtubevos/cocoapi)
       ```Shell
       pip install "git+https://github.com/cocodataset/cocoapi.git#subdirectory=PythonAPI"
