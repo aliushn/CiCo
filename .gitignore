@@ -29,10 +29,10 @@ share/python-wheels/
 MANIFEST
 
 # dirs
+cocoapi/
 weights/
 external/
 results/ 
-configs/
 others/
 .idea/
 
