@@ -1,5 +1,5 @@
 from datasets import *
-from STMask import STMask
+from CoreNet import CoreNet
 from utils.functions import MovingAverage, ProgressBar
 from utils import timer
 from utils.functions import SavePath
@@ -345,7 +345,6 @@ def prep_display_single(dets_out, img, img_meta=None, undo_transform=True, mask_
                 font_scale = 0.5
 
                 text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
-
                 text_pt = (x1, y1 - 3)
                 text_color = [255, 255, 255]
                 cv2.rectangle(img_numpy, (x1, y1), (x1 + text_w, y1 - text_h - 4), color, -1)
@@ -355,7 +354,7 @@ def prep_display_single(dets_out, img, img_meta=None, undo_transform=True, mask_
     return img_numpy
 
 
-def evaluate(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval_clip_frames=1, output_dir=None):
+def evaluate(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, eval_clip_frames=1, output_dir=None):
     '''
     :param net:
     :param dataset:
@@ -379,10 +378,6 @@ def evaluate(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval
         print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
         results_video = {}
 
-        # reverse order
-        if args.display:
-            vdx = -vdx-1
-            vid = dataset.vid_ids[vdx]
         if data_type == 'vis':
             len_vid = dataset.vid_infos[vdx]['length']
             train_masks, use_vid_metric = True, False
@@ -486,7 +481,7 @@ def evaluate(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, eval
     return json_results
 
 
-def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None, clip_frames=1, n_clips=1,
+def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, clip_frames=1, n_clips=1,
                   TRAIN_INTERCLIPS_CLASS=False, output_dir=None):
     '''
     :param net:
@@ -509,10 +504,6 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
         print()
         print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
 
-        # reverse order
-        # if args.display:
-        #     vdx = -vdx-1
-        #     vid = dataset.vid_ids[vdx]
         vid_objs = {}
         if data_type == 'vis':
             len_vid = dataset.vid_infos[vdx]['length']
@@ -703,7 +694,7 @@ def evaluate_clip(net: STMask, dataset, data_type='vis', pad_h=None, pad_w=None,
     return json_results
 
 
-def evaluate_single(net: STMask, im_path=None, save_path=None, idx=None):
+def evaluate_single(net: CoreNet, im_path=None, save_path=None, idx=None):
     im = mmcv.imread(im_path)
     ori_shape = im.shape
     im, w_scale, h_scale = mmcv.imresize(im, (640, 360), return_scale=True)
@@ -739,7 +730,7 @@ def evaluate_single(net: STMask, im_path=None, save_path=None, idx=None):
         cv2.imwrite(save_path, img_numpy)
 
 
-def evalimages(net: STMask, input_folder: str, output_folder: str):
+def evalimages(net: CoreNet, input_folder: str, output_folder: str):
     if not os.path.exists(output_folder):
         os.mkdir(output_folder)
 
@@ -758,11 +749,11 @@ def evalimages(net: STMask, input_folder: str, output_folder: str):
     print('Done.')
 
 
-def evalvideo(net: STMask, input_folder: str, output_folder: str):
+def evalvideo(net: CoreNet, input_folder: str, output_folder: str):
     return
 
 
-def evaldatasets(net: STMask, val_dataset, data_type, output_dir, eval_clip_frames=1, n_clips=1,
+def evaldatasets(net: CoreNet, val_dataset, data_type, output_dir, eval_clip_frames=1, n_clips=1,
                  cubic_mode=False, cfg_input=None, TRAIN_INTERCLIPS_CLASS=False):
     args.save_folder = output_dir
     if cfg_input is not None:
@@ -848,7 +839,7 @@ if __name__ == '__main__':
             torch.set_default_tensor_type('torch.FloatTensor')
 
         print('Loading model from {}'.format(args.trained_model))
-        net = STMask(cfg, args.display)
+        net = CoreNet(cfg, args.display)
         net.load_weights(args.trained_model)
         net.eval()
         print('Loading model Done.')

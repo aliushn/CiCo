@@ -3,11 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .Featurealign import FeatureAlign
-from utils import timer
 from itertools import product
 from math import sqrt
-
-from ..visualization_temporal import display_cubic_weights
 
 
 class PredictionModule(nn.Module):

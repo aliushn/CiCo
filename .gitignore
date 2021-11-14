@@ -36,6 +36,8 @@ configs/VIS/
 datasets/cocovis.py
 datasets/augmentations_cocovis.py
 datasets/cocovis.py
+layers/modules/NonLocalBlock.py
+layers/modules/SpatioTemporalBlock.py
 
 # dirs
 web/

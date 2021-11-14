@@ -88,14 +88,10 @@ class PredictionModule_3D(nn.Module):
         else:
             self.bbox_layer = nn.Conv3d(self.in_channels, self.num_priors*4*self.clip_frames,
                                         kernel_size=kernel_size, padding=padding, stride=stride)
-            # self.bbox_layer = nn.Conv3d(self.in_channels, self.num_priors*4,
-            #                             kernel_size=(1,3,3), padding=padding, stride=stride)
 
         if cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
             self.centerness_layer = nn.Conv3d(self.in_channels, self.num_priors,
                                               kernel_size=kernel_size, padding=padding, stride=stride)
-            # self.centerness_layer = nn.Conv3d(self.in_channels, self.num_priors,
-            #                                   kernel_size=(1,3,3), padding=padding, stride=stride)
 
         if cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
             if cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
@@ -165,33 +161,7 @@ class PredictionModule_3D(nn.Module):
             if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
                 _, c, h, w = fpn_outs[idx].size()
                 fpn_outs_clip = fpn_outs[idx].reshape(-1, self.clip_frames, c, h, w)
-                if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
-                    x = fpn_outs_clip.permute(0, 2, 1, 3, 4).contiguous()
-                else:
-                    if self.init_cubic_mode == 'tsm':
-                        x = []
-                        fold = int(0.5/(self.clip_frames-1)*c)
-                        left, right = 0, fold
-                        for frame_idx in range(-(self.clip_frames//2), self.clip_frames//2+1):
-                            x.append(fpn_outs_clip[:, frame_idx, left:right])
-                            left = right
-                            right = right + int(0.5*c) if frame_idx+1 == 0 else right+fold
-
-                    else:
-                        # stack frames in channels
-                        x = [self.fpn_reduced_channels(fpn_outs_clip[:, 0])] \
-                            if self.init_cubic_mode == 'reduced' else [fpn_outs_clip[:, 0]]
-                        for frame_idx in range(self.clip_frames-1):
-                            if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
-                                x += [correlate_operator(fpn_outs_clip[:, frame_idx].contiguous(),
-                                                         fpn_outs_clip[:, frame_idx+1].contiguous(),
-                                                         patch_size=self.correlation_patch_size,
-                                                         kernel_size=1)]
-
-                            cur_fpn_x = self.fpn_reduced_channels(fpn_outs_clip[:, frame_idx+1]) \
-                                if self.init_cubic_mode == 'reduced' else fpn_outs_clip[:, frame_idx+1]
-                            x.append(cur_fpn_x)
-                    x = torch.cat(x, dim=1)
+                x = fpn_outs_clip.permute(0, 2, 1, 3, 4).contiguous()
             else:
                 x = fpn_outs[idx]
 
@@ -228,22 +198,6 @@ class PredictionModule_3D(nn.Module):
                 track_x = self.track_extra(x)
                 track = self.track_layer(track_x).permute(0, 2, 3, 4, 1).contiguous()
                 preds['track'] += [F.normalize(track.reshape(bs*T_out, n_proposals, -1), dim=-1)]
-
-            # Visualization
-            # display_cubic_weights(bbox_x_list[idx], idx, type=2, name='box_x', img_meta=img_meta[0])
-            # display_cubic_weights(conf_x_list[idx], idx, type=2, name='conf_x', img_meta=img_meta[0])
-            # display_cubic_weights(track_x_list[idx], idx, type=2, name='track_x', img_meta=img_meta[0])
-            display_weights = False
-            if display_weights:
-                if idx == 0:
-                    for jdx in range(0, 8, 2):
-                        display_cubic_weights(self.bbox_extra[jdx].weight, jdx, type=1, name='box_extra')
-                        display_cubic_weights(self.conf_extra[jdx].weight, jdx, type=1, name='conf_extra')
-                        display_cubic_weights(self.track_extra[jdx].weight, jdx, type=1, name='track_extra')
-                    display_cubic_weights(self.bbox_layer.weight, 0, type=1, name='box')
-                    display_cubic_weights(self.mask_layer.weight, 0, type=1, name='mask')
-                    display_cubic_weights(self.conf_layer.weight, 0, type=1, name='conf')
-                    display_cubic_weights(self.track_layer.weight, 0, type=1, name='track')
 
         for k, v in preds.items():
             preds[k] = torch.cat(v, 1)

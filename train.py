@@ -3,7 +3,7 @@ from utils.functions import MovingAverage, SavePath, ProgressBar
 from utils.logger import Log
 from utils import timer
 from layers import MultiBoxLoss
-from STMask import STMask
+from CoreNet import CoreNet
 import os
 import time
 import torch
@@ -69,7 +69,7 @@ def train(cfg):
         device = torch.cuda.current_device()
 
     # Parallel wraps the underlying module, but when saving and loading we don't want that
-    net = STMask(cfg)
+    net = CoreNet(cfg)
     net.train()
 
     cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, cfg.NAME)

@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 from collections import defaultdict
 
@@ -8,7 +7,6 @@ from layers.modules import PredictionModule_FC, PredictionModule, PredictionModu
     TemporalNet, ProtoNet, ProtoNet3D
 from layers.functions import Detect, Track, Track_TF, Track_TF_Clip
 from layers.modules import InterclipsClass
-from layers.visualization_temporal import display_cubic_weights
 from backbone import construct_backbone
 from utils import timer
 
@@ -18,57 +16,21 @@ torch.cuda.current_device()
 prior_cache = defaultdict(lambda: None)
 
 
-class STMask(nn.Module):
-    """
-    The code comes from Yolact.
-    You can set the arguments by chainging them in the backbone config object in config.py.
-
-    Parameters (in cfg.backbone):
-        - selected_layers: The indices of the conv layers to use for prediction.
-        - pred_scales:     A list with len(selected_layers) containing tuples of scales (see PredictionModule)
-        - pred_aspect_ratios: A list of lists of aspect ratios with len(selected_layers) (see PredictionModule)
-    """
-
+class CoreNet(nn.Module):
     def __init__(self, cfg, display=False):
         super().__init__()
 
         self.cfg = cfg
         self.backbone = construct_backbone(cfg.MODEL.BACKBONE)
-        src_channels = self.backbone.channels
         in_channels = cfg.MODEL.FPN.NUM_FEATURES
-        self.clip_frames, self.reduced_scale = 1, 1
+        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
         self.block_diagonal = False
 
         # Some hacky rewiring to accomodate the FPN
-        self.fpn = FPN([src_channels[i] for i in cfg.MODEL.BACKBONE.SELECTED_LAYERS])
+        self.fpn = FPN([self.backbone.channels[i] for i in cfg.MODEL.BACKBONE.SELECTED_LAYERS])
         self.selected_layers = list(range(len(cfg.MODEL.BACKBONE.SELECTED_LAYERS)+cfg.MODEL.FPN.NUM_DOWNSAMPLE))
         self.fpn_num_features = cfg.MODEL.FPN.NUM_FEATURES
         self.fpn_num_downsample = cfg.MODEL.FPN.NUM_DOWNSAMPLE
-        if cfg.MODEL.FPN.USE_BIFPN:
-            self.bifpn = nn.Sequential(*[BiFPN(self.fpn_num_features) for _ in range(cfg.num_bifpn)])
-
-        self.init_cubic_mode = cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_WITH_INITIALIZATION
-        if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
-            self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-            if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE and self.init_cubic_mode == 'reduced':
-                self.reduced_scale = 2
-                self.fpn_reduced_channels = nn.Sequential(*[
-                    nn.Conv2d(in_channels, in_channels//self.reduced_scale, kernel_size=1, padding=0),
-                    nn.ReLU(inplace=True)
-                ])
-
-        # Inflated channels in temporal direction
-        if not cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE and self.init_cubic_mode != 'tsm':
-            src_channels = self.clip_frames//self.reduced_scale*self.fpn_num_features
-            if cfg.MODEL.PREDICTION_HEADS.CUBIC_CORRELATION_MODE:
-                self.correlation_patch_size = cfg.MODEL.PREDICTION_HEADS.CORRELATION_PATCH_SIZE
-                src_channels += self.correlation_patch_size**2
-                # Flag channels that not belong to correlation
-                self.flag_noncorr_channels = torch.ones(src_channels[0])
-                for c in range(1, self.clip_frames):
-                    self.flag_corr_channels[src_channels[c]-self.correlation_patch_size**2: src_channels[c]] = 0
-        else:
-            src_channels = self.fpn_num_features
 
         # ------------ build ProtoNet ------------
         self.train_masks = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
@@ -79,17 +41,15 @@ class STMask(nn.Module):
         # ------- Build multi-scales prediction head  ------------
         self.num_priors = len(cfg.MODEL.BACKBONE.PRED_SCALES[0]) * len(cfg.MODEL.BACKBONE.PRED_ASPECT_RATIOS[0])
         # prediction layers for loc, conf, mask, track
-
         if cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
-            self.prediction_layers = PredictionModule_3D(cfg, src_channels, deform_groups=1)
-
+            self.prediction_layers = PredictionModule_3D(cfg, self.fpn_num_features, deform_groups=1)
         else:
             if cfg.STMASK.FC.USE_FCA:
-                self.prediction_layers = PredictionModule_FC(cfg, src_channels, deform_groups=1)
+                self.prediction_layers = PredictionModule_FC(cfg, self.fpn_num_features, deform_groups=1)
             else:
-                self.prediction_layers = PredictionModule(cfg, src_channels, deform_groups=1)
+                self.prediction_layers = PredictionModule(cfg, self.fpn_num_features, deform_groups=1)
 
-        # InterClips Classification branch
+        # InterClips Classification branch not yet??
         if cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
             self.InterclipsClass = InterclipsClass(cfg.MODEL.CLASS_HEADS.INTERCLIPS_CLAFEAT_DIM, cfg.SOLVER.NUM_CLIPS,
                                                    cfg.SOLVER.NUM_CLIP_FRAMES, cfg.DATASETS.NUM_CLASSES)
@@ -208,9 +168,6 @@ class STMask(nn.Module):
                         # Init weights from 2D to 3D
                         if 'conf_layer' in key:
                             continue
-                        if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_SPATIOTEMPORAL_BLOCK:
-                            if 'prediction_layers' in key:
-                                continue
 
                         device = model_dict[key].device
                         if state_dict[key].dim() == 1:
@@ -231,9 +188,6 @@ class STMask(nn.Module):
                                 if t == 1:
                                     model_dict[key] = state_dict[key].repeat(scale,1,1,1).unsqueeze(2).to(device)
                                 else:
-                                    # only init parameter for the center frame
-                                    # model_dict[key][:,:,model_dict[key].size(2)//2] = state_dict[key].repeat(scale,1,1,1).to(device)
-                                    # All frames with same weights
                                     model_dict[key] = state_dict[key].unsqueeze(2).repeat(scale,1,t,1,1).to(device)/t
                             else:
                                 print('Size is different in pre-trained model and current model:', key)
@@ -297,8 +251,6 @@ class STMask(nn.Module):
             # Use backbone.selected_layers because we overwrote self.selected_layers
             outs = [bb_outs[i] for i in self.cfg.MODEL.BACKBONE.SELECTED_LAYERS]
             fpn_outs = self.fpn(outs)
-            if self.cfg.MODEL.FPN.USE_BIFPN:
-                fpn_outs = self.bifpn(fpn_outs)
 
         with timer.env('Pred_heads'):
             pred_outs = self.prediction_layers(fpn_outs, img_meta)
@@ -347,7 +299,6 @@ class STMask(nn.Module):
                 with timer.env('Track_TF'):
                     pred_outs_after_track = self.Track(pred_outs_after_NMS, img_meta, x)
                 return pred_outs_after_track
-
             else:
                 return pred_outs_after_NMS
 

@@ -15,9 +15,6 @@ MODEL:
   PREDICTION_HEADS:
     USE_DIoU: True
     CUBIC_MODE: False
-    CUBIC_CORRELATION_MODE: False
-    # INITIALIZATION: reduced or inflated
-    CUBIC_MODE_WITH_INITIALIZATION: 'inflated'
 
   BOX_HEADS:
     TRAIN_BOXES: True

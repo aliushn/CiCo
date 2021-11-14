@@ -1,7 +1,7 @@
 from datasets import *
-from STMask import STMask
+from CoreNet import CoreNet
 from utils.functions import MovingAverage, ProgressBar, SavePath
-from layers.utils import jaccard, center_size, mask_iou, postprocess, undo_image_transformation
+from layers.utils import jaccard, mask_iou, postprocess, undo_image_transformation
 from utils import timer
 from layers.visualization_temporal import get_color
 import pycocotools
@@ -565,7 +565,7 @@ def badhash(x):
     return x
 
 
-def evalimage(net: STMask, path: str, save_path: str = None):
+def evalimage(net: CoreNet, path: str, save_path: str = None):
     frame = torch.from_numpy(cv2.imread(path)).cuda().float()
     batch = FastBaseTransform()(frame.unsqueeze(0))
     preds = net(batch)
@@ -583,7 +583,7 @@ def evalimage(net: STMask, path: str, save_path: str = None):
         cv2.imwrite(save_path, img_numpy)
 
 
-def evalimages(net: STMask, input_folder: str, output_folder: str):
+def evalimages(net: CoreNet, input_folder: str, output_folder: str):
     if not os.path.exists(output_folder):
         os.mkdir(output_folder)
 
@@ -611,7 +611,7 @@ class CustomDataParallel(torch.nn.DataParallel):
         return sum(outputs, [])
 
 
-def evalvideo(net: STMask, path: str, out_path: str = None):
+def evalvideo(net: CoreNet, path: str, out_path: str = None):
     # If the path is a digit, parse it as a webcam index
     is_webcam = path.isdigit()
 
@@ -847,7 +847,7 @@ def evalvideo(net: STMask, path: str, out_path: str = None):
     cleanup_and_exit()
 
 
-def evaluate(cfg, net: STMask, train_mode=False, epoch=None, iteration=None):
+def evaluate(cfg, net: CoreNet, train_mode=False, epoch=None, iteration=None):
     args.save_folder = cfg.OUTPUT_DIR
     args.score_threshold = cfg.TEST.NMS_CONF_THRESH
     dataset = get_dataset('coco', cfg.DATASETS.VALID, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES, inference=True)
@@ -1047,7 +1047,7 @@ if __name__ == '__main__':
             exit()
 
         print('Loading model...', end='')
-        net = STMask(cfg)
+        net = CoreNet(cfg)
         net.load_weights(args.trained_model)
         net.eval()
         print(' Done.')
