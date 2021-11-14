@@ -28,6 +28,15 @@ share/python-wheels/
 *cocovis*
 MANIFEST
 
+# files
+configs/coco/
+configs/cocovis/
+configs/VID/
+configs/VIS/
+datasets/cocovis.py
+datasets/augmentations_cocovis.py
+datasets/cocovis.py
+
 # dirs
 web/
 cocoapi/
