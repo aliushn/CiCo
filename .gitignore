@@ -32,14 +32,10 @@ MANIFEST
 weights/
 external/
 results/ 
-configs/coco/
-configs/cocovis/
-configs/VID/
-configs/VIS/
-datasets/augmentations_cocovis.py
-datasets/cocovis.py
-datasets/VID.py
-datasets/vid_eval.py
+configs/
+#configs/cocovis/
+#configs/VID/
+#configs/VIS/
 .idea/
 
 # PyInstaller
