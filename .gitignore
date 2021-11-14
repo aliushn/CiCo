@@ -29,6 +29,7 @@ share/python-wheels/
 MANIFEST
 
 # dirs
+web/
 cocoapi/
 weights/
 external/
