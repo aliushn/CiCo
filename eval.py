@@ -152,9 +152,9 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
         for j in reversed(range(num_dets_to_consider)):
             color = get_color(j, color_type)
             # get the bbox_idx to know box's layers (after FPN): p3-p7
-            if 'priors' in dets_out.keys():
-                px1, py1, px2, py2 = dets_out['priors'][j, :]
-                draw_dotted_rectangle(img_numpy, px1, py1, px2, py2, color, 3, gap=10)
+            # if 'priors' in dets_out.keys():
+            #     px1, py1, px2, py2 = dets_out['priors'][j, :]
+            #     draw_dotted_rectangle(img_numpy, px1, py1, px2, py2, color, 3, gap=10)
 
             if args.display_bboxes_cir and boxes_cir is not None:
                 x1, y1, x2, y2 = boxes_cir[j, :]
@@ -165,10 +165,10 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
 
             if args.display_bboxes:
                 cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 3)
-                # if num_tracked_mask_j == 0 or num_tracked_mask_j is None:
-                #     cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 3)
-                # else:
-                #     draw_dotted_rectangle(img_numpy, x1, y1, x2, y2, color, 3, gap=10)
+                if num_tracked_mask_j == 0 or num_tracked_mask_j is None:
+                    cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 3)
+                else:
+                    draw_dotted_rectangle(img_numpy, x1, y1, x2, y2, color, 3, gap=10)
 
             if args.display_text:
                 classes = dets_out['class'][:args.top_k].view(-1).detach().cpu().numpy()
@@ -193,14 +193,15 @@ def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0
                     text_str = '%s' % _class
 
                 font_face = cv2.FONT_HERSHEY_DUPLEX
-                font_scale = 0.8 * (max(img_numpy.shape) // 640)
-                font_thickness = 1 * (max(img_numpy.shape) // 640)
+                font_scale = 0.8 * max((max(img_numpy.shape) // 640), 1)
+                font_thickness = max((max(img_numpy.shape) // 640), 1)
 
                 text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
 
-                text_pt = (max(x1, 0), max(y1 - 3, 30))
+                text_pt = (max(x1, 0), max(y1 - 3, 25))
                 text_color = [255, 255, 255]
-                cv2.rectangle(img_numpy, (max(x1, 0), max(y1, 30)), (x1 + text_w, y1 - text_h - 4), color, -1)
+                x1, y1 = max(x1, 0), max(y1, 30)
+                cv2.rectangle(img_numpy, (x1, y1), (x1 + text_w+2, y1 - text_h - 4), color, -1)
                 cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness,
                             cv2.LINE_AA)
 
@@ -496,13 +497,17 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
 
     print()
     json_results = []
-
     # Main eval loop
     frame_times = MovingAverage()
     for vdx, vid in enumerate(dataset.vid_ids):
         progress = (vdx + 1) / dataset_size * 100
         print()
         print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
+
+        # Inverse direction
+        # if args.display:
+        #     vdx = -vdx - 1
+        #     vid = dataset.vid_ids[vdx]
 
         vid_objs = {}
         if data_type == 'vis':
@@ -569,15 +574,11 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
                     else:
                         conf_feats_video[int(obj_id)] += [pred_clip['conf_feat'][obj_idx]]
 
-            dim_mask = pred_clip['proto'].size(-1)
             temporal_dependent_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg', 'mask']
             pred_frame = dict()
             for k, v in pred_clip.items():
                 if k not in temporal_dependent_keys:
                     pred_frame[k] = v
-            if pred_clip['proto'].size(-2) == 1:
-                pred_frame['proto'] = pred_clip['proto'].squeeze(-1)
-                temporal_dependent_keys.pop(0)
             if 'priors' in pred_clip.keys():
                 pred_frame['priors'] = pred_clip['priors'][:, :4]
 
@@ -598,8 +599,6 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
                 else:
                     if pred_clip['box'].size(-1) != 4:
                         pred_frame['box'] = pred_clip['box'][:, batch_id*4:(batch_id+1)*4]
-                    if pred_clip['mask_coeff'].size(-1) != dim_mask:
-                        pred_frame['mask_coeff'] = pred_clip['mask_coeff'][:, batch_id*dim_mask:(batch_id+1)*dim_mask]
 
                     for k, v in pred_clip.items():
                         if k in temporal_dependent_keys:
@@ -677,6 +676,8 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
         if not args.display and data_type == 'vis':
             for obj_id, vid_obj in vid_objs.items():
                 vid_obj['video_id'] = vid
+                max_score = max(vid_obj['score'])
+                max_idx = vid_obj['score'].index(max_score)
                 stuff_score = np.array(vid_obj['score']).mean().item()
                 if TRAIN_INTERCLIPS_CLASS:
                     for cat_id, score in zip(category_ids_vid[obj_id]['category_id'], category_ids_vid[obj_id]['score']):
@@ -685,7 +686,10 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
                         assert len(vid_obj['segmentations']) == len_vid
                         json_results.append(vid_obj)
                 else:
-                    vid_obj['category_id'] = np.bincount(vid_obj['category_id']).argmax().item()
+                    if max_score > 0.8:
+                        vid_obj['category_id'] = vid_obj['category_id'][max_idx].item()
+                    else:
+                        vid_obj['category_id'] = np.bincount(vid_obj['category_id']).argmax().item()
                     vid_obj['score'] = stuff_score
                     assert len(vid_obj['segmentations']) == len_vid
                     json_results.append(vid_obj)

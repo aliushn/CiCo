@@ -2,19 +2,13 @@ import torch
 from layers.utils import compute_DIoU,  mask_iou, generate_track_gaussian, compute_comp_scores, generate_mask, compute_kl_div, center_size
 from .TF_utils import CandidateShift
 from utils import timer
-
-from datasets import cfg
-import torch.nn.functional as F
-
 import numpy as np
-import matplotlib.pyplot as plt
-import os
 
 import pyximport
 pyximport.install(setup_args={"include_dirs":np.get_include()}, reload_support=True)
 
 
-def Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
+def Track_TF_within_clip(cfg, net, candidates, imgs_meta, imgs=None):
     """At test time, Detect is the final layer of SSD.  Decode location preds,
     apply non-maximum suppression to location predictions based on conf
     scores and threshold to a top_k number of output predictions for both
@@ -140,7 +134,7 @@ def Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
         return results
 
 
-def Backward_Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
+def Backward_Track_TF_within_clip(net, candidates, imgs_meta, imgs=None, track_by_Gaussian=False):
     """
     Args:
                 net: STMask
@@ -155,7 +149,7 @@ def Backward_Track_TF_within_clip(net, candidates, imgs_meta, imgs=None):
     """
 
     img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
-    if cfg.track_by_Gaussian:
+    if track_by_Gaussian:
         img_level_keys += ['track']
 
     with timer.env('Track_TF'):

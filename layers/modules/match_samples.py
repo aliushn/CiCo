@@ -205,7 +205,7 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
         small_objs_idx = torch.nonzero(small_objs_idx.float(), as_tuple=False)
         if small_objs_idx.nelement() > 0:
             for i in small_objs_idx:
-                best_truth_overlap_cir[best_truth_idx_cir == i] *= 1.1
+                best_truth_overlap_cir[best_truth_idx_cir == i] *= 1.05
 
         # Define positive sample, negative samples and neutral
         keep_pos_cir = best_truth_overlap_cir > pos_thresh

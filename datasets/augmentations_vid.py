@@ -1,9 +1,9 @@
 import cv2
-import mmcv
 import numpy as np
-import torch
 from numpy import random
-from .config import MEANS, STD
+
+MEANS = (123.675, 116.28, 103.53)
+STD = (58.395, 57.12, 57.375)
 
 
 class ToPercentCoords(object):

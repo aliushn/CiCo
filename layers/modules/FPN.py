@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import List
 
-from datasets.config import cfg
 try:
     from dcn_v2 import DCN, DCNv2
 except ImportError:
@@ -37,29 +36,29 @@ class FPN(ScriptModuleWrapper):
     __constants__ = ['interpolation_mode', 'num_downsample', 'use_conv_downsample',
                      'lat_layers', 'pred_layers', 'downsample_layers']
 
-    def __init__(self, in_channels):
+    def __init__(self, fpn, in_channels):
         super().__init__()
 
         self.lat_layers = nn.ModuleList([
-            nn.Conv2d(x, cfg.fpn.num_features, kernel_size=1)
+            nn.Conv2d(x, fpn.NUM_FEATURES, kernel_size=1)
             for x in reversed(in_channels)
         ])
 
         # This is here for backwards compatability
-        padding = 1 if cfg.fpn.pad else 0
+        padding = 1 if fpn.PAD else 0
         self.pred_layers = nn.ModuleList([
-            nn.Conv2d(cfg.fpn.num_features, cfg.fpn.num_features, kernel_size=3, padding=padding)
+            nn.Conv2d(fpn.NUM_FEATURES, fpn.NUM_FEATURES, kernel_size=3, padding=padding)
             for _ in in_channels
         ])
 
-        if cfg.fpn.use_conv_downsample:
+        if fpn.USE_CONV_DOWNSAMPLE:
             self.downsample_layers = nn.ModuleList([
-                nn.Conv2d(cfg.fpn.num_features, cfg.fpn.num_features, kernel_size=3, padding=1, stride=2)
-                for _ in range(cfg.fpn.num_downsample)
+                nn.Conv2d(fpn.NUM_FEATURES, fpn.NUM_FEATURES, kernel_size=3, padding=1, stride=2)
+                for _ in range(fpn.NUM_DOWNSAMPLE)
             ])
 
-        self.num_downsample = cfg.fpn.num_downsample
-        self.use_conv_downsample = cfg.fpn.use_conv_downsample
+        self.num_downsample = fpn.NUM_DOWNSAMPLE
+        self.use_conv_downsample = fpn.USE_CONV_DOWNSAMPLE
 
     @script_method_wrapper
     def forward(self, convouts: List[torch.Tensor]):

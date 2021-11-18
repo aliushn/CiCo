@@ -95,7 +95,10 @@ class Detect(object):
                             _, pred_masks = crop(det_masks_soft.permute(1, 2, 0).contiguous(), boxes_cir)
                             candidate_cur['mask'] = pred_masks.permute(2, 0, 1).contiguous()
                         else:
-                            boxes_crop = boxes_cir if self.cfg.MODEL.MASK_HEADS.PROTO_CROP else None
+                            boxes_cir_c = center_size(boxes_cir)
+                            boxes_cir_c[:, 2:] *= 1.2
+                            boxes_cir_crop = point_form(boxes_cir_c) if self.clip_frames > 3 else boxes_cir
+                            boxes_crop = boxes_cir_crop if self.cfg.MODEL.MASK_HEADS.PROTO_CROP else None
                             pred_masks = generate_mask(proto_data, masks_coeff.reshape(-1, proto_data.size(-1)),
                                                        boxes_crop, proto_coeff_occlu=self.mask_coeff_occlu)
                             # pred_masks = pred_masks.reshape(-1, dim_boxes//4, pred_masks.size(-2), pred_masks.size(-1))
@@ -120,7 +123,7 @@ class Detect(object):
             keep = ((boxes_c[:, :2] > 0) & (boxes_c[:, :2] < 1)).reshape(candidate['box'].size(0), -1)
             keep = keep.sum(dim=-1) >= keep.size(-1)//2
             if self.train_masks:
-                non_empty_mask = (candidate['mask'].gt(0.5).sum(dim=[-1, -2]) > 5).sum(dim=-1) > 0
+                non_empty_mask = (candidate['mask'].gt(0.5).sum(dim=[-1, -2]) > 5).sum(dim=-1) > 1
                 keep = keep & non_empty_mask
             for k, v in candidate.items():
                 if k not in self.img_level_keys:
@@ -211,7 +214,7 @@ class Detect(object):
         iou = None
         num_classes, n_objs = idx.size()
         if self.nms_with_biou or not self.nms_with_miou:
-            boxes_idx = candidate['box'].reshape(n_objs, -1, 4).permute(1,0,2).contiguous()
+            boxes_idx = candidate['box'].reshape(n_objs, -1, 4).permute(1, 0, 2).contiguous()
             box_iou_ori = jaccard(boxes_idx, boxes_idx).mean(0)
             box_iou = torch.stack([box_iou_ori[idx[c]][:, idx[c]] for c in range(idx.size(0))], dim=0)
             # [num_classes, num_dets, num_dets]

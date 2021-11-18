@@ -207,9 +207,8 @@ def display_lincomb(protos_data, masks_coeff=None, img_ids=None, output_file=Non
         out_masks = generate_mask(protos_data, masks_coeff)
     else:
         out_masks = generate_mask(protos_data, masks_coeff)
-    protos_data = protos_data.permute(2,0,1,3).contiguous()
+    protos_data = protos_data.permute(2, 0, 1, 3).contiguous()
     bs = protos_data.size(0)
-    # masks_coeff[torch.abs(masks_coeff) < 0.25] = 0
     root_dir = os.path.join(output_file, 'protos/')
     if len(img_ids) > 1:
         root_dir = ''.join([root_dir, str(img_ids[0]), '/'])
@@ -224,6 +223,7 @@ def display_lincomb(protos_data, masks_coeff=None, img_ids=None, output_file=Non
         arr_img = np.zeros([proto_h * arr_h, proto_w * arr_w])
         arr_run = np.zeros([proto_h * arr_h, proto_w * arr_w])
 
+        # plot protos
         for y in range(arr_h):
             for x in range(arr_w):
                 i = arr_w * y + x
@@ -246,20 +246,41 @@ def display_lincomb(protos_data, masks_coeff=None, img_ids=None, output_file=Non
         plt.savefig(''.join([root_dir, str(img_ids[-1]), '.png']))
         plt.clf()
 
+        # plot mask coeff
+        proto_data = proto_data.permute(2, 0, 1).contiguous()
         x = torch.arange(len(masks_coeff[0])).cpu().numpy()
-        y0 = torch.zeros(len(masks_coeff[0])).cpu().numpy()
-        plt.plot(x, y0, 'b')
+        plt.subplots(figsize=(30, 5))
         for jdx in range(masks_coeff.size(0)):
-            # plot mask coeff
             y = masks_coeff[jdx].cpu().numpy()
-            plt.plot(x, y, '+--')
-        plt.ylim(-1, 1)
-        plt.title(str(img_ids[-1]))
-        plt.savefig(''.join([root_dir, str(img_ids[-1]), '_mask_coeff.png']))
-        plt.clf()
+            plt.bar(x, y, width=1, edgecolor='blue')
+            for x1, y1 in zip(x, y):
+                if y1 > 0:
+                    plt.text(x1-0.35, y1+0.05, '%.2f'%y1, fontsize=18)
+                else:
+                    plt.text(x1-0.45, y1-0.18, '%.2f'%y1, fontsize=18)
+            plt.xticks(fontsize=18)
+            plt.yticks(fontsize=18)
+            plt.ylim(-1.2, 1.2)
+            plt.xlim(-0.5, 31.5)
+            # plt.title(str(img_ids[-1]))
+            plt.savefig(''.join([root_dir, str(img_ids[-1]), str(jdx), '_mask_coeff.png']))
+            plt.clf()
 
+            # Plot protos whose mask coeffs > 0.75
+            keep = masks_coeff[jdx] > 0.75
+            obj_protos = proto_data[keep].reshape(keep.sum(), -1)
+            obj_protos = (obj_protos - obj_protos.min(dim=-1)[0].view(-1, 1)) / obj_protos.max(dim=-1)[0].view(-1, 1)
+            obj_protos = obj_protos.reshape(keep.sum(), proto_h, proto_w)
+            obj_protos = F.interpolate(obj_protos.unsqueeze(0), (2*proto_h, 2*proto_w)).squeeze(0)
+            obj_protos = obj_protos.permute(1, 0, 2).contiguous().reshape(2*proto_h, -1)
+            plt.imshow(obj_protos.cpu().numpy())
+            plt.axis('off')
+            plt.title(str(img_ids[-1]))
+            plt.savefig(''.join([root_dir, str(img_ids[-1]), '_', str(jdx), '_obj_protos.png']))
+            plt.clf()
+
+        # plot single mask
         for jdx in range(masks_coeff.size(0)):
-            # plot single mask
             plt.imshow(out_masks[jdx, kdx].cpu().numpy())
             plt.axis('off')
             plt.title(str(img_ids[-1]))

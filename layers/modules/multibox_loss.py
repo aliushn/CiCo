@@ -161,6 +161,8 @@ class MultiBoxLoss(nn.Module):
                     else:
                         ind_range = range(jdx*self.PHL_stride, jdx*self.PHL_stride+self.PHL_kernel_size)
 
+                    if self.num_classes == 25 or self.num_classes == 26:
+                        self.pos_threshold = 0.55
                     match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[idx], loc_data[kdx],
                                loc_t, conf_t, idx_t, ids_t, kdx, jdx, self.pos_threshold,
                                self.neg_threshold, use_cir_boxes=self.use_cir_boxes, ind_range=ind_range)
@@ -187,9 +189,7 @@ class MultiBoxLoss(nn.Module):
             # Split boxes of positive samples frame-by-frame to form a list
             num_objs_per_frame = pos.sum(dim=1).reshape(len(gt_boxes), -1).sum(-1).tolist()
             pred_boxes_p_split = torch.split(pred_boxes_p.reshape(-1, box_dim), num_objs_per_frame, dim=0)
-            pred_boxes_p_split = [box.reshape(box.size(0), -1) for box in pred_boxes_p_split]
             gt_boxes_p_split = torch.split(gt_boxes_p.reshape(-1, box_dim), num_objs_per_frame, dim=0)
-            gt_boxes_p_split = [box.reshape(box.size(0), -1) for box in gt_boxes_p_split]
 
             # --------------------------------  Mask Loss  -----------------------------------------------------
             if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
@@ -363,7 +363,7 @@ class MultiBoxLoss(nn.Module):
         if self.cfg.DATASETS.TYPE == 'cocovis':
             n_clips = self.cfg.SOLVER.NUM_CLIPS
         else:
-            n_clips = track_data.size(0) if self.cfg.SOLVER.NUM_CLIPS == 1 else self.cfg.SOLVER.NUM_CLIPS
+            n_clips = track_data.size(0)  # if self.cfg.SOLVER.NUM_CLIPS == 1 else self.cfg.SOLVER.NUM_CLIPS
         bs = track_data.size(0) // n_clips
 
         loss = torch.tensor(0., device=track_data.device)

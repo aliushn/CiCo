@@ -1,7 +1,6 @@
 import torch
 from torch.nn import functional as F
 from torch import nn
-from datasets import cfg
 from ..utils import generate_rel_coord, generate_rel_coord_gauss
 
 
@@ -34,8 +33,9 @@ def parse_dynamic_params(params, channels, weight_nums, bias_nums):
 
 
 class DynamicMaskHead(nn.Module):
-    def __init__(self):
+    def __init__(self, cfg):
         super(DynamicMaskHead, self).__init__()
+        self.cfg = cfg
         self.num_layers = cfg.dynamic_mask_head_layers
         self.channels = cfg.mask_dim
         self.in_channels = cfg.mask_dim
@@ -103,4 +103,4 @@ class DynamicMaskHead(nn.Module):
                                                self.weight_nums, self.bias_nums)
         mask_logits = self.mask_heads_forward(mask_head_inputs.reshape(1, -1, H, W).contiguous(), weights, biases, n_inst)
 
-        return cfg.mask_proto_mask_activation(mask_logits.squeeze(0))
+        return self.cfg.mask_proto_mask_activation(mask_logits.squeeze(0))

@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from datasets.config import cfg
 from .make_net import make_net
 
 try:
@@ -21,11 +20,11 @@ script_method_wrapper = torch.jit.script_method if use_jit else lambda fn, _rcn=
 
 class FastMaskIoUNet(ScriptModuleWrapper):
 
-    def __init__(self):
+    def __init__(self, num_classes, maskiou_net):
         super().__init__()
         input_channels = 1
-        last_layer = [(cfg.num_classes-1, 1, {})]
-        self.maskiou_net, _ = make_net(input_channels, cfg.maskiou_net + last_layer, include_last_relu=True)
+        last_layer = [(num_classes, 1, {})]
+        self.maskiou_net, _ = make_net(input_channels, maskiou_net + last_layer, include_last_relu=True)
 
     def forward(self, x):
         x = self.maskiou_net(x)

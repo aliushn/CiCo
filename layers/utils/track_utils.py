@@ -2,7 +2,6 @@
 import torch
 from .box_utils import center_size, point_form, crop
 import torch.distributions as dist
-from datasets import cfg
 import matplotlib.pyplot as plt
 import os
 from spatial_correlation_sampler import spatial_correlation_sample
@@ -187,8 +186,8 @@ def display_association_map(embedding_tensor, mu, cov, save_dir, video_id=0, fra
     for i in range(n):
         G = dist.MultivariateNormal(mu[i], torch.diag(cov[i]))
         prob_cur = G.log_prob(embedding_tensor).exp().view(h, w, 1).repeat(h, w, 3)
-        color_idx = (i * 5) % len(cfg.COLORS)
-        prob.append(prob_cur * (torch.tensor(cfg.COLORS[color_idx])).view(1, 1, -1))
+        # color_idx = (i * 5) % len(COLORS)
+        # prob.append(prob_cur * (torch.tensor(COLORS[color_idx])).view(1, 1, -1))
 
     prob = torch.cat(prob, dim=0)
     plt.imshow(prob.cpu().numpy())

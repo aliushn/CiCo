@@ -27,7 +27,7 @@ class CoreNet(nn.Module):
         self.block_diagonal = False
 
         # Some hacky rewiring to accomodate the FPN
-        self.fpn = FPN([self.backbone.channels[i] for i in cfg.MODEL.BACKBONE.SELECTED_LAYERS])
+        self.fpn = FPN(cfg.MODEL.FPN, [self.backbone.channels[i] for i in cfg.MODEL.BACKBONE.SELECTED_LAYERS])
         self.selected_layers = list(range(len(cfg.MODEL.BACKBONE.SELECTED_LAYERS)+cfg.MODEL.FPN.NUM_DOWNSAMPLE))
         self.fpn_num_features = cfg.MODEL.FPN.NUM_FEATURES
         self.fpn_num_downsample = cfg.MODEL.FPN.NUM_DOWNSAMPLE

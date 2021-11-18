@@ -6,7 +6,8 @@ import types
 from numpy import random
 import torch.nn.functional as F
 
-from datasets import cfg, MEANS, STD
+MEANS = (123.675, 116.28, 103.53)
+STD = (58.395, 57.12, 57.375)
 
 def intersect(box_a, box_b):
     max_xy = np.minimum(box_a[:, 2:], box_b[2:])
@@ -671,23 +672,24 @@ def enable_if(condition, obj):
 class SSDAugmentation(object):
     """ Transform to be used when training. """
 
-    def __init__(self, min_size, max_size, MS_train=True, mean=MEANS, std=STD):
+    def __init__(self, backbone_transform, min_size, max_size, MS_train=True, mean=MEANS, std=STD,
+                 augment_expand=True, augment_random_flip=True):
         self.augment = Compose([
             ConvertFromInts(),
             # if cfg.augment_expand = True, it is easier to compile
             # if we transfer bboxes from present coords to absolute_coords
-            enable_if(cfg.augment_expand, ToAbsoluteCoords()),
+            enable_if(augment_expand, ToAbsoluteCoords()),
             # enable_if(cfg.augment_photometric_distort, PhotometricDistort()),
-            enable_if(cfg.augment_expand, Expand(mean)),
-            enable_if(cfg.augment_expand, ToPercentCoords()),
+            enable_if(augment_expand, Expand(mean)),
+            enable_if(augment_expand, ToPercentCoords()),
             # enable_if(cfg.augment_random_sample_crop, RandomSampleCrop()),
             # enable_if(cfg.augment_random_mirror, RandomMirror()),
-            enable_if(cfg.augment_random_flip, RandomFlip()),
+            enable_if(augment_random_flip, RandomFlip()),
             # enable_if(cfg.augment_random_rot90, RandomRot90()),
             Resize(min_size, max_size,  MS_train=MS_train),
             # Pad(img_scales, mean, MS_train=MS_train),
             # ToPercentCoords(),
-            BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')
+            BackboneTransform(backbone_transform, mean, std, 'BGR')
         ])
 
     def __call__(self, img, masks, boxes, labels):
