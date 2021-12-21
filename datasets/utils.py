@@ -8,7 +8,6 @@ from .augmentations_vis import BaseTransform_vis
 from .augmentations_coco import BaseTransform_coco
 from .augmentations_vid import BaseTransform_vid
 import torch.nn.functional as F
-from .config import MEANS, STD
 
 
 def random_scale(img_scales, mode='range'):

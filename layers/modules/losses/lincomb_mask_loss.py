@@ -149,7 +149,7 @@ class LincombMaskLoss(object):
                     loss += pre_loss.mean()
         loss = loss / max(bs, 1) * self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA * n_frames
         losses = {'M_dice': loss} if self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF else {'M_bce': loss}
-        losses['M_l1'] = sparse_loss / max(bs, 1)
+        # losses['M_l1'] = sparse_loss / max(bs, 1)
         if self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_LOSS:
             losses['M_coeff'] = loss_coeff_div / max(bs, 1)
     

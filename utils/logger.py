@@ -460,6 +460,24 @@ class LogVisualizer():
         return [diff(b - a) for a, b in zip(x1, x2)]
 
 
+import logging
+from mmcv.utils import get_logger
+def get_root_logger(log_file=None, log_level=logging.INFO):
+    """Get root logger.
+
+    Args:
+        log_file (str, optional): File path of log. Defaults to None.
+        log_level (int, optional): The level of logger.
+            Defaults to logging.INFO.
+
+    Returns:
+        :obj:`logging.Logger`: The obtained logger
+    """
+    logger = get_logger(name='mmdet', log_file=log_file, log_level=log_level)
+
+    return logger
+
+
 if __name__ == '__main__':
     if len(sys.argv) < 4 + 1:
         print('Usage: python utils/logger.py <LOG_FILE> <TYPE> <X QUERY> <Y QUERY>')

@@ -96,9 +96,9 @@ class Detect(object):
                             candidate_cur['mask'] = pred_masks.permute(2, 0, 1).contiguous()
                         else:
                             boxes_cir_c = center_size(boxes_cir)
-                            boxes_cir_c[:, 2:] *= 1.2
-                            boxes_cir_crop = point_form(boxes_cir_c) if self.clip_frames > 3 else boxes_cir
-                            boxes_crop = boxes_cir_crop if self.cfg.MODEL.MASK_HEADS.PROTO_CROP else None
+                            boxes_cir_c[:, 2:] *= 1.1
+                            # boxes_cir_crop = point_form(boxes_cir_c) if self.clip_frames > 3 else boxes_cir
+                            boxes_crop = point_form(boxes_cir_c) if self.cfg.MODEL.MASK_HEADS.PROTO_CROP else None
                             pred_masks = generate_mask(proto_data, masks_coeff.reshape(-1, proto_data.size(-1)),
                                                        boxes_crop, proto_coeff_occlu=self.mask_coeff_occlu)
                             # pred_masks = pred_masks.reshape(-1, dim_boxes//4, pred_masks.size(-2), pred_masks.size(-1))
@@ -207,7 +207,7 @@ class Detect(object):
         if not self.use_focal_loss:
             scores = scores[1:]
         rescores = candidate['centerness'].mean(-1).reshape(1, -1) * scores if 'centerness' in candidate.keys() else scores
-        rescores, idx = rescores.sort(1, descending=True)  # [num_classes, num_dets]
+        rescores, idx = rescores.sort(1, descending=True)                                 # [num_classes, num_dets]
         idx = idx[:, :top_k].contiguous()
         rescores = rescores[:, :top_k].contiguous()
 
@@ -230,14 +230,13 @@ class Detect(object):
                 masks_idx = masks[:, idx[c]]
                 flag = (masks_idx.sum(dim=[-1, -2]) > 0).sum(dim=0)
                 m_iou.append(miou_ori[:, idx[c]][:, :, idx[c]].sum(dim=0) / flag)
-            m_iou = torch.stack(m_iou, dim=0)      # [n_class, num_dets, num_dets]
+            m_iou = torch.stack(m_iou, dim=0)          # [n_class, num_dets, num_dets]
             iou = iou * 0.5 + m_iou * 0.5 if iou is not None else m_iou
 
         iou.triu_(diagonal=1)
-        iou_max, _ = iou.max(dim=1)                # [num_classes, num_dets]
-
+        iou_max, _ = iou.max(dim=1)                    # [num_classes, num_dets]
         # Now just filter out the ones higher than the threshold
-        keep = (iou_max <= iou_threshold)          # [num_classes, num_dets]
+        keep = iou_max <= iou_threshold                # [num_classes, num_dets]
 
         # We should also only keep detections over the confidence threshold, but at the cost of
         # maxing out your detection count for every image, you can just not do that. Because we
@@ -245,7 +244,7 @@ class Detect(object):
         # this increase doesn't affect us much (+0.2 mAP for 34 -> 33 fps), so we leave it out.
         # However, when you implement this in your method, you should do this second threshold.
         if second_threshold:
-            keep *= (rescores > self.conf_thresh)
+            keep *= (rescores > 0.5*self.conf_thresh)
 
         # Assign each kept detection to its corresponding class
         classes = torch.arange(num_classes, device=scores.device)[:, None].expand_as(keep)[keep]

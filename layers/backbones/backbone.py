@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import pickle
 from collections import OrderedDict
 from dcn_v2 import DCN
 import pickle

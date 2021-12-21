@@ -23,8 +23,6 @@ def load_config(config_file):
     cfg_base, cfg_dict = load_cfg_from_py_file(config_file)
     for cfg_file in cfg_base:
         if os.path.splitext(cfg_file)[1] in ['.yaml']:
-            # print(os.getcwd())
-            os.chdir('/home/lmh/Downloads/VIS/code/OSTMask/')
             cfg.merge_from_file(cfg_file)
         elif os.path.splitext(cfg_file)[1] in ['.py']:
             _, cfg_dict_cur = load_cfg_from_py_file(cfg_file)

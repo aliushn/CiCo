@@ -363,7 +363,7 @@ class MultiBoxLoss(nn.Module):
         if self.cfg.DATASETS.TYPE == 'cocovis':
             n_clips = self.cfg.SOLVER.NUM_CLIPS
         else:
-            n_clips = track_data.size(0)  # if self.cfg.SOLVER.NUM_CLIPS == 1 else self.cfg.SOLVER.NUM_CLIPS
+            n_clips = self.cfg.SOLVER.NUM_CLIPS * self.cfg.SOLVER.NUM_CLIP_FRAMES
         bs = track_data.size(0) // n_clips
 
         loss = torch.tensor(0., device=track_data.device)

@@ -86,7 +86,7 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
 
 
-def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0.45):
+def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0.55):
     """
     Note: If undo_transform=False then im_h and im_w are allowed to be None.
     -- display_model: 'train', 'test', 'None' means groundtruth results
@@ -372,8 +372,6 @@ def evaluate(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, eva
     json_results = []
     frame_times = MovingAverage()
     for vdx, vid in enumerate(dataset.vid_ids):
-        if vdx > 50:
-            break
         progress = (vdx + 1) / dataset_size * 100
         print()
         print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
@@ -414,10 +412,7 @@ def evaluate(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, eva
             preds = net(images, img_meta=images_meta)
             frame_times.add(timer.total_time())
             progress_bar_clip.set_val(cdx+1)
-            if vdx > 0 or cdx > 0:
-                avg_fps = 1. / (frame_times.get_avg() / args.batch_size)
-            else:
-                avg_fps = 0
+            avg_fps = 1. / (frame_times.get_avg() / args.batch_size) if vdx > 0 or cdx > 0 else 0
             print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)   %5.2f FPS  '
                   % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip, avg_fps), end='')
 
@@ -440,7 +435,7 @@ def evaluate(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, eva
                         plt.imshow(img_numpy)
                         plt.axis('off')
                         plt.title(str(img_id))
-                        plt.savefig(''.join([root_dir, '/', str(img_id[1]), '.png']))
+                        plt.savefig(''.join([root_dir, '/', str(img_id[1]), '.jpg']))
                         plt.clf()
 
                     else:
@@ -454,7 +449,7 @@ def evaluate(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, eva
                                                      img_meta=images_meta[batch_id])
                             plt.imshow(img_numpy)
                             plt.axis('off')
-                            plt.savefig(''.join([root_dir, '/', str(img_id[1]), '_', str(p), '.png']))
+                            plt.savefig(''.join([root_dir, '/', str(img_id[1]), '_', str(p), '.jpg']))
                             plt.clf()
 
                 else:
@@ -497,7 +492,7 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
 
     print()
     json_results = []
-    # Main eval loop
+    # Main eval loop, only support a single clip
     frame_times = MovingAverage()
     for vdx, vid in enumerate(dataset.vid_ids):
         progress = (vdx + 1) / dataset_size * 100
@@ -558,10 +553,7 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
             pred_clip = preds_clip[0]
             frame_times.add(timer.total_time())
             progress_bar_clip.set_val(cdx+1)
-            if vdx > 0 or cdx > 0:
-                avg_fps = 1. / (frame_times.get_avg() / clip_frames)
-            else:
-                avg_fps = 0
+            avg_fps = 1. / (frame_times.get_avg() / clip_frames) if vdx > 0 or cdx > 0 else 0
             print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)  %5.2f fps  %5.2f fps '
                   % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip, avg_fps, avg_fps_wodata), end='')
 
@@ -591,7 +583,6 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
 
             for idx, frame_id in zip(newly_idx, newly_clip_frame_ids):
                 batch_id = order_idx[idx]
-                img_id = (vid, frame_id)
                 if pred_clip['box'].size(0) == 0:
                     if train_masks:
                         pred_frame['mask'] = torch.Tensor()
@@ -613,8 +604,7 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
                                                  img_meta=images_meta[idx])
                         plt.imshow(img_numpy)
                         plt.axis('off')
-                        plt.title(str(img_id))
-                        plt.savefig(''.join([root_dir, '/', str(frame_id), '.png']))
+                        plt.savefig(''.join([root_dir, '/', str(frame_id), '.jpg']), bbox_inches='tight', pad_inches=0)
                         plt.clf()
                     else:
                         pred_frame_single = dict()
@@ -670,14 +660,12 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
                     plt.imshow(img_numpy)
                     plt.axis('off')
                     plt.title(str((vid, frame_id)))
-                    plt.savefig(''.join([root_dir, '/', str(frame_id), '.png']))
+                    plt.savefig(''.join([root_dir, '/', str(frame_id), '.jpg']))
                     plt.clf()
 
         if not args.display and data_type == 'vis':
             for obj_id, vid_obj in vid_objs.items():
                 vid_obj['video_id'] = vid
-                max_score = max(vid_obj['score'])
-                max_idx = vid_obj['score'].index(max_score)
                 stuff_score = np.array(vid_obj['score']).mean().item()
                 if TRAIN_INTERCLIPS_CLASS:
                     for cat_id, score in zip(category_ids_vid[obj_id]['category_id'], category_ids_vid[obj_id]['score']):
@@ -686,15 +674,13 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
                         assert len(vid_obj['segmentations']) == len_vid
                         json_results.append(vid_obj)
                 else:
-                    if max_score > 0.8:
-                        vid_obj['category_id'] = vid_obj['category_id'][max_idx].item()
-                    else:
-                        vid_obj['category_id'] = np.bincount(vid_obj['category_id']).argmax().item()
+                    vid_obj['category_id'] = np.bincount(vid_obj['category_id']).argmax().item()
                     vid_obj['score'] = stuff_score
                     assert len(vid_obj['segmentations']) == len_vid
                     json_results.append(vid_obj)
 
     timer.print_stats()
+    print('Total numbers of instances:', len(json_results))
     return json_results
 
 

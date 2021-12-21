@@ -68,6 +68,10 @@ def train(cfg):
         torch.cuda.set_device(torch.cuda.current_device())
         device = torch.cuda.current_device()
 
+    if cfg.SOLVER.IMS_PER_BATCH * cfg.SOLVER.NUM_CLIPS // torch.cuda.device_count() < 6:
+        print('Per-GPU batch size is less than the recommended limit for batch norm. Disabling batch norm.')
+        cfg.freeze_bn = True
+
     # Parallel wraps the underlying module, but when saving and loading we don't want that
     net = CoreNet(cfg)
     net.train()
@@ -107,7 +111,8 @@ def train(cfg):
         print('Initializing weights based', cfg.MODEL.BACKBONE.PATH)
         if cfg.DATASETS.TYPE == 'coco':
             print('Initializing weights based ImageNet ...')
-            net.init_weights(backbone_path='weights/pretrained_models_coco/' + cfg.MODEL.BACKBONE.PATH,
+            bb_path = cfg.MODEL.BACKBONE.SWINT.path if cfg.MODEL.BACKBONE.SWINT.engine else cfg.MODEL.BACKBONE.PATH
+            net.init_weights(backbone_path='weights/pretrained_models_coco/' + bb_path,
                              local_rank=args.local_rank)
         else:
             print('Initializing weights based COCO ...')

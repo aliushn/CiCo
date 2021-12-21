@@ -7,7 +7,7 @@ from layers.modules import PredictionModule_FC, PredictionModule, PredictionModu
     TemporalNet, ProtoNet, ProtoNet3D
 from layers.functions import Detect, Track, Track_TF, Track_TF_Clip
 from layers.modules import InterclipsClass
-from backbone import construct_backbone
+from layers.backbones import construct_backbone, SwinTransformer
 from utils import timer
 
 # This is required for Pytorch 1.0.1 on Windows to initialize Cuda on some driver versions.
@@ -21,22 +21,26 @@ class CoreNet(nn.Module):
         super().__init__()
 
         self.cfg = cfg
-        self.backbone = construct_backbone(cfg.MODEL.BACKBONE)
-        in_channels = cfg.MODEL.FPN.NUM_FEATURES
-        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-        self.block_diagonal = False
 
-        # Some hacky rewiring to accomodate the FPN
-        self.fpn = FPN(cfg.MODEL.FPN, [self.backbone.channels[i] for i in cfg.MODEL.BACKBONE.SELECTED_LAYERS])
+        # ------------ build Backbone ------------
+        if self.cfg.MODEL.BACKBONE.SWINT.engine:
+            self.backbone = SwinTransformer()
+            bb_embed_dim = self.cfg.MODEL.BACKBONE.SWINT.embed_dim
+            self.fpn = FPN(cfg.MODEL.FPN, [2**i*bb_embed_dim for i in cfg.MODEL.BACKBONE.SELECTED_LAYERS])
+        else:
+            self.backbone = construct_backbone(cfg.MODEL.BACKBONE)
+            self.fpn = FPN(cfg.MODEL.FPN, [self.backbone.channels[i] for i in cfg.MODEL.BACKBONE.SELECTED_LAYERS])
+
         self.selected_layers = list(range(len(cfg.MODEL.BACKBONE.SELECTED_LAYERS)+cfg.MODEL.FPN.NUM_DOWNSAMPLE))
         self.fpn_num_features = cfg.MODEL.FPN.NUM_FEATURES
         self.fpn_num_downsample = cfg.MODEL.FPN.NUM_DOWNSAMPLE
+        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
 
         # ------------ build ProtoNet ------------
         self.train_masks = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
         if self.train_masks:
-            self.ProtoNet = ProtoNet(cfg, in_channels) if not cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE else \
-                ProtoNet3D(cfg, in_channels)
+            self.ProtoNet = ProtoNet(cfg, self.fpn_num_features) if not cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE else \
+                ProtoNet3D(cfg, self.fpn_num_features)
 
         # ------- Build multi-scales prediction head  ------------
         self.num_priors = len(cfg.MODEL.BACKBONE.PRED_SCALES[0]) * len(cfg.MODEL.BACKBONE.PRED_ASPECT_RATIOS[0])
@@ -60,8 +64,8 @@ class CoreNet(nn.Module):
         # ---------------- Build track head ----------------
         if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
             if cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-                track_arch = [(in_channels, 3, {'padding': 1})] * 2 + [(cfg.track_dim, 1, {})]
-                self.track_conv, _ = make_net(in_channels, track_arch, include_bn=True, include_last_relu=False)
+                track_arch = [(self.fpn_num_features, 3, {'padding': 1})] * 2 + [(cfg.track_dim, 1, {})]
+                self.track_conv, _ = make_net(self.fpn_num_features, track_arch, include_bn=True, include_last_relu=False)
 
             if not cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE and not cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
                 # Track objects frame-by-frame
@@ -76,15 +80,15 @@ class CoreNet(nn.Module):
                 if cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
                     # A Temporal Fusion built on two adjacent frames for tracking
                     self.TF_correlation_selected_layer = cfg.STMASK.T2S_HEADS.CORRELATION_SELECTED_LAYER
-                    corr_channels = 2*in_channels + cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE**2
+                    corr_channels = 2*self.fpn_num_features + cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE**2
                     self.TemporalNet = TemporalNet(corr_channels, cfg.MODEL.MASK_HEADS.MASK_DIM,
                                                    maskshift_loss=cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT,
                                                    use_sipmask=cfg.MODEL.MASK_HEADS.USE_SIPMASK,
                                                    sipmask_head=cfg.MODEL.MASK_HEADS.SIPMASK_HEAD)
 
         if cfg.MODEL.MASK_HEADS.TRAIN_MASKS and cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS:
-            sem_seg_head = [(in_channels, 3, 1)]*2 + [(cfg.DATASETS.NUM_CLASSES, 1, 0)]
-            self.semantic_seg_conv, _ = make_net(in_channels, sem_seg_head, include_bn=True,
+            sem_seg_head = [(self.fpn_num_features, 3, 1)]*2 + [(cfg.DATASETS.NUM_CLASSES, 1, 0)]
+            self.semantic_seg_conv, _ = make_net(self.fpn_num_features, sem_seg_head, include_bn=True,
                                                  include_last_relu=False)
 
     def load_weights(self, path):
@@ -224,7 +228,7 @@ class CoreNet(nn.Module):
                             and all_in(conv_constants, module.__dict__['_constants_set']))
 
             is_conv_layer = isinstance(module, nn.Conv2d) or is_script_conv
-            if is_conv_layer and module not in self.backbone.backbone_modules:
+            if is_conv_layer and not name.startswith('backbone'):  # module not in self.backbone.backbone_modules:
                 if local_rank == 0:
                     print('init weights by Xavier:', name)
 
@@ -238,6 +242,18 @@ class CoreNet(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
+
+        if self.cfg.freeze_bn:
+            self.freeze_bn()
+
+    def freeze_bn(self, enable=False):
+        """ Adapted from https://discuss.pytorch.org/t/how-to-train-with-frozen-batchnorm/12106/8 """
+        for module in self.modules():
+            if isinstance(module, nn.BatchNorm2d):
+                module.train() if enable else module.eval()
+
+                module.weight.requires_grad = enable
+                module.bias.requires_grad = enable
 
     def forward_single(self, x, img_meta=None):
         """ The input should be of size [batch_size, 3, img_h, img_w] """

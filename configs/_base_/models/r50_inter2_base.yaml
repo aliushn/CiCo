@@ -1,6 +1,6 @@
 MODEL:
   BACKBONE:
     CONV_BODY: 'ResNet50'
-    ARGS: ([3, 4, 6, 3], [0, 4, 6, 3], 2)
+    ARGS: ([3, 4, 6, 3], [0, 4, 6, 3], 2),
 
 NAME: 'r50_plus_base'
