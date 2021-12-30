@@ -68,11 +68,12 @@ class DynamicMaskHead(nn.Module):
         :param bias: [b0, b1, ...]
         :return:
         '''
-        assert features.dim() == 4
+        assert features.dim() == 4 or features.dim() == 5
+        conv = F.conv2d if features.dim() == 4 else F.conv3d
         n_layers = len(weights)
         x = features
         for i, (w, b) in enumerate(zip(weights, biases)):
-            x = F.conv2d(
+            x = conv(
                 x, w, bias=b,
                 stride=1, padding=0,
                 groups=num_insts
@@ -83,22 +84,35 @@ class DynamicMaskHead(nn.Module):
 
     def __call__(self, mask_feats, mask_head_params, det_bbox, fpn_levels):
         '''
-        :param mask_feats: [1, 8, h, w]
-        :param mask_head_params: [n, 196]
+        :param mask_feats: [1, 8, h, w] or [1, 8, t, h, w]
+        :param mask_head_params: [n, 169]
+        :param det_bbox:[n, 4]
         :return:
         '''
         n_inst, _ = mask_head_params.size()
         H, W = mask_feats.size()[-2:]
 
-        if not self.disable_rel_coords:
-            relative_coords = generate_rel_coord_gauss(det_bbox, H, W).unsqueeze(1).detach()
-            # relative_coords = generate_rel_coord(det_bbox, fpn_levels.tolist(), self.sizes_of_interest, H, W).detach()
-            mask_head_inputs = torch.cat([relative_coords, mask_feats.repeat(n_inst, 1, 1, 1)], dim=1)
-        else:
-            mask_head_inputs = mask_feats.repeat(n_inst, 1, 1, 1)
-
         weights, biases = parse_dynamic_params(mask_head_params, self.channels,
                                                self.weight_nums, self.bias_nums)
-        mask_logits = self.mask_heads_forward(mask_head_inputs.reshape(1, -1, H, W).contiguous(), weights, biases, n_inst)
+        if mask_feats.dim() == 5:
+            T = mask_feats.size(-3)
+            weights = [weight.unsqueeze(-1) for weight in weights]
+            mask_feats = mask_feats.repeat(n_inst, 1, 1, 1, 1)
+        else:
+            mask_feats = mask_feats.repeat(n_inst, 1, 1, 1)
+
+        if not self.disable_rel_coords:
+            # TODO: Circumscribed boxes or individual boxes for frames of the clip?
+            relative_coords = generate_rel_coord_gauss(det_bbox, H, W).unsqueeze(1).detach()
+            if mask_feats.dim() == 5:
+                relative_coords = relative_coords.unsqueeze(-3).repeat(1, 1, T, 1, 1)
+            # relative_coords = generate_rel_coord(det_bbox, fpn_levels.tolist(), self.sizes_of_interest, H, W).detach()
+            mask_head_inputs = torch.cat([relative_coords, mask_feats], dim=1)
+        else:
+            mask_head_inputs = mask_feats
+
+        mask_head_inputs = mask_head_inputs.reshape(1, -1, H, W).contiguous() if mask_head_inputs.dim() == 4 \
+            else mask_head_inputs.reshape(1, -1, T, H, W).contiguous()
+        mask_logits = self.mask_heads_forward(mask_head_inputs, weights, biases, n_inst)
 
         return mask_logits.squeeze(0).sigmoid()

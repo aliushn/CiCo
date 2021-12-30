@@ -53,7 +53,7 @@ class LincombMaskLoss(object):
                     with torch.no_grad():
                         N_gt, n_frames, H_gt, W_gt = masks_gt_cur.size()
                         boxes_gt_cir_cur = circum_boxes(boxes_gt[i].reshape(N_gt, -1))
-                        # get mask loss for non-occluded part, [n_pos, 2, h, w]
+                        # Mask loss for non-occluded part, [n_pos, 2, h, w]
                         masks_gt_cur_occuded = masks_gt_cur.new_zeros(N_gt, n_frames, H_gt, W_gt)
                         if N_gt > 1:
                             # Assign non-target objects as 1, then target objects as 0
@@ -111,7 +111,7 @@ class LincombMaskLoss(object):
                             # [n, 2, T, h, w]
                             pred_masks = torch.clamp(F.interpolate(pred_masks.float(), (1, H_gt, W_gt),
                                                                    mode='trilinear', align_corners=True), min=0, max=1)
-                        # crop non-target ground-truth masks in bounding boxes
+                        # Crop non-target ground-truth masks in bounding boxes
                         mask_t = torch.stack([crop(mask_t[:, k].permute(2, 3, 1, 0).contiguous(), boxes_cur)
                                               for k in range(pred_masks.size(1))], dim=-1).permute(3, 4, 2, 0, 1).contiguous()
                         if self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF:
@@ -143,8 +143,9 @@ class LincombMaskLoss(object):
                             pre_loss = (pre_loss*masks_gt_weights).sum(dim=(-1, -2, -3)) / n_frames
 
                     loss += pre_loss.mean()
+
         loss = loss / max(bs, 1) * self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA * n_frames
-        losses = {'M_dice': loss} if self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF else {'M_bce': loss}
+        losses = {'M_dice': 2*loss} if self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF else {'M_bce': loss}
         # losses['M_l1'] = sparse_loss / max(bs, 1)
         if self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_DIVERSITY_LOSS:
             losses['M_coeff'] = loss_coeff_div / max(bs, 1)
@@ -218,7 +219,7 @@ class LincombMaskLoss(object):
 
             flag, fired_masks = torch.zeros(M, device=protos.device), []
             if boxes[i].dim() == 3:
-                iou = jaccard(boxes[i].permute(1,0,2).contiguous(), boxes[i].permute(1,0,2).contiguous()).mean(0)
+                iou = jaccard(boxes[i].permute(1, 0, 2).contiguous(), boxes[i].permute(1,0,2).contiguous()).mean(0)
             else:
                 iou = jaccard(boxes[i], boxes[i])
             for m in range(M):

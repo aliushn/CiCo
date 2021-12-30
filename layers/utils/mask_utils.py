@@ -7,7 +7,7 @@ from .box_utils import crop, crop_sipmask, center_size
 
 def generate_rel_coord_gauss(det_bbox, mask_h, mask_w, sigma_scale=2.):
     '''
-    :param det_bbox: pos bboxes ==> [x1, y1, x2, y2]
+    :param det_bbox: pos bboxes ==> [n, 4] x1, y1, x2, y2
     :param mask_h: height of pred_mask
     :param mask_w: weight of pred_mask
     :return: rel_coord ==> [num_pos, mask_h, mask_w, 2]
