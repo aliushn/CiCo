@@ -69,7 +69,7 @@ class PredictionModule_3D(nn.Module):
             self.mask_dim = self.mask_dim ** 2 * (cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS - 1) \
                             + self.mask_dim * cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS + 1
             if not cfg.MODEL.MASK_HEADS.DISABLE_REL_COORDS:
-                self.mask_dim += self.mask_dim * 2
+                self.mask_dim += cfg.MODEL.MASK_HEADS.MASK_DIM
         else:
             self.mask_dim = self.mask_dim
 

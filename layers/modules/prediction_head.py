@@ -54,7 +54,7 @@ class PredictionModule(nn.Module):
             self.mask_dim = self.mask_dim ** 2 * (cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS - 1) \
                             + self.mask_dim * cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS + 1
             if not cfg.MODEL.MASK_HEADS.DISABLE_REL_COORDS:
-                self.mask_dim += self.mask_dim * 2
+                self.mask_dim += cfg.MODEL.MASK_HEADS.MASK_DIM
         else:
             self.mask_dim = self.mask_dim
 
@@ -172,7 +172,7 @@ class PredictionModule(nn.Module):
             if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
                 mask = self.mask_layer(bbox_x, bbox.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_MASK else self.mask_layer(bbox_x)
                 # Activation function is Tanh
-                preds['mask_coeff'] += [torch.tanh(mask.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.mask_dim))]
+                preds['mask_coeff'] += [mask.tanh().permute(0, 2, 3, 1).contiguous().reshape(bs, -1, self.mask_dim)]
 
             # Tracking
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:

@@ -120,7 +120,7 @@ _C.MODEL.BACKBONE.FREEZE_CONV_BODY_AT = 2
 # SwinTransformer Backbone options
 # ---------------------------------------------------------------------------- #
 _C.MODEL.BACKBONE.SWINT = CN()
-_C.MODEL.BACKBONE.SWINT.engine = True
+_C.MODEL.BACKBONE.SWINT.engine = False
 _C.MODEL.BACKBONE.SWINT.patch_size = 4
 _C.MODEL.BACKBONE.SWINT.in_chans = 3
 _C.MODEL.BACKBONE.SWINT.embed_dim = 96
@@ -271,10 +271,6 @@ _C.MODEL.MASK_HEADS.SIPMASK_HEAD = 4
 _C.MODEL.MASK_HEADS.USE_DYNAMIC_MASK = False
 _C.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS = 3
 _C.MODEL.MASK_HEADS.DISABLE_REL_COORDS = False
-
-_C.MODEL.MASK_HEADS.USE_SPATIO_DCN = False
-_C.MODEL.MASK_HEADS.PROTO_DIVERGENCE_LOSS = False
-_C.MODEL.MASK_HEADS.PROTO_DIVERGENCE_LOSS_ALPHA = 1
 
 
 # ---------------------------------------------------------------------------- #

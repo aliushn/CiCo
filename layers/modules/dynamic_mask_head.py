@@ -36,16 +36,16 @@ class DynamicMaskHead(nn.Module):
     def __init__(self, cfg):
         super(DynamicMaskHead, self).__init__()
         self.cfg = cfg
-        self.num_layers = cfg.dynamic_mask_head_layers
-        self.channels = cfg.mask_dim
-        self.in_channels = cfg.mask_dim
-        self.disable_rel_coords = cfg.disable_rel_coords
+        self.num_layers = cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS
+        self.channels = cfg.MODEL.MASK_HEADS.MASK_DIM
+        self.in_channels = cfg.MODEL.MASK_HEADS.MASK_DIM
+        self.disable_rel_coords = cfg.MODEL.MASK_HEADS.DISABLE_REL_COORDS
 
         weight_nums, bias_nums = [], []
         for l in range(self.num_layers):
             if l == 0:
                 if not self.disable_rel_coords:
-                    weight_nums.append((self.in_channels + 2) * self.channels)
+                    weight_nums.append((self.in_channels + 1) * self.channels)
                 else:
                     weight_nums.append(self.in_channels * self.channels)
                 bias_nums.append(self.channels)
@@ -89,8 +89,6 @@ class DynamicMaskHead(nn.Module):
         '''
         n_inst, _ = mask_head_params.size()
         H, W = mask_feats.size()[-2:]
-        # we hope the value of weights and bias in [-1, 1]
-        mask_head_params = torch.tanh(mask_head_params)
 
         if not self.disable_rel_coords:
             relative_coords = generate_rel_coord_gauss(det_bbox, H, W).unsqueeze(1).detach()
@@ -103,4 +101,4 @@ class DynamicMaskHead(nn.Module):
                                                self.weight_nums, self.bias_nums)
         mask_logits = self.mask_heads_forward(mask_head_inputs.reshape(1, -1, H, W).contiguous(), weights, biases, n_inst)
 
-        return self.cfg.mask_proto_mask_activation(mask_logits.squeeze(0))
+        return mask_logits.squeeze(0).sigmoid()

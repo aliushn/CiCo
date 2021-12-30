@@ -24,7 +24,7 @@ class CoreNet(nn.Module):
 
         # ------------ build Backbone ------------
         if self.cfg.MODEL.BACKBONE.SWINT.engine:
-            self.backbone = SwinTransformer()
+            self.backbone = SwinTransformer(depths=cfg.MODEL.BACKBONE.SWINT.depths)
             bb_embed_dim = self.cfg.MODEL.BACKBONE.SWINT.embed_dim
             self.fpn = FPN(cfg.MODEL.FPN, [2**i*bb_embed_dim for i in cfg.MODEL.BACKBONE.SELECTED_LAYERS])
         else:
@@ -243,8 +243,9 @@ class CoreNet(nn.Module):
     def train(self, mode=True):
         super().train(mode)
 
-        if self.cfg.freeze_bn:
-            self.freeze_bn()
+        if mode:
+            if self.cfg.freeze_bn:
+                self.freeze_bn()
 
     def freeze_bn(self, enable=False):
         """ Adapted from https://discuss.pytorch.org/t/how-to-train-with-frozen-batchnorm/12106/8 """

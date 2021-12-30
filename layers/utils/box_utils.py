@@ -11,7 +11,7 @@ def point_form(boxes):
         boxes: (tensor) Converted xmin, ymin, xmax, ymax form of boxes.
     """
     return torch.cat((boxes[:, :2] - boxes[:, 2:]/2,     # xmin, ymin
-                     boxes[:, :2] + boxes[:, 2:]/2), 1)  # xmax, ymax
+                      boxes[:, :2] + boxes[:, 2:]/2), 1)  # xmax, ymax
 
 
 @torch.jit.script
@@ -19,7 +19,7 @@ def center_size(boxes):
     """ Convert prior_boxes to (cx, cy, w, h)
     representation for comparison to center-size form ground truth data.
     Args:
-        boxes: (tensor) point_form boxes
+        boxes: (tensor) point_form boxes x1, y1, x2, y2
     Return:
         boxes: (tensor) Converted cx, cy, w, h form of boxes.
     """

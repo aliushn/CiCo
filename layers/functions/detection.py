@@ -28,7 +28,7 @@ class Detect(object):
         self.conf_thresh = cfg.TEST.NMS_CONF_THRESH
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
 
-        if display or cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
+        if display or cfg.DATASETS.TYPE == 'coco':
             self.use_cross_class_nms = True
         else:
             self.use_cross_class_nms = False
@@ -53,7 +53,7 @@ class Detect(object):
             result = []
             batch_size = predictions['proto'].size(0)
             T_out = predictions['loc'].size(0)//batch_size
-            predictions.pop('prior_levels')
+            fpn_levels = predictions['prior_levels']
             predictions['priors'] = predictions['priors'].repeat(T_out, 1, 1)
 
             for i in range(batch_size):
@@ -91,9 +91,11 @@ class Detect(object):
                     if self.train_masks:
                         proto_data, masks_coeff = candidate_cur['proto'], candidate_cur['mask_coeff']
                         if self.use_dynamic_mask:
-                            det_masks_soft = net.DynamicMaskHead(proto_data.permute(2, 0, 1).unsqueeze(0), masks_coeff, boxes_cir)
-                            _, pred_masks = crop(det_masks_soft.permute(1, 2, 0).contiguous(), boxes_cir)
-                            candidate_cur['mask'] = pred_masks.permute(2, 0, 1).contiguous()
+                            det_masks_soft = net.ProtoNet.DynamicMaskHead(proto_data.permute(2, 3, 0, 1), masks_coeff,
+                                                                          boxes_cir, fpn_levels)
+                            candidate_cur['mask'] = det_masks_soft.unsqueeze(1)
+                            # pred_masks = crop(det_masks_soft.permute(1, 2, 0).contiguous(), boxes_cir)
+                            # candidate_cur['mask'] = pred_masks.permute(2, 0, 1).contiguous().unsqueeze(1)
                         else:
                             boxes_cir_c = center_size(boxes_cir)
                             boxes_cir_c[:, 2:] *= 1.1
@@ -123,7 +125,7 @@ class Detect(object):
             keep = ((boxes_c[:, :2] > 0) & (boxes_c[:, :2] < 1)).reshape(candidate['box'].size(0), -1)
             keep = keep.sum(dim=-1) >= keep.size(-1)//2
             if self.train_masks:
-                non_empty_mask = (candidate['mask'].gt(0.5).sum(dim=[-1, -2]) > 5).sum(dim=-1) > 1
+                non_empty_mask = (candidate['mask'].gt(0.5).sum(dim=[-1, -2]) > 1).sum(dim=-1) > 0
                 keep = keep & non_empty_mask
             for k, v in candidate.items():
                 if k not in self.img_level_keys:

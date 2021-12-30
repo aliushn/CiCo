@@ -7,7 +7,7 @@ from .box_utils import crop, crop_sipmask, center_size
 
 def generate_rel_coord_gauss(det_bbox, mask_h, mask_w, sigma_scale=2.):
     '''
-    :param det_box: pos bboxes ==> [x1, y1, x2, y2]
+    :param det_bbox: pos bboxes ==> [x1, y1, x2, y2]
     :param mask_h: height of pred_mask
     :param mask_w: weight of pred_mask
     :return: rel_coord ==> [num_pos, mask_h, mask_w, 2]
@@ -15,20 +15,19 @@ def generate_rel_coord_gauss(det_bbox, mask_h, mask_w, sigma_scale=2.):
 
     # generate relative coordinates
     num_pos = det_bbox.size(0)
-    det_bbox_ori = torch.cat([det_bbox[:, 0::2] * mask_w, det_bbox[:, 1::2] * mask_h], dim=-1)[:, [0,2,1,3]]
-    det_bbox_ori_c = center_size(det_bbox_ori)
+    det_bbox_c = center_size(torch.cat([det_bbox[:, 0::2] * mask_w,
+                                        det_bbox[:, 1::2] * mask_h], dim=-1)[:, [0, 2, 1, 3]])
 
+    cx, cy = torch.round(det_bbox_c[:, 0]), torch.round(det_bbox_c[:, 1])
     y_grid, x_grid = torch.meshgrid(torch.arange(mask_h), torch.arange(mask_w))
-    cx, cy = torch.round(det_bbox_ori_c[:, 0]), torch.round(det_bbox_ori_c[:, 1])
-    y_rel_coord = (y_grid.float().unsqueeze(0).repeat(num_pos, 1, 1) - cy.view(-1, 1, 1)) ** 2
-    x_rel_coord = (x_grid.float().unsqueeze(0).repeat(num_pos, 1, 1) - cx.view(-1, 1, 1)) ** 2
+    y_rel_coord = y_grid.float().unsqueeze(0).repeat(num_pos, 1, 1) - cy.view(-1, 1, 1)
+    x_rel_coord = x_grid.float().unsqueeze(0).repeat(num_pos, 1, 1) - cx.view(-1, 1, 1)
 
     # build 2D Normal distribution
     sigma_scales = torch.ones(num_pos, device=det_bbox.device)
-    small_obj = det_bbox_ori_c[:, 2] * det_bbox_ori_c[:, 3] / mask_h / mask_w < 0.1
+    small_obj = det_bbox_c[:, 2] * det_bbox_c[:, 3] / mask_h / mask_w < 0.1
     sigma_scales[small_obj] = 0.5 * sigma_scale
-    sigma_xy = det_bbox_ori_c[:, 2:] / sigma_scales.reshape(-1, 1)
-    sigma_xy = torch.clamp(sigma_xy, min=1)
+    sigma_xy = torch.clamp(det_bbox_c[:, 2:] / sigma_scales.reshape(-1, 1), min=1)
     rel_coord_gauss = torch.exp(-0.5 * ((x_rel_coord / sigma_xy[:, 0].reshape(-1, 1, 1)) ** 2
                                         + (y_rel_coord / sigma_xy[:, 1].reshape(-1, 1, 1)) ** 2))
 

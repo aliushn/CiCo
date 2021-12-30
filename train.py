@@ -71,6 +71,8 @@ def train(cfg):
     if cfg.SOLVER.IMS_PER_BATCH * cfg.SOLVER.NUM_CLIPS // torch.cuda.device_count() < 6:
         print('Per-GPU batch size is less than the recommended limit for batch norm. Disabling batch norm.')
         cfg.freeze_bn = True
+    else:
+        cfg.freeze_bn = False
 
     # Parallel wraps the underlying module, but when saving and loading we don't want that
     net = CoreNet(cfg)
