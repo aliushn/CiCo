@@ -4,7 +4,6 @@ from .box_utils import center_size, point_form, crop
 import torch.distributions as dist
 import matplotlib.pyplot as plt
 import os
-from spatial_correlation_sampler import spatial_correlation_sample
 import torch.nn.functional as F
 
 
@@ -21,6 +20,7 @@ def correlate_operator(x1, x2, patch_size=11, kernel_size=1, stride=1, dilation_
     # stride1 is now stride and stride2 is dilation_patch, which behave like dilated convolutions
     # equivalent max_displacement is then dilation_patch * (patch_size - 1) / 2.
     # to get the right parameters for FlowNetC, you would have
+    from spatial_correlation_sampler import spatial_correlation_sample
     out_corr = spatial_correlation_sample(x1,
                                           x2,
                                           kernel_size=kernel_size,

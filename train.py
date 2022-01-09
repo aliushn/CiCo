@@ -68,7 +68,8 @@ def train(cfg):
         torch.cuda.set_device(torch.cuda.current_device())
         device = torch.cuda.current_device()
 
-    if cfg.SOLVER.IMS_PER_BATCH * cfg.SOLVER.NUM_CLIPS // torch.cuda.device_count() < 6:
+    imgs_per_gpu = cfg.SOLVER.IMS_PER_BATCH * cfg.SOLVER.NUM_CLIPS // torch.cuda.device_count()
+    if imgs_per_gpu < 6 and not cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
         print('Per-GPU batch size is less than the recommended limit for batch norm. Disabling batch norm.')
         cfg.freeze_bn = True
     else:
@@ -95,7 +96,6 @@ def train(cfg):
         args.resume = SavePath.get_interrupt(cfg.OUTPUT_DIR)
     elif args.resume == 'latest':
         args.resume = SavePath.get_latest(cfg.OUTPUT_DIR, cfg.NAME)
-
     if args.resume is not None:
         if args.is_distributed:
             if args.local_rank == 0:
@@ -104,11 +104,11 @@ def train(cfg):
         else:
             print('Resuming training, loading {}...'.format(args.resume))
             net.load_weights(path=args.resume)
-        cur_lr = cfg.SOLVER.LR
 
         if args.start_iter == -1:
             args.start_iter = SavePath.from_str(args.resume).iteration
             args.start_epoch = SavePath.from_str(args.resume).epoch
+
     else:
         print('Initializing weights based', cfg.MODEL.BACKBONE.PATH)
         if cfg.DATASETS.TYPE == 'coco':
@@ -121,7 +121,15 @@ def train(cfg):
             net.init_weights_coco(backbone_path='weights/pretrained_models_coco/' + cfg.MODEL.BACKBONE.PATH,
                                   local_rank=args.local_rank)
 
-    optimizer = optim.SGD(net.parameters(), lr=cfg.SOLVER.LR, momentum=cfg.SOLVER.MOMENTUM,
+    # loss counters
+    iteration = max(args.start_iter, 0)
+    start_epoch = max(args.start_epoch, 0)
+    adj_lr_times = sum([1 for step in list(cfg.SOLVER.LR_STEPS) if step <= start_epoch])
+    cur_lr = cfg.SOLVER.LR * (cfg.SOLVER.GAMMA ** adj_lr_times)
+    # Which learning rate adjustment step are we on? lr' = lr * gamma ^ step_index
+    step_index = adj_lr_times
+
+    optimizer = optim.SGD(net.parameters(), lr=cur_lr, momentum=cfg.SOLVER.MOMENTUM,
                           weight_decay=cfg.SOLVER.WEIGHT_DECAY)
     criterion = MultiBoxLoss(cfg, net=net,
                              num_classes=cfg.DATASETS.NUM_CLASSES,
@@ -161,26 +169,18 @@ def train(cfg):
                                   shuffle=(train_sampler is None),
                                   pin_memory=True)
 
-    # loss counters
-    iteration = max(args.start_iter, 0)
-    start_epoch = max(args.start_epoch, 0)
     last_time = time.time()
     if args.is_distributed:
         epoch_size = len(train_dataset) // (torch.cuda.device_count() * cfg.SOLVER.IMS_PER_BATCH)
     else:
         epoch_size = len(train_dataset) // cfg.SOLVER.IMS_PER_BATCH
     max_iter = epoch_size * cfg.SOLVER.MAX_EPOCH
-
-    # Which learning rate adjustment step are we on? lr' = lr * gamma ^ step_index
-    step_index = 0
-
     save_path = lambda epoch, iteration: SavePath(cfg.NAME, epoch, iteration).get_path(root=cfg.OUTPUT_DIR)
     time_avg = MovingAverage()
 
     global loss_types  # Forms the print order
     loss_types = ['B', 'BIoU', 'B_cir', 'BIoU_cir', 'center', 'Rep', 'C', 'C_focal', 'stuff', 'CI', 'M_bce', 'M_dice',
-                  'M_coeff', 'M_coeff_tc', 'M_proto', 'M_l1', 'T', 'B_shift', 'BIoU_shift', 'M_shift', 'P', 'D',
-                  'S', 'I']
+                  'M_coeff', 'M_intraclass', 'M_l1', 'T', 'B_shift', 'BIoU_shift', 'M_shift', 'P', 'D', 'S', 'I']
     loss_avgs = {k: MovingAverage(100) for k in loss_types}
 
     if args.local_rank == 0:
@@ -241,12 +241,11 @@ def train(cfg):
                     print(('[%3d] %7d ||' + (' %s: %.3f |' * len(losses)) + ' Total: %.3f || ETA: %s || timer: %.3f')
                           % tuple([epoch, iteration] + loss_labels + [total, eta_str, elapsed]), flush=True)
 
-                if args.log:
+                if args.log and iteration % 500 == 0:
                     precision = 5
                     loss_info = {k: round(losses[k].item(), precision) for k in losses}
                     loss_info['Total'] = round(loss.item(), precision)
-                    log.log('train', loss=loss_info, epoch=epoch, iter=iteration,
-                            lr=round(cur_lr, 10), elapsed=elapsed)
+                    log.log('train', loss=loss_info, epoch=epoch, iter=iteration, lr=round(cur_lr, 10), elapsed=elapsed)
 
                 last_time = cur_time
                 # Save models and run valid set
@@ -435,12 +434,5 @@ if __name__ == '__main__':
     # Update training parameters from the config if necessary
     def replace(name):
         if getattr(args, name) == None: setattr(args, name, getattr(cfg, name))
-    # This is managed by set_lr
-    cur_lr = cfg.SOLVER.LR
-
-    # Auto epochs to adapt the number of clips
-    if cfg.SOLVER.NUM_CLIPS > 1 and cfg.SOLVER.NUM_CLIP_FRAMES > 1:
-        cfg.SOLVER.LR_STEPS = tuple([step//cfg.SOLVER.NUM_CLIPS+1 for step in cfg.SOLVER.LR_STEPS])
-        cfg.SOLVER.MAX_EPOCH = cfg.SOLVER.MAX_EPOCH // cfg.SOLVER.NUM_CLIPS+1
 
     train(cfg)

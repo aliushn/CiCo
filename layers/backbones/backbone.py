@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from collections import OrderedDict
-from dcn_v2 import DCN
 import pickle
 
 
@@ -18,6 +17,7 @@ class Bottleneck(nn.Module):
         self.bn1 = norm_layer(planes)
 
         if use_dcn:
+            from dcn_v2 import DCN
             self.conv2 = DCN(planes, planes, kernel_size=3, stride=stride,
                              padding=dilation, dilation=dilation, deformable_groups=1)
             # self.conv2.init_offset()

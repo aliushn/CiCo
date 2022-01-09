@@ -245,6 +245,7 @@ _C.MODEL.TRACK_HEADS.MATCH_COEFF = [0, 1, 1, 0]
 # ---------------------------------------------------------------------------- #
 _C.MODEL.MASK_HEADS = CN()
 _C.MODEL.MASK_HEADS.TRAIN_MASKS = True
+_C.MODEL.MASK_HEADS.USE_BN = True
 _C.MODEL.MASK_HEADS.MASK_DIM = 16
 _C.MODEL.MASK_HEADS.TOWER_LAYERS = 2
 # Which layers will be used to obtain prototypes

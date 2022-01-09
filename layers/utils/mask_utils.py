@@ -27,9 +27,14 @@ def generate_rel_coord_gauss(det_bbox, mask_h, mask_w, sigma_scale=2.):
     sigma_scales = torch.ones(num_pos, device=det_bbox.device)
     small_obj = det_bbox_c[:, 2] * det_bbox_c[:, 3] / mask_h / mask_w < 0.1
     sigma_scales[small_obj] = 0.5 * sigma_scale
-    sigma_xy = torch.clamp(det_bbox_c[:, 2:] / sigma_scales.reshape(-1, 1), min=1)
+    sigma_xy = torch.clamp(1.5 * det_bbox_c[:, 2:] / sigma_scales.reshape(-1, 1), min=1)
     rel_coord_gauss = torch.exp(-0.5 * ((x_rel_coord / sigma_xy[:, 0].reshape(-1, 1, 1)) ** 2
                                         + (y_rel_coord / sigma_xy[:, 1].reshape(-1, 1, 1)) ** 2))
+
+    # for i in range(rel_coord_gauss.size(0)):
+    #     temp = rel_coord_gauss[i].cpu().numpy()
+    #     plt.imshow(temp)
+    #     plt.show()
 
     return rel_coord_gauss
 

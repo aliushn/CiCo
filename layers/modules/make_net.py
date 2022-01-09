@@ -2,7 +2,7 @@ import torch.nn as nn
 from layers.utils.interpolate import InterpolateModule
 
 
-def make_net(in_channels, conf, use_3D=False, include_bn=False, include_last_relu=True):
+def make_net(in_channels, conf, use_3D=False, norm_type=None, include_last_relu=True):
     """
     A helper function to take a config setting and turn it into a network.
     Used by protonet and extrahead. Returns (network, out_channels)
@@ -31,20 +31,17 @@ def make_net(in_channels, conf, use_3D=False, include_bn=False, include_last_rel
             kernel_size = layer_cfg[1]
 
             if kernel_size > 0:
-                if use_3D:
-                    layer1 = nn.Conv3d(in_channels, num_channels, kernel_size, padding=layer_cfg[2])
-                    if include_bn:
-                        BN = nn.BatchNorm3d(num_channels)
-                        layer = [layer1, BN]
-                    else:
-                        layer = [layer1]
+                conv = nn.Conv3d if use_3D else nn.Conv2d
+                layer1 = conv(in_channels, num_channels, kernel_size, padding=layer_cfg[2])
+                if norm_type is None:
+                    layer = [layer1]
                 else:
-                    layer1 = nn.Conv2d(in_channels, num_channels, kernel_size, padding=layer_cfg[2])
-                    if include_bn:
-                        BN = nn.BatchNorm2d(num_channels)
-                        layer = [layer1, BN]
-                    else:
-                        layer = [layer1]
+                    if norm_type == 'batch_norm':
+                        Norm = nn.BatchNorm3d(num_channels) if use_3D else nn.BatchNorm2d(num_channels)
+                    elif norm_type == 'layer_norm':
+                        Norm = nn.LayerNorm(num_channels)
+                    layer = [layer1, Norm]
+
             else:
                 if num_channels is None:
                     up_mode = 'trilinear' if use_3D else 'bilinear'
@@ -66,7 +63,7 @@ def make_net(in_channels, conf, use_3D=False, include_bn=False, include_last_rel
     # Use sum to concat together all the component layer lists
     net = sum([make_layer(x, use_3D) for x in conf], [])
     if not include_last_relu:
-        if include_bn:
+        if norm_type is not None:
             net = net[:-2] if conf[-1][1] > 0 else net[:-1]
         else:
             net = net[:-1]

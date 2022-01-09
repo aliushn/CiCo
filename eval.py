@@ -65,7 +65,7 @@ def parse_args(argv=None):
                         help='Whether or not to display scores in addition to classes')
     parser.add_argument('--display_fpn_outs', default=True, type=str2bool,
                         help='Whether or not to display outputs after fpn')
-    parser.add_argument('--display', default=False, type=str2bool,
+    parser.add_argument('--display', dest='display', action='store_true',
                         help='Display qualitative results instead of quantitative ones.')
     parser.add_argument('--save_folder', default='weights/prototypes/', type=str,
                         help='The output file for coco bbox results if --coco_results is set.')
@@ -553,7 +553,7 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
             pred_clip = preds_clip[0]
             frame_times.add(timer.total_time())
             progress_bar_clip.set_val(cdx+1)
-            avg_fps = 1. / (frame_times.get_avg() / clip_frames) if vdx > 0 or cdx > 0 else 0
+            avg_fps = 0  # 1. / (frame_times.get_avg() / clip_frames) if vdx > 0 or cdx > 0 else 0
             print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)  %5.2f fps  %5.2f fps '
                   % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip, avg_fps, avg_fps_wodata), end='')
 

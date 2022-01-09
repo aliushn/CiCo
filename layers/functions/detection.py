@@ -28,7 +28,7 @@ class Detect(object):
         self.conf_thresh = cfg.TEST.NMS_CONF_THRESH
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
 
-        if display or cfg.DATASETS.TYPE == 'coco':
+        if display:  # or cfg.DATASETS.TYPE == 'coco':
             self.use_cross_class_nms = True
         else:
             self.use_cross_class_nms = False
@@ -49,68 +49,70 @@ class Detect(object):
             Note that the outputs are sorted only if cross_class_nms is False
         """
 
-        if isinstance(predictions, dict):
-            result = []
-            batch_size = predictions['proto'].size(0)
-            T_out = predictions['loc'].size(0)//batch_size
-            fpn_levels = predictions['prior_levels']
-            predictions['priors'] = predictions['priors'].repeat(T_out, 1, 1)
+        assert isinstance(predictions, dict)
 
-            for i in range(batch_size):
-                ind = range(i*T_out, (i+1)*T_out)
-                candidate_cur = dict()
-                if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
-                    scores = predictions['conf'][i].reshape(-1)
+        result = []
+        batch_size = predictions['proto'].size(0)
+        T_out = predictions['loc'].size(0)//batch_size
+        fpn_levels = predictions['prior_levels']
+        predictions['priors'] = predictions['priors'].repeat(T_out, 1, 1)
+        predictions['prior_levels'] = predictions['prior_levels'].repeat(T_out, 1)
+
+        for i in range(batch_size):
+            ind = range(i*T_out, (i+1)*T_out)
+            candidate_cur = dict()
+            if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
+                scores = predictions['conf'][i].reshape(-1)
+            else:
+                scores, _ = torch.max(predictions['conf'][ind], dim=-1) if self.use_focal_loss else \
+                    torch.max(predictions['conf'][ind, :, 1:], dim=-1)
+
+            # Remove proposals whose confidences are lower than the threshold
+            scores = scores.reshape(-1)
+            keep = scores > self.conf_thresh
+            idx_out = torch.arange(len(scores))[keep]
+            if len(idx_out) > self.top_k:
+                _, idx_sorted = scores[keep].sort(0, descending=True)
+                idx_out = idx_out[idx_sorted[:self.top_k]]
+            for k, v in predictions.items():
+                if k in self.img_level_keys:
+                    candidate_cur[k] = v[i].clone()
                 else:
-                    scores, _ = torch.max(predictions['conf'][ind], dim=-1) if self.use_focal_loss else \
-                        torch.max(predictions['conf'][ind, :, 1:], dim=-1)
+                    candidate_cur[k] = v[ind].reshape(len(scores), -1)[idx_out].clone()
 
-                # Remove proposals whose confidences are lower than the threshold
-                scores = scores.reshape(-1)
-                keep = scores > self.conf_thresh
-                idx_out = torch.arange(len(scores))[keep]
-                if len(idx_out) > self.top_k:
-                    _, idx_sorted = scores[keep].sort(0, descending=True)
-                    idx_out = idx_out[idx_sorted[:self.top_k]]
-                for k, v in predictions.items():
-                    if k in self.img_level_keys:
-                        candidate_cur[k] = v[i].clone()
+            if len(idx_out) == 0:
+                candidate_cur['box'] = torch.Tensor()
+                candidate_cur['box_cir'] = torch.Tensor()
+                candidate_cur['mask'] = torch.Tensor()
+            else:
+                dim_boxes = candidate_cur['loc'].size(-1)
+                priors = candidate_cur['priors'].repeat(1, dim_boxes//4).reshape(-1, 4)
+                candidate_cur['box'] = decode(candidate_cur['loc'].reshape(-1, 4), priors).reshape(-1, dim_boxes)
+                boxes_cir = circum_boxes(candidate_cur['box'])
+                candidate_cur['box_cir'] = boxes_cir
+
+                if self.train_masks:
+                    proto_data, masks_coeff = candidate_cur['proto'], candidate_cur['mask_coeff']
+                    boxes_cir_c = center_size(boxes_cir)
+                    # for small objects, we set width and height of bounding boxes is 0.1
+                    boxes_cir_c[:, 2:] = torch.clamp(boxes_cir_c[:, 2:] * 1.2, min=0.1)
+                    boxes_cir_expand = point_form(boxes_cir_c)
+
+                    if self.use_dynamic_mask:
+                        pred_masks = net.ProtoNet.DynamicMaskHead(proto_data.permute(2, 3, 0, 1), masks_coeff,
+                                                                  boxes_cir, fpn_levels)
+                        if not self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF:
+                            pred_masks = crop(pred_masks.permute(1, 2, 0).contiguous(), boxes_cir_expand)
+                            pred_masks = pred_masks.permute(2, 0, 1).contiguous()
+                        candidate_cur['mask'] = pred_masks.unsqueeze(1)
+
                     else:
-                        candidate_cur[k] = v[ind].reshape(len(scores), -1)[idx_out].clone()
+                        boxes_crop = boxes_cir_expand if self.cfg.MODEL.MASK_HEADS.PROTO_CROP else None
+                        pred_masks = generate_mask(proto_data, masks_coeff.reshape(-1, proto_data.size(-1)),
+                                                   boxes_crop, proto_coeff_occlu=self.mask_coeff_occlu)
+                        candidate_cur['mask'] = pred_masks if not self.mask_coeff_occlu else pred_masks[:, 0]-pred_masks[:, 1]
 
-                if len(idx_out) == 0:
-                    candidate_cur['box'] = torch.Tensor()
-                    candidate_cur['box_cir'] = torch.Tensor()
-                    candidate_cur['mask'] = torch.Tensor()
-                else:
-                    dim_boxes = candidate_cur['loc'].size(-1)
-                    priors = candidate_cur['priors'].repeat(1, dim_boxes//4).reshape(-1, 4)
-                    candidate_cur['box'] = decode(candidate_cur['loc'].reshape(-1, 4), priors).reshape(-1, dim_boxes)
-                    boxes_cir = circum_boxes(candidate_cur['box'])
-                    candidate_cur['box_cir'] = boxes_cir
-                    if self.train_masks:
-                        proto_data, masks_coeff = candidate_cur['proto'], candidate_cur['mask_coeff']
-                        if self.use_dynamic_mask:
-                            det_masks_soft = net.ProtoNet.DynamicMaskHead(proto_data.permute(2, 3, 0, 1), masks_coeff,
-                                                                          boxes_cir, fpn_levels)
-                            candidate_cur['mask'] = det_masks_soft.unsqueeze(1)
-                            # pred_masks = crop(det_masks_soft.permute(1, 2, 0).contiguous(), boxes_cir)
-                            # candidate_cur['mask'] = pred_masks.permute(2, 0, 1).contiguous().unsqueeze(1)
-                        else:
-                            boxes_cir_c = center_size(boxes_cir)
-                            boxes_cir_c[:, 2:] *= 1.1
-                            # boxes_cir_crop = point_form(boxes_cir_c) if self.clip_frames > 3 else boxes_cir
-                            boxes_crop = point_form(boxes_cir_c) if self.cfg.MODEL.MASK_HEADS.PROTO_CROP else None
-                            pred_masks = generate_mask(proto_data, masks_coeff.reshape(-1, proto_data.size(-1)),
-                                                       boxes_crop, proto_coeff_occlu=self.mask_coeff_occlu)
-                            # pred_masks = pred_masks.reshape(-1, dim_boxes//4, pred_masks.size(-2), pred_masks.size(-1))
-                            if self.mask_coeff_occlu:
-                                candidate_cur['mask'] = pred_masks[:, 0] - pred_masks[:, 1]
-                            else:
-                                # [n_objs, T, H, W]
-                                candidate_cur['mask'] = pred_masks
-
-                result.append(self.detect(candidate_cur))
+            result.append(self.detect(candidate_cur))
 
         return result
 

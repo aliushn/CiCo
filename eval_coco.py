@@ -65,8 +65,7 @@ def parse_args(argv=None):
                         help='The maximum number of images from the dataset to consider. Use -1 for all.')
     parser.add_argument('--output_coco_json', dest='output_coco_json', action='store_true',
                         help='If display is not set, instead of processing IoU values, this just dumps detections into the coco json file.')
-    parser.add_argument('--config', default=None,
-                        help='The config object to use.')
+    parser.add_argument('--config', default=None, help='The config object to use.')
     parser.add_argument('--output_web_json', dest='output_web_json', action='store_true',
                         help='If display is not set, instead of processing IoU values, this dumps detections for usage with the detections viewer web thingy.')
     parser.add_argument('--web_det_path', default='web/dets/', type=str,

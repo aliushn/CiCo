@@ -425,7 +425,7 @@ class VIDDataset(torch.utils.data.Dataset):
             print('Done')
 
 
-def detection_collate_vid(batch):
+def detection_collate(batch):
     imgs = []
     boxes = []
     labels = []
@@ -455,7 +455,7 @@ def detection_collate_vid(batch):
     return imgs_batch, img_metas, (boxes, labels, ids, occluded_boxes)
 
 
-def prepare_data_vid(data_batch, devices):
+def prepare_data(data_batch, devices):
     images, image_metas, (bboxes, labels, obj_ids, occluded_boxes) = data_batch
     h, w = images.size()[-2:]
     d = len(devices)

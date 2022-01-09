@@ -194,7 +194,7 @@ class MultiBoxLoss(nn.Module):
             # --------------------------------  Mask Loss  -----------------------------------------------------
             if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
                 loss_m = self.LincombMaskLoss(pos, idx_t, pred_boxes_p_split, gt_boxes_p_split, predictions['mask_coeff'],
-                                              prior_levels, predictions['proto'], gt_masks, gt_boxes, gt_ids)
+                                              prior_levels, predictions['proto'], gt_masks, gt_boxes, gt_ids, gt_labels)
                 losses.update(loss_m)
 
                 # These losses also don't depend on anchors
@@ -261,7 +261,7 @@ class MultiBoxLoss(nn.Module):
                     losses_track = self.track_gauss_loss(track_data, gt_masks, gt_ids, predictions['proto'],
                                                          predictions['mask_coeff'], gt_boxes, pos, ids_t, idx_t)
                 else:
-                    losses_track = self.track_loss(track_data, pos, ids_t)
+                    losses_track = self.track_loss(track_data, pos, ids_t, T_out)
                 losses.update(losses_track)
 
             # ------------------------------- Track to segment -----------------------------------------------
@@ -359,18 +359,17 @@ class MultiBoxLoss(nn.Module):
 
         return rep_loss / max(n, 1.)
 
-    def track_loss(self, track_data, pos, ids_t=None):
-        if self.cfg.DATASETS.TYPE == 'cocovis':
-            n_clips = self.cfg.SOLVER.NUM_CLIPS
-        else:
-            n_clips = self.cfg.SOLVER.NUM_CLIPS * self.cfg.SOLVER.NUM_CLIP_FRAMES
+    def track_loss(self, track_data, pos, ids_t=None, T_out=1):
+        n_clips = self.cfg.SOLVER.NUM_CLIPS
+        if self.cfg.DATASETS.TYPE != 'cocovis':
+            n_clips *= T_out
         bs = track_data.size(0) // n_clips
 
         loss = torch.tensor(0., device=track_data.device)
         for i in range(bs):
             pos_cur = pos[i*n_clips:(i+1)*n_clips]
             pos_track_data = track_data[i*n_clips:(i+1)*n_clips][pos_cur]
-            cos_sim = pos_track_data @ pos_track_data.t()  # [n_pos, n_ref_pos]
+            cos_sim = pos_track_data @ pos_track_data.t()    # [n_pos, n_ref_pos]
             # Rescale to be between 0 and 1
             cos_sim = (cos_sim + 1) / 2
 

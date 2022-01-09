@@ -48,8 +48,6 @@ class PredictionModule(nn.Module):
 
         if cfg.MODEL.MASK_HEADS.USE_SIPMASK:
             self.mask_dim = self.mask_dim * cfg.MODEL.MASK_HEADS.SIPMASK_HEAD
-        elif cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION:
-            self.mask_dim = self.mask_dim * 3
         elif cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
             self.mask_dim = self.mask_dim ** 2 * (cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS - 1) \
                             + self.mask_dim * cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS + 1

@@ -50,21 +50,19 @@ class PredictionModule_3D(nn.Module):
         self.conf_feat_dim = cfg.MODEL.CLASS_HEADS.INTERCLIPS_CLAFEAT_DIM
 
         # generate anchors
-        self.img_h = ((max(cfg.INPUT.MIN_SIZE_TRAIN)-1)//32+1) * 32
-        self.img_w = cfg.INPUT.MAX_SIZE_TRAIN
-        layers_idx = range(min(cfg.MODEL.BACKBONE.SELECTED_LAYERS), min(cfg.MODEL.BACKBONE.SELECTED_LAYERS)+len(self.pred_scales))
-        self.priors_list, self.prior_levels_list = [], []
-        for idx, ldx in enumerate(layers_idx):
-            priors, prior_levels = self.make_priors(idx, self.img_h//(2**(ldx+2)), self.img_w//(2**(ldx+2)))
-            self.priors_list += [priors]
-            self.prior_levels_list += [prior_levels]
-        self.priors_list = torch.cat(self.priors_list, dim=1).cpu()
-        self.prior_levels_list = torch.cat(self.prior_levels_list, dim=1).cpu()
+        # self.img_h = ((max(cfg.INPUT.MIN_SIZE_TRAIN)-1)//32+1) * 32
+        # self.img_w = cfg.INPUT.MAX_SIZE_TRAIN
+        # layers_idx = range(min(cfg.MODEL.BACKBONE.SELECTED_LAYERS), min(cfg.MODEL.BACKBONE.SELECTED_LAYERS)+len(self.pred_scales))
+        # self.priors_list, self.prior_levels_list = [], []
+        # for idx, ldx in enumerate(layers_idx):
+        #     priors, prior_levels = self.make_priors(idx, self.img_h//(2**(ldx+2)), self.img_w//(2**(ldx+2)))
+        #     self.priors_list += [priors]
+        #     self.prior_levels_list += [prior_levels]
+        # self.priors_list = torch.cat(self.priors_list, dim=1).cpu()
+        # self.prior_levels_list = torch.cat(self.prior_levels_list, dim=1).cpu()
 
         if cfg.MODEL.MASK_HEADS.USE_SIPMASK:
             self.mask_dim = self.mask_dim * cfg.MODEL.MASK_HEADS.SIPMASK_HEAD
-        elif cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION:
-            self.mask_dim = self.mask_dim * 2
         elif cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
             self.mask_dim = self.mask_dim ** 2 * (cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS - 1) \
                             + self.mask_dim * cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS + 1
@@ -142,8 +140,7 @@ class PredictionModule_3D(nn.Module):
             - mask_output: [batch_size, conv_h*conv_w*num_priors, mask_dim]
             - prior_boxes: [conv_h*conv_w*num_priors, 4]
         """
-
-        preds = dict()
+        preds = {'priors': [], 'prior_levels': []}
         if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
             preds['mask_coeff'] = []
         if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
@@ -166,6 +163,11 @@ class PredictionModule_3D(nn.Module):
                 x = fpn_outs[idx]
 
             bs, _, T, conv_h, conv_w = x.size()
+            priors, prior_levels = self.make_priors(idx, conv_h, conv_w, x.device)
+            preds['priors'] += [priors]
+            preds['prior_levels'] += [prior_levels]
+
+            # bounding boxes regression
             n_proposals = conv_h*conv_w*self.num_priors
             bbox_x = self.bbox_extra(x)
             bbox = self.bbox_layer(bbox_x).permute(0, 2, 3, 4, 1).contiguous()
@@ -202,8 +204,6 @@ class PredictionModule_3D(nn.Module):
         for k, v in preds.items():
             preds[k] = torch.cat(v, 1)
 
-        preds['priors'] = self.priors_list.to(x.device).detach()
-        preds['prior_levels'] = self.prior_levels_list.to(x.device).detach()
         return preds
 
     def make_priors(self, idx, conv_h, conv_w, device=None):

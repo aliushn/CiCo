@@ -283,7 +283,7 @@ def enforce_size(img, targets, masks, num_crowds, new_w, new_h):
         return img, targets, masks, num_crowds
 
 
-def detection_collate_coco(batch):
+def detection_collate(batch):
     """Custom collate fn for dealing with batches of images that have a different
     number of associated object annotations (bounding boxes).
 
@@ -314,7 +314,7 @@ def detection_collate_coco(batch):
     return imgs, img_metas, (boxes, labels, masks, num_crowds)
 
 
-def prepare_data_coco(data_batch, devices):
+def prepare_data(data_batch, devices):
     images, img_metas, (boxes, labels, masks, num_crowds) = data_batch
 
     from .utils import ImageList_from_tensors, GtList_from_tensor

@@ -81,7 +81,7 @@ class DatasetCatalog_vis(object):
     train_YouTube_VOS2021_dataset = copy.deepcopy(dataset_base_vis)
     train_YouTube_VOS2021_dataset['name'] = 'YTVIS2021_train'
     train_YouTube_VOS2021_dataset['img_prefix'] = 'YouTube_VOS2021/train/JPEGImages'
-    train_YouTube_VOS2021_dataset['ann_file'] = 'YouTube_VOS2021/train/train.json'
+    train_YouTube_VOS2021_dataset['ann_file'] = 'YouTube_VOS2021/train/instances.json'
     train_YouTube_VOS2021_dataset['class_names'] = YouTube_VOS2021_CLASSES
 
     valid_sub_YouTube_VOS2021_dataset = copy.deepcopy(dataset_base_vis)

@@ -108,8 +108,8 @@ class YTVOSDataset(data.Dataset):
         # bbox resize ratios
         resize_ratios = (2*np.random.rand(n_bb, 2) - 1) * size_perturb + 1
         # bbox: x1, y1, x2, y2
-        centers = (bbox[:,:2]+ bbox[:,2:])/2.
-        sizes = bbox[:,2:] - bbox[:,:2]
+        centers = (bbox[:, :2] + bbox[:, 2:])/2.
+        sizes = bbox[:, 2:] - bbox[:, :2]
         new_centers = centers + center_offs * sizes
         new_sizes = sizes * resize_ratios
         new_x1y1 = new_centers - new_sizes/2.
@@ -160,8 +160,7 @@ class YTVOSDataset(data.Dataset):
                 ann = self.get_ann_info(vid, id)
                 bboxes.append(ann['bboxes'])
                 labels.append(ann['labels'])
-                # obj ids attribute does not exist in current annotation
-                # need to add it
+                # obj ids attribute does not exist in current annotation, need to add it
                 obj_ids.append(ann['obj_ids'])
                 masks.append(np.stack(ann['masks'], axis=0))
                 # compute matching of reference frame with current frame
@@ -349,7 +348,7 @@ class YTVOSDataset(data.Dataset):
         return ann
 
 
-def detection_collate_vis(batch):
+def detection_collate(batch):
     """Custom collate fn for dealing with batches of images that have a different
     number of associated object annotations (bounding boxes).
 
@@ -366,7 +365,7 @@ def detection_collate_vis(batch):
     masks = []
     bboxes = []
     labels = []
-    ids = []
+    obj_ids = []
     img_metas = []
 
     for sample in batch:
@@ -376,47 +375,45 @@ def detection_collate_vis(batch):
             masks += [sample[2][0]]
             bboxes += [sample[2][1]]
             labels += [sample[2][2]]
-            ids += [sample[2][3]]
+            obj_ids += [sample[2][3]]
 
+    return imgs, img_metas, (bboxes, labels, masks, obj_ids)
+
+
+def prepare_data(data_batch, devices):
+    imgs, img_metas, (bboxes, labels, masks, obj_ids) = data_batch
     from .utils import ImageList_from_tensors, GtList_from_tensor
-    imgs_batch = ImageList_from_tensors(imgs, size_divisibility=32)
-    pad_h, pad_w = imgs_batch.size()[-2:]
-
+    imgs = ImageList_from_tensors(imgs, size_divisibility=32)
+    h, w = imgs.size()[-2:]
     if len(masks) > 0:
-        masks, bboxes, img_metas = GtList_from_tensor(pad_h, pad_w, masks, bboxes, img_metas)
-        return imgs_batch, img_metas, (bboxes, labels, masks, ids)
+        masks, bboxes, img_metas = GtList_from_tensor(h, w, masks, bboxes, img_metas)
     else:
-        _, _, img_metas = GtList_from_tensor(pad_h, pad_w, None, None, img_metas)
-        return imgs_batch, img_metas
+        _, _, img_metas = GtList_from_tensor(h, w, None, None, img_metas)
 
-
-def prepare_data_vis(data_batch, devices):
-    images, image_metas, (bboxes, labels, masks, obj_ids) = data_batch
-    h, w = images.size()[-2:]
     d = len(devices)
-    if images.size(0) % d != 0:
+    if imgs.size(0) % d != 0:
         # TODO: if read multi frames (n_f) as a clip, thus the condition should be images.size(0) / n_f % len(devices)
-        idx = [i % images.size(0) for i in range(d)]
-        remainder = d - images.size(0) % d
-        images = torch.cat([images, images[idx[:remainder]]])
+        idx = [i % imgs.size(0) for i in range(d)]
+        remainder = d - imgs.size(0) % d
+        imgs = torch.cat([imgs, imgs[idx[:remainder]]])
         bboxes += [bboxes[i] for i in idx[:remainder]]
         labels += [labels[i] for i in idx[:remainder]]
         masks += [masks[i] for i in idx[:remainder]]
         obj_ids += [obj_ids[i] for i in idx[:remainder]]
-        image_metas += [image_metas[i] for i in idx[:remainder]]
-    n = images.size(0) // len(devices)
+        img_metas += [img_metas[i] for i in idx[:remainder]]
+    n = imgs.size(0) // len(devices)
 
     with torch.no_grad():
         images_list, masks_list, bboxes_list, labels_list, obj_ids_list, num_crowds_list = [], [], [], [], [], []
         image_metas_list = []
         for idx, device in enumerate(devices):
-            images_list.append(gradinator(images[idx * n:(idx + 1) * n].reshape(-1, 3, h, w).to(device)))
+            images_list.append(gradinator(imgs[idx * n:(idx + 1) * n].reshape(-1, 3, h, w).to(device)))
             masks_list.append([gradinator(torch.from_numpy(masks[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
             bboxes_list.append([gradinator(torch.from_numpy(bboxes[jdx]).float().to(device)) for jdx in range(idx * n, (idx + 1) * n)])
             labels_list.append([gradinator(torch.from_numpy(labels[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
             obj_ids_list.append([gradinator(torch.from_numpy(obj_ids[jdx]).to(device)) for jdx in range(idx * n, (idx + 1) * n)])
             num_crowds_list.append([0] * n)
-            image_metas_list.append(image_metas[idx * n:(idx + 1) * n])
+            image_metas_list.append(img_metas[idx * n:(idx + 1) * n])
 
         return images_list, bboxes_list, labels_list, masks_list, obj_ids_list, num_crowds_list, image_metas_list
 

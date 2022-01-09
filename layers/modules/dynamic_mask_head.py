@@ -91,7 +91,6 @@ class DynamicMaskHead(nn.Module):
         '''
         n_inst, _ = mask_head_params.size()
         H, W = mask_feats.size()[-2:]
-
         weights, biases = parse_dynamic_params(mask_head_params, self.channels,
                                                self.weight_nums, self.bias_nums)
         if mask_feats.dim() == 5:
@@ -107,6 +106,7 @@ class DynamicMaskHead(nn.Module):
             if mask_feats.dim() == 5:
                 relative_coords = relative_coords.unsqueeze(-3).repeat(1, 1, T, 1, 1)
             # relative_coords = generate_rel_coord(det_bbox, fpn_levels.tolist(), self.sizes_of_interest, H, W).detach()
+            # print(mask_feats.min(), mask_feats.max(), relative_coords.max())
             mask_head_inputs = torch.cat([relative_coords, mask_feats], dim=1)
         else:
             mask_head_inputs = mask_feats

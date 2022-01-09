@@ -149,7 +149,7 @@ class Pad(object):
     Note: this expects im_w <= width and im_h <= height
     """
     def __init__(self, min_size, max_size, mean=MEANS, pad_gt=True):
-        self.min_size = min_size
+        self.min_size = min_size if isinstance(min_size, int) else min_size[0]
         self.max_size = max_size
         self.mean = mean
         self.divisibility = 32
