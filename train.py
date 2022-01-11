@@ -69,7 +69,7 @@ def train(cfg):
         device = torch.cuda.current_device()
 
     imgs_per_gpu = cfg.SOLVER.IMS_PER_BATCH * cfg.SOLVER.NUM_CLIPS // torch.cuda.device_count()
-    if imgs_per_gpu < 6 and not cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
+    if imgs_per_gpu < 6:
         print('Per-GPU batch size is less than the recommended limit for batch norm. Disabling batch norm.')
         cfg.freeze_bn = True
     else:
@@ -110,15 +110,15 @@ def train(cfg):
             args.start_epoch = SavePath.from_str(args.resume).epoch
 
     else:
-        print('Initializing weights based', cfg.MODEL.BACKBONE.PATH)
+        bb_path = cfg.MODEL.BACKBONE.SWINT.path if cfg.MODEL.BACKBONE.SWINT.engine else cfg.MODEL.BACKBONE.PATH
+        print('Initializing weights based', bb_path)
         if cfg.DATASETS.TYPE == 'coco':
             print('Initializing weights based ImageNet ...')
-            bb_path = cfg.MODEL.BACKBONE.SWINT.path if cfg.MODEL.BACKBONE.SWINT.engine else cfg.MODEL.BACKBONE.PATH
             net.init_weights(backbone_path='weights/pretrained_models_coco/' + bb_path,
                              local_rank=args.local_rank)
         else:
             print('Initializing weights based COCO ...')
-            net.init_weights_coco(backbone_path='weights/pretrained_models_coco/' + cfg.MODEL.BACKBONE.PATH,
+            net.init_weights_coco(backbone_path='weights/pretrained_models_coco/' + bb_path,
                                   local_rank=args.local_rank)
 
     # loss counters

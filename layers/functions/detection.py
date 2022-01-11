@@ -16,7 +16,6 @@ class Detect(object):
         self.cfg = cfg
         self.train_masks = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
         self.use_dynamic_mask = cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK
-        self.mask_coeff_occlu = cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION
         self.nms_with_miou = cfg.TEST.NMS_WITH_MIoU
         self.nms_with_biou = cfg.TEST.NMS_WITH_BIoU
         self.use_focal_loss = cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS
@@ -102,15 +101,14 @@ class Detect(object):
                         pred_masks = net.ProtoNet.DynamicMaskHead(proto_data.permute(2, 3, 0, 1), masks_coeff,
                                                                   boxes_cir, fpn_levels)
                         if not self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF:
-                            pred_masks = crop(pred_masks.permute(1, 2, 0).contiguous(), boxes_cir_expand)
-                            pred_masks = pred_masks.permute(2, 0, 1).contiguous()
-                        candidate_cur['mask'] = pred_masks.unsqueeze(1)
+                            pred_masks = crop(pred_masks.permute(2, 3, 1, 0).contiguous(), boxes_cir_expand)
+                            pred_masks = pred_masks.permute(3, 2, 0, 1).contiguous()
 
                     else:
                         boxes_crop = boxes_cir_expand if self.cfg.MODEL.MASK_HEADS.PROTO_CROP else None
                         pred_masks = generate_mask(proto_data, masks_coeff.reshape(-1, proto_data.size(-1)),
-                                                   boxes_crop, proto_coeff_occlu=self.mask_coeff_occlu)
-                        candidate_cur['mask'] = pred_masks if not self.mask_coeff_occlu else pred_masks[:, 0]-pred_masks[:, 1]
+                                                   boxes_crop)
+                    candidate_cur['mask'] = pred_masks
 
             result.append(self.detect(candidate_cur))
 

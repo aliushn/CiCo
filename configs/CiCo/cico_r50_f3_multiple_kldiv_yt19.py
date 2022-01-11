@@ -1,14 +1,9 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/_base_/models/swint_base.yaml',
-          'configs/CiCo/base_vis.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/CiCo/base_vis.py']
 
 MODEL = dict(
     BACKBONE=dict(
-        SWINT=dict(
-            path='swint_base_coco_300_576_40_320000.pth')
-    ),
-
-    FPN=dict(
-        NUM_FEATURES=256),
+        CONV_BODY='ResNet50',
+        PATH='STMask_resnet50_coco_960_46_340000.pth'),
 
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
@@ -16,9 +11,8 @@ MODEL = dict(
         CUBIC_MODE_ON_PROTONET=True,
         CIRCUMSCRIBED_BOXES=False),
 
-    MASK_HEADS=dict(
-        TRAIN_MASKS=True,
-        PROTO_NET=[(192, 3, 1), (192, 3, 1), (192, 3, 1), (None, -2, {})])
+    TRACK_HEADS=dict(
+        TRACK_BY_GAUSSIAN=True)
 )
 
 CiCo = dict(
@@ -45,4 +39,4 @@ TEST = dict(
     NUM_CLIP_FRAMES=3)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'cico_r50_f3_multiple_yt19'
+NAME = 'cico_r50_f3_multiple_kldiv_yt19'

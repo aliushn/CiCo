@@ -84,8 +84,7 @@ def plot_protos(protos, pred_masks, img_meta, num):
                          str(num), '.png']))
 
 
-def generate_mask(proto_data, mask_coeff, bbox=None, mask_dim=32, frame_wise=False,
-                  use_sipmask=False, proto_coeff_occlu=False):
+def generate_mask(proto_data, mask_coeff, bbox=None, mask_dim=32, frame_wise=False, use_sipmask=False):
     '''
     Activation function of mask is sigmoid
     :param proto_data : [h, w, 32] or [n, h, w, 32]
@@ -106,21 +105,9 @@ def generate_mask(proto_data, mask_coeff, bbox=None, mask_dim=32, frame_wise=Fal
         pred_masks = crop_sipmask(pred_masks00, pred_masks01, pred_masks10, pred_masks11, bbox)
 
     else:
-
-        if not proto_coeff_occlu:
-            pred_masks = torch.sigmoid(generate_single_mask(proto_data, mask_coeff, frame_wise))
-            if bbox is not None:
-                pred_masks = crop(pred_masks, bbox)                                         # [h, w, T, n]
-
-        else:
-            # target objects
-            pred_masks_t = torch.sigmoid(generate_single_mask(proto_data, mask_coeff[:, :mask_dim]))
-            # parts from overlapped objects
-            pred_masks_o = torch.sigmoid(generate_single_mask(proto_data, mask_coeff[:, mask_dim:mask_dim*2]))
-            if bbox is not None:
-                pred_masks_t = crop(pred_masks_t, bbox)
-                pred_masks_o = crop(pred_masks_o, bbox)                                     # [h, w, T, n]
-            pred_masks = torch.stack([pred_masks_t, pred_masks_o], dim=-1)                  # [h, w, T, n, 2]
+        pred_masks = torch.sigmoid(generate_single_mask(proto_data, mask_coeff, frame_wise))
+        if bbox is not None:
+            pred_masks = crop(pred_masks, bbox)                                         # [h, w, T, n]
 
     if dim_proto == 3:
         pred_masks = pred_masks.permute(2, 0, 1).contiguous()                               # [n, h, w]

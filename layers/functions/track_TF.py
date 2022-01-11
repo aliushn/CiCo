@@ -20,7 +20,6 @@ class Track_TF(object):
     def __init__(self, net, cfg):
         self.prev_candidate = None
         self.cfg = cfg
-        self.clip_frames = self.cfg.SOLVER.NUM_CLIP_FRAMES
         self.match_coeff = cfg.MODEL.TRACK_HEADS.MATCH_COEFF
         self.correlation_patch_size = cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE
         self.conf_thresh = cfg.TEST.NMS_CONF_THRESH
@@ -28,14 +27,16 @@ class Track_TF(object):
         self.proto_coeff_occlu = cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION
         self.img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
         if self.track_by_Gaussian:
-            self.img_level_keys += 'track'
-        self.use_cubic_TF = True
+            self.img_level_keys += ['track']
+        self.num_clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
+        self.use_cubic_TF = False
 
-        self.CandidateShift = CandidateShift(net, cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE,
-                                             train_maskshift=cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT,
-                                             train_masks=cfg.MODEL.MASK_HEADS.TRAIN_MASKS,
-                                             track_by_Gaussian=self.track_by_Gaussian,
-                                             proto_coeff_occlusion=self.proto_coeff_occlu)
+        if self.cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
+            self.CandidateShift = CandidateShift(net, cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE,
+                                                 train_maskshift=cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT,
+                                                 train_masks=cfg.MODEL.MASK_HEADS.TRAIN_MASKS,
+                                                 track_by_Gaussian=self.track_by_Gaussian,
+                                                 proto_coeff_occlusion=self.proto_coeff_occlu)
 
     def __call__(self, candidates, imgs_meta, img=None):
         outputs_aft_track = []
@@ -59,6 +60,13 @@ class Track_TF(object):
             candidate['img_ids'] = img_meta['frame_id']
         if is_first:
             self.prev_candidate = None
+
+        # generate mean and variance of Gaussian for objects
+        det_masks_soft = candidate['mask'] if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS else None
+        if self.track_by_Gaussian:
+            candidate['track_mu'], candidate['track_var'] = generate_track_gaussian(candidate['track'], det_masks_soft,
+                                                                                    candidate['box'])
+        track_dim = candidate['track'].size(-1)
 
         # compared bboxes in current frame with bboxes in previous frame to achieve tracking
         if is_first or (not is_first and self.prev_candidate is None):
@@ -85,8 +93,7 @@ class Track_TF(object):
                 prev_boxes_cir = center_size(self.prev_candidate['box_cir'])
                 prev_boxes_cir[:, 2:] *= 1.2
                 self.prev_candidate['mask'] = generate_mask(candidate['proto'], self.prev_candidate['mask_coeff'],
-                                                            point_form(prev_boxes_cir),
-                                                            proto_coeff_occlu=self.proto_coeff_occlu)
+                                                            point_form(prev_boxes_cir))
                 self.prev_candidate['score'] *= 0.9**(self.prev_candidate['mask'].size(1))
 
             for k, v in candidate.items():
@@ -104,20 +111,15 @@ class Track_TF(object):
                 det_bbox, det_score = candidate['box'], candidate['score']
                 n_dets = det_bbox.size(0)
                 candidate['tracked_mask'] = torch.zeros(n_dets)
-                if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-                    det_masks_soft = candidate['mask']
-                if self.track_by_Gaussian:
-                    candidate['track_mu'], candidate['track_var'] = generate_track_gaussian(candidate['track'].squeeze(0),
-                                                                                            det_masks_soft, det_bbox)
 
                 match_type = 1
                 if match_type == 1:
-                    img_overlapped_idx = torch.nonzero(self.prev_candidate['img_ids'].unsqueeze(1)==candidate['img_ids'],
-                                                       as_tuple=False)
+                    img_over_idx = torch.nonzero(self.prev_candidate['img_ids'].unsqueeze(1)==candidate['img_ids'],
+                                                 as_tuple=False)
 
-                    if img_overlapped_idx.nelement() > 0:
-                        prev_overlapped_idx = img_overlapped_idx[:, 0]
-                        cur_overlapped_idx = img_overlapped_idx[:, 1]
+                    if img_over_idx.nelement() > 0:
+                        prev_overlapped_idx = img_over_idx[:, 0]
+                        cur_overlapped_idx = img_over_idx[:, 1]
                     else:
                         prev_overlapped_idx, cur_overlapped_idx = [candidate['proto'].size(2)-1], [0]
 
@@ -150,9 +152,12 @@ class Track_TF(object):
                         mask_ious = torch.zeros_like(bbox_ious)
 
                     if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS and self.track_by_Gaussian:
-                        # calculate KL divergence for Gaussian distribution of isntances, value in [[0, +infinite]]
-                        kl_divergence = compute_kl_div(self.prev_candidate['track_mu'], self.prev_candidate['track_var'],
-                                                       candidate['track_mu'], candidate['track_var'])
+                        # Calculate KL divergence for Gaussian distribution of isntances, value in [[0, +infinite]]
+                        kl_divergence = compute_kl_div(self.prev_candidate['track_mu'].reshape(-1, track_dim),
+                                                       self.prev_candidate['track_var'].reshape(-1, track_dim),
+                                                       candidate['track_mu'].reshape(-1, track_dim),
+                                                       candidate['track_var'].reshape(-1, track_dim))
+                        kl_divergence = kl_divergence.reshape(n_dets, self.num_clip_frames, -1, self.num_clip_frames).mean(1).mean(-1)
                         sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10.
                         # from [0, +infinite] to [0, 1]: sim = 1/ (exp(0.1*kl_div)), threshold  = 10
                         sim = torch.div(1., torch.exp(0.1 * torch.cat([sim_dummy, kl_divergence], dim=-1)))

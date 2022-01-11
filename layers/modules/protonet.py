@@ -8,6 +8,7 @@ from ..utils import aligned_bilinear
 class ProtoNet(nn.Module):
     def __init__(self, cfg, in_channels):
         super().__init__()
+
         self.proto_src = cfg.MODEL.MASK_HEADS.PROTO_SRC
         if self.proto_src is not None and len(self.proto_src) > 1:
             if cfg.MODEL.MASK_HEADS.USE_BN:

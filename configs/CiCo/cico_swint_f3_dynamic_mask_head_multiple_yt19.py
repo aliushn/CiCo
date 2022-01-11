@@ -4,11 +4,8 @@ _base_ = ['configs/_base_/models/r50_base.yaml', 'configs/_base_/models/swint_ba
 MODEL = dict(
     BACKBONE=dict(
         SWINT=dict(
-            path='swint_base_coco_300_576_40_320000.pth')
+            path='swint_base_coco_dynamic_mask_head_300_576_21_420000.pth')
     ),
-
-    FPN=dict(
-        NUM_FEATURES=256),
 
     PREDICTION_HEADS=dict(
         CUBIC_MODE=True,
@@ -18,6 +15,9 @@ MODEL = dict(
 
     MASK_HEADS=dict(
         TRAIN_MASKS=True,
+        USE_DYNAMIC_MASK=True,
+        LOSS_WITH_DICE_COEFF=False,
+        MASK_DIM=8,
         PROTO_NET=[(192, 3, 1), (192, 3, 1), (192, 3, 1), (None, -2, {})])
 )
 
@@ -45,4 +45,4 @@ TEST = dict(
     NUM_CLIP_FRAMES=3)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'cico_r50_f3_multiple_yt19'
+NAME = 'cico_swint_f3_dynamic_mask_head_multiple_yt19'

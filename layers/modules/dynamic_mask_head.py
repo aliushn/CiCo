@@ -84,7 +84,7 @@ class DynamicMaskHead(nn.Module):
 
     def __call__(self, mask_feats, mask_head_params, det_bbox, fpn_levels):
         '''
-        :param mask_feats: [1, 8, h, w] or [1, 8, t, h, w]
+        :param mask_feats: [t, 8, h, w]
         :param mask_head_params: [n, 169]
         :param det_bbox:[n, 4]
         :return:
@@ -93,10 +93,10 @@ class DynamicMaskHead(nn.Module):
         H, W = mask_feats.size()[-2:]
         weights, biases = parse_dynamic_params(mask_head_params, self.channels,
                                                self.weight_nums, self.bias_nums)
-        if mask_feats.dim() == 5:
-            T = mask_feats.size(-3)
+        T = mask_feats.size(0)
+        if T > 1:
             weights = [weight.unsqueeze(-1) for weight in weights]
-            mask_feats = mask_feats.repeat(n_inst, 1, 1, 1, 1)
+            mask_feats = mask_feats.permute(1, 0, 2, 3).contiguous().unsqueeze(0).repeat(n_inst, 1, 1, 1, 1)
         else:
             mask_feats = mask_feats.repeat(n_inst, 1, 1, 1)
 
@@ -113,6 +113,7 @@ class DynamicMaskHead(nn.Module):
 
         mask_head_inputs = mask_head_inputs.reshape(1, -1, H, W).contiguous() if mask_head_inputs.dim() == 4 \
             else mask_head_inputs.reshape(1, -1, T, H, W).contiguous()
-        mask_logits = self.mask_heads_forward(mask_head_inputs, weights, biases, n_inst)
+        mask_logits = self.mask_heads_forward(mask_head_inputs, weights, biases, n_inst).squeeze(0)
+        mask_logits = mask_logits if mask_logits.dim() == 4 else mask_logits.unsqueeze(1)
 
-        return mask_logits.squeeze(0).sigmoid()
+        return mask_logits.sigmoid()

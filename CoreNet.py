@@ -64,8 +64,10 @@ class CoreNet(nn.Module):
         # ---------------- Build track head ----------------
         if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
             if cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-                track_arch = [(self.fpn_num_features, 3, {'padding': 1})] * 2 + [(cfg.track_dim, 1, {})]
-                self.track_conv, _ = make_net(self.fpn_num_features, track_arch, include_bn=True, include_last_relu=False)
+                self.use_3D = True if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_ON_PROTONET else False
+                track_arch = [(self.fpn_num_features, 3, 1)] * 2 + [(cfg.MODEL.TRACK_HEADS.TRACK_DIM, 1, 0)]
+                self.track_conv, _ = make_net(self.fpn_num_features, track_arch, use_3D=self.use_3D,
+                                              norm_type='batch_norm', include_last_relu=False)
 
             if not cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE and not cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
                 # Track objects frame-by-frame
@@ -88,7 +90,7 @@ class CoreNet(nn.Module):
 
         if cfg.MODEL.MASK_HEADS.TRAIN_MASKS and cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS:
             sem_seg_head = [(self.fpn_num_features, 3, 1)]*2 + [(cfg.DATASETS.NUM_CLASSES, 1, 0)]
-            self.semantic_seg_conv, _ = make_net(self.fpn_num_features, sem_seg_head, include_bn=True,
+            self.semantic_seg_conv, _ = make_net(self.fpn_num_features, sem_seg_head, norm_type='batch_norm',
                                                  include_last_relu=False)
 
     def load_weights(self, path):
@@ -249,8 +251,9 @@ class CoreNet(nn.Module):
 
     def freeze_bn(self, enable=False):
         """ Adapted from https://discuss.pytorch.org/t/how-to-train-with-frozen-batchnorm/12106/8 """
-        for module in self.modules():
-            if isinstance(module, nn.BatchNorm2d):
+        for name, module in self.named_modules():
+            if name.startswith('backbone') and isinstance(module, nn.BatchNorm2d):
+                print('Freeze BN of backbone: ', name)
                 module.train() if enable else module.eval()
 
                 module.weight.requires_grad = enable
@@ -275,7 +278,13 @@ class CoreNet(nn.Module):
 
         if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
             with timer.env('track_by_Gaussian'):
-                pred_outs['track'] = self.track_conv(fpn_outs[0]).permute(0, 2, 3, 1).contiguous()
+                track_in = fpn_outs[0]
+                _, c, h, w = track_in.size()
+                if self.use_3D:
+                    track_in = fpn_outs[0].reshape(-1, self.clip_frames, c, h, w).transpose(1, 2)
+                track_out = self.track_conv(track_in)
+                pred_outs['track'] = track_out.permute(0, 2, 3, 1).contiguous() if not self.use_3D else \
+                    track_out.permute(0, 2, 3, 4, 1).contiguous()
 
         if self.training:
             if self.cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS or not self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:

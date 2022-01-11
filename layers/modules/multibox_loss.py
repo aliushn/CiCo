@@ -126,6 +126,7 @@ class MultiBoxLoss(nn.Module):
         priors, prior_levels = predictions['priors'], predictions['prior_levels']
         if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE and not self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
             priors = priors.repeat(T_out, 1, self.clip_frames)
+            prior_levels = prior_levels.repeat(1, self.clip_frames)
 
         # Match priors (default boxes) and ground truth boxes
         # These tensors will be created with the same device as loc_data
@@ -258,8 +259,7 @@ class MultiBoxLoss(nn.Module):
             # --------------------------------- Tracking loss ------------------------------------------------
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
                 if self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-                    losses_track = self.track_gauss_loss(track_data, gt_masks, gt_ids, predictions['proto'],
-                                                         predictions['mask_coeff'], gt_boxes, pos, ids_t, idx_t)
+                    losses_track = self.track_gauss_loss(track_data, gt_masks, gt_boxes, gt_ids, pos, ids_t, idx_t)
                 else:
                     losses_track = self.track_loss(track_data, pos, ids_t, T_out)
                 losses.update(losses_track)
@@ -385,38 +385,21 @@ class MultiBoxLoss(nn.Module):
 
         return {'T': loss / bs * self.cfg.MODEL.TRACK_HEADS.LOSS_ALPHA}
 
-    def track_gauss_loss(self, track_data, gt_masks, gt_ids, proto_data, mask_coeff, gt_boxes, pos, ids_t, idx_t):
-
-        def _prepare_masks_for_track(cfg, pos, ids_t, idx_t, gt_boxes, proto_data, mask_coeff, gt_masks, gt_ids):
-            if cfg.MODEL.TRACK_HEADS.CROP_WITH_PRED_MASK:
-                pos_ids_t = ids_t[pos]
-                # get GT bounding boxes for cropping pred masks
-                pos_bboxes = gt_boxes[idx_t[pos]]
-                pos_masks = generate_mask(proto_data, mask_coeff[pos], pos_bboxes)
-            else:
-                pos_ids_t = gt_ids
-                pos_masks = gt_masks
-                pos_bboxes = gt_boxes
-            return pos_masks, pos_bboxes, pos_ids_t
-
-        bs, track_h, track_w, t_dim = track_data.size()
+    def track_gauss_loss(self, track_data, gt_masks, gt_boxes, gt_ids, pos, ids_t, idx_t):
+        bs, T_out, track_h, track_w, t_dim = track_data.size()
+        if idx_t.dim() == 2:
+            idx_t = idx_t.reshape(bs, T_out, -1)
         loss = torch.tensor(0., device=track_data.device)
-        n_bs_track, n_clip = 0, 2
-        for i in range(bs//n_clip):
-            mu, var, obj_ids = [], [], []
+        n_bs_track = 0
 
-            for j in range(n_clip):
-                masks_cur, bbox_cur, ids_t_cur = _prepare_masks_for_track(self.cfg, pos[2*i+j],
-                                                                          ids_t[2*i+j], idx_t[2*i+j],
-                                                                          gt_boxes[2*i+j], proto_data[2*i+j],
-                                                                          mask_coeff[2*i+j], gt_masks[2*i+j],
-                                                                          gt_ids[2*i+j])
-                mu_cur, var_cur = generate_track_gaussian(track_data[2 * i + j], masks_cur, bbox_cur)
-                mu.append(mu_cur)
-                var.append(var_cur)
-                obj_ids.append(ids_t_cur)
-
-            mu, var, obj_ids = torch.cat(mu, dim=0), torch.cat(var, dim=0), torch.cat(obj_ids, dim=0)
+        for i in range(bs):
+            masks_cur, bbox_cur, obj_ids = gt_masks[i], gt_boxes[i], gt_ids[i]
+            if self.cfg.MODEL.TRACK_HEADS.CROP_WITH_PRED_MASK:
+                masks_cur, bbox_cur, obj_ids = masks_cur[idx_t[i][pos]], bbox_cur[idx_t[i][pos]], obj_ids[pos]
+            mu, var = generate_track_gaussian(track_data[i], masks_cur, bbox_cur)
+            mu, var = mu.reshape(-1, t_dim), var.reshape(-1, t_dim)
+            obj_ids = obj_ids.reshape(-1, 1).repeat(1, T_out).reshape(-1)
+            n_objs = mu.size(0)
 
             if len(obj_ids) > 1:
                 n_bs_track += 1
@@ -431,9 +414,9 @@ class MultiBoxLoss(nn.Module):
                 # pos: log(1+kl), neg: exp(1-kl)
                 pre_loss = inst_eq * (1 + 2 * kl_divergence).log() \
                            + (1. - inst_eq) * torch.exp(1 - 0.1 * kl_divergence)
-                loss += pre_loss.mean()
+                loss += pre_loss.sum() / n_objs / max(n_objs-1, 1)
 
-        losses = {'T': self.cfg.MODEL.TRACK_HEADS.LOSS_ALPHA * loss / max(n_bs_track, 1)}
+        losses = {'T': 0.5 * self.cfg.MODEL.TRACK_HEADS.LOSS_ALPHA * loss / max(n_bs_track, 1)}
 
         return losses
 

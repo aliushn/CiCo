@@ -1,11 +1,6 @@
 _base_ = ['configs/_base_/models/r50_base.yaml']
 
 MODEL = dict(
-    FPN=dict(
-        NUM_FEATURES=256,
-        USE_CONV_DOWNSAMPLE=True,
-        NUM_DOWNSAMPLE=2),
-
     PREDICTION_HEADS=dict(
         USE_DIoU=True,
         CUBIC_MODE=False,
@@ -58,7 +53,7 @@ SOLVER = dict(
 TEST = dict(
     IMS_PER_BATCH=1,
     NUM_CLIP_FRAMES=1,
-    DETECTIONS_PER_IMG=200,
+    DETECTIONS_PER_IMG=100,
     NMS_IoU_THRESH=0.5,
     NMS_CONF_THRESH=0.1,
     NMS_WITH_BIoU=True,

@@ -88,17 +88,15 @@ class LincombMaskLoss(object):
 
                     # Mask: linear combination between mask coefficients and prototypes
                     if not self.cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
-                        pred_masks = generate_mask(proto_data[i], mask_coeff_cur, boxes_cur_expand,
-                                                   proto_coeff_occlu=self.cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION)
+                        pred_masks = generate_mask(proto_data[i], mask_coeff_cur, boxes_cur_expand)
                         pred_masks = pred_masks.reshape(-1, n_frames, pred_masks.size(-2), pred_masks.size(-1))
                     else:
                         fpn_levels = prior_levels[i][pos_cur.view(-1)]
                         pred_masks = self.net.ProtoNet.DynamicMaskHead(proto_data[i].permute(2, 3, 0, 1).contiguous(),
                                                                        mask_coeff_cur, boxes_cur, fpn_levels)
                         if not self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF:
-                            pred_masks = crop(pred_masks.permute(1, 2, 0).contiguous(), boxes_cur_expand)
-                            pred_masks = pred_masks.permute(2, 0, 1).contiguous()
-                        pred_masks = pred_masks.unsqueeze(1)
+                            pred_masks = crop(pred_masks.permute(2, 3, 1, 0).contiguous(), boxes_cur_expand)
+                            pred_masks = pred_masks.permute(3, 2, 0, 1).contiguous()
 
                     if self.cfg.MODEL.MASK_HEADS.LOSS_WITH_OIR_SIZE:  # [n, T, h, w]
                         pred_masks = F.interpolate(pred_masks.float(), (H_gt, W_gt), mode='bilinear',

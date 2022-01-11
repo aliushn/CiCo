@@ -1,10 +1,8 @@
 import torch, torchvision
 import torch.nn as nn
 import torch.nn.functional as F
-from utils import timer
 from itertools import product
 from math import sqrt
-from mmcv.ops import DeformConv2d
 from ..visualization_temporal import display_cubic_weights, display_pixle_similarity
 from layers.utils import correlate_operator
 

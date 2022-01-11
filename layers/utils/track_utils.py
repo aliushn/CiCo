@@ -65,43 +65,34 @@ def generate_track_gaussian(track_data, masks=None, boxes=None):
     :return: the means and variances of multi-vairants Gaussian distribution for tracking
     '''
 
+    n_objs = boxes.size(0)
     dim = len(track_data.size())
     if dim == 3:
         track_data = track_data.unsqueeze(0)
     _, h, w, c = track_data.size()
+    track_data = track_data.unsqueeze(0).repeat(n_objs, 1, 1, 1, 1)
 
     assert masks is not None or boxes is not None
 
     if masks is not None:
         # use pred masks as the fired area to crop track_data
-        used_masks = F.interpolate(masks.unsqueeze(1).float(), (h, w),
-                                   mode='bilinear', align_corners=False).gt(0.5).squeeze(1)
-        if boxes is not None:
-            # For small objects, masks are too small to embed distinct Gaussian distribution
-            non_small_obj = used_masks.sum(dim=(1, 2)) > h*w*0.1
-            if non_small_obj.sum() > 0:
-                boxes_c = center_size(boxes)
-                boxes_c[non_small_obj, 2:] = boxes_c[non_small_obj, 2:] * 1.2
-                boxes = point_form(boxes_c)
-            boxes = torch.clamp(boxes, min=0, max=1)
-            crop_masks, _ = crop(used_masks.permute(1, 2, 0).contiguous(), boxes)
-            used_masks = used_masks & crop_masks.permute(2, 0, 1).contiguous().bool()
-        cropped_track_data = track_data * used_masks.unsqueeze(-1)   # [n_pos, h, w, 3]
-
+        used_masks = F.interpolate(masks.float(), (h, w), mode='bilinear', align_corners=False).gt(0.5)
+        cropped_track_data = track_data * used_masks.unsqueeze(-1)  # [n_pos, T, h, w, track_dim]
+        n_pixels = used_masks.sum(dim=(-1, -2)).view(-1, 1)
     else:
         # only use the center region of pred boxes to evaluate multi-vairants Gaussian distribution
-        c_boxes = center_size(boxes)
-        c_boxes[:, 2:] = c_boxes[:, 2:] * 0.75
-        if dim == 3:
-            track_data = track_data.repeat(c_boxes.size(0), 1, 1, 1)
-        used_masks, cropped_track_data = crop(track_data.permute(1, 2, 3, 0).contiguous(),
-                                              point_form(c_boxes))   # [h, w, c, n_pos]
-        used_masks = used_masks.permute(3, 0, 1, 2).contiguous()
-        cropped_track_data = cropped_track_data.permute(3, 0, 1, 2).contiguous()
+        c_boxes = center_size(boxes.reshape(-1, 4))
+        non_small_obj = c_boxes[:, 2] * c_boxes[:, 3] >= 0.01
+        if non_small_obj.sum() > 0:
+            c_boxes[non_small_obj, 2:] *= 0.75
+        n_pixels = c_boxes[:, 2] * c_boxes[:, 3] * h * w
+        boxes = point_form(c_boxes).reshape(n_objs, -1, 4)
+        cropped_track_data = crop(track_data.reshape(-1, h, w, c).permute(1, 2, 3, 0).contiguous(),
+                                  boxes.reshape(-1, 4))   # [h, w, c, n_pos*T]
+        cropped_track_data = cropped_track_data.permute(3, 0, 1, 2).contiguous().reshape(n_objs, -1, h, w, c)
 
-    n_pixels = used_masks.sum(dim=(1, 2)).view(-1, 1)
-    mu = cropped_track_data.sum(dim=(1, 2)) / torch.clamp(n_pixels, min=1)  # [n_pos, c]
-    var = torch.sum((cropped_track_data - mu[:, None, None, :]) ** 2, dim=(1, 2))  # [n_pos, c]
+    mu = cropped_track_data.sum(dim=(-2, -3)) / torch.clamp(n_pixels.reshape(n_objs, -1, 1), min=1)  # [n_pos, c]
+    var = torch.sum((cropped_track_data - mu[:, :, None, None, :]) ** 2, dim=(-2, -3))  # [n_pos, c]
 
     return mu, var
 
