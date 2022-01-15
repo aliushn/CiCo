@@ -155,9 +155,9 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
     n_objs, n_clip_frames, _ = gt_boxes.size()
 
     ind_range = [jdx] if ind_range is None else ind_range
-    gt_boxes_hw = ((gt_boxes[:, ind_range, 2:]-gt_boxes[:, ind_range, :2]) > 0).reshape(n_objs, -1, 2).float()
+    gt_boxes_hw = gt_boxes[:, ind_range, 2:]-gt_boxes[:, ind_range, :2]
     # At least occur once in the selected frames
-    valid = (gt_boxes_hw.sum(dim=-1) == 2).sum(dim=-1) > 0
+    valid = ((gt_boxes_hw > 0).reshape(n_objs, -1, 2).sum(dim=-1) == 2).sum(dim=-1) > 0
     if valid.sum() > 0:
         if (~valid).sum() > 0:
             valid_gt_boxes = gt_boxes[valid]
@@ -188,16 +188,16 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
 
             # Find i, the highest overlap anchor with this gt
             i = best_prior_idx_ext[j]
+            if best_truth_overlap_cir[i] >= thresh:
+                # Set all other overlaps with i to be -1 so that no other gt uses it
+                overlaps_clip_cir[:, i] = -1
+                # Set all other overlaps with j to be -1 so that this loop never uses j again
+                overlaps_clip_cir[j, :] = -1
 
-            # Set all other overlaps with i to be -1 so that no other gt uses it
-            overlaps_clip_cir[:, i] = -1
-            # Set all other overlaps with j to be -1 so that this loop never uses j again
-            overlaps_clip_cir[j, :] = -1
-
-            # Overwrite i's score to be 2 so it doesn't get thresholded ever
-            best_truth_overlap_cir[i] = 2
-            # Set the gt to be used for i to be j, overwriting whatever was there
-            best_truth_idx_cir[i] = j
+                # Overwrite i's score to be 2 so it doesn't get thresholded ever
+                best_truth_overlap_cir[i] = 2
+                # Set the gt to be used for i to be j, overwriting whatever was there
+                best_truth_idx_cir[i] = j
 
         # Small objects use smaller threshold in order to have more postive samples
         gt_boxes_c = center_size(valid_gt_boxes[:, ind_range].reshape(-1, 4)).reshape(n_objs, -1, 4)[..., 2:]
@@ -210,8 +210,7 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
         # Define positive sample, negative samples and neutral
         keep_pos_cir = best_truth_overlap_cir > pos_thresh
         keep_neg_cir = best_truth_overlap_cir < neg_thresh
-        # print(ind_range)
-        # print(keep_pos_cir.sum(), n_objs, torch.arange(len(keep_pos_cir))[keep_pos_cir])
+        # print(ind_range, keep_pos_cir.sum(), n_objs)
         # print(best_truth_idx_cir[keep_pos_cir], best_truth_overlap_cir[keep_pos_cir])
 
         valid_best_truth_idx_cir = valid_idx[best_truth_idx_cir] if (~valid).sum() > 0 else best_truth_idx_cir
@@ -223,7 +222,8 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
             loc_pos = encode(matches[keep_pos_cir], priors[keep_pos_cir, :4])
         else:
             matches = gt_boxes[valid_best_truth_idx_cir][keep_pos_cir]
-            loc_pos = encode(matches.reshape(-1, 4), priors[keep_pos_cir].reshape(-1, 4)).reshape(keep_pos_cir.sum(), -1)
+            T_out = matches.size(1)
+            loc_pos = encode(matches.reshape(-1, 4), priors[keep_pos_cir].reshape(-1, 4)).reshape(keep_pos_cir.sum(), T_out*4)
 
         # Please Triple check to avoid Nan and Inf
         keep = (torch.isinf(loc_pos).sum(-1) + torch.isnan(loc_pos).sum(-1)) > 0

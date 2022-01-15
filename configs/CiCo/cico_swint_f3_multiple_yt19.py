@@ -23,7 +23,6 @@ MODEL = dict(
 
 CiCo = dict(
     MATCHER_CENTER=False,
-    FRAME2CLIP_EXPAND_PROPOSALS=False,
     CPH_LAYER_KERNEL_SIZE=(1, 3, 3),
     CPH_LAYER_STRIDE=(1, 1, 1))
 
@@ -45,4 +44,4 @@ TEST = dict(
     NUM_CLIP_FRAMES=3)
 
 OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'cico_r50_f3_multiple_yt19'
+NAME = 'cico_swint_f3_multiple_yt19'

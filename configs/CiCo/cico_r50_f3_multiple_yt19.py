@@ -14,7 +14,6 @@ MODEL = dict(
 
 CiCo = dict(
     MATCHER_CENTER=False,
-    FRAME2CLIP_EXPAND_PROPOSALS=False,
     CPH_LAYER_KERNEL_SIZE=(1, 3, 3),
     CPH_LAYER_STRIDE=(1, 1, 1))
 

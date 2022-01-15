@@ -178,7 +178,7 @@ class Detect(object):
             # Calculate similarity of mask coefficients
             masks_coeff_idx = F.normalize(candidate['mask_coeff'][idx], dim=-1)
             sim = masks_coeff_idx @ masks_coeff_idx.t()
-            iou = 0.45*iou + 0.45*m_iou + 0.1*sim if self.cubic_mode else 0.5*iou + 0.5*m_iou
+            iou = 0.5*iou + 0.4*m_iou + 0.1*sim if self.cubic_mode else 0.5*iou + 0.5*m_iou
             # iou = 0.8*m_iou + 0.2*sim if self.cubic_mode else m_iou
 
         # Zero out the lower triangle of the cosine similarity matrix and diagonal

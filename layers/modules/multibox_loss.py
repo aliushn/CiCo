@@ -43,9 +43,8 @@ class MultiBoxLoss(nn.Module):
         self.neg_threshold = neg_threshold
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
         self.use_cir_boxes = self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES
-        self.frame2clip_expand_proposals = cfg.CiCo.FRAME2CLIP_EXPAND_PROPOSALS
         self.PHL_kernel_size, self.PHL_padding = cfg.CiCo.CPH_LAYER_KERNEL_SIZE[0], cfg.CiCo.CPH_LAYER_PADDING[0]
-        self.PHL_stride = 1 if self.frame2clip_expand_proposals else cfg.CiCo.CPH_LAYER_STRIDE[0]
+        self.PHL_stride = cfg.CiCo.CPH_LAYER_STRIDE[0]
 
         self.T2SLoss = T2SLoss(cfg, net)
         self.LincombMaskLoss = LincombMaskLoss(cfg, net)
@@ -75,8 +74,6 @@ class MultiBoxLoss(nn.Module):
 
             num_crowds (list<int>): Number of crowd annotations per batch. The crowd
                 annotations should be the last num_crowds elements of targets and masks.
-
-            * Only if mask_type == lincomb
         """
 
         if self.cfg.DATASETS.TYPE not in {'coco', 'det'}:
@@ -90,8 +87,8 @@ class MultiBoxLoss(nn.Module):
                 gt_ids = sum([[ids]*self.cfg.SOLVER.NUM_CLIPS for ids in gt_ids], [])
                 num_crowds = sum([[num]*self.cfg.SOLVER.NUM_CLIPS for num in num_crowds], [])
 
-            # A instance may disappear in some frames of the clip due to occlusion or fast object/camera motion.
-            # Thus we have to distinguish whether an instance exists in a frame, called pos_frames.
+            # An instance may disappear in some frames of the clip due to occlusion or fast object/camera motion.
+            # Thus, we have to distinguish whether an instance exists in a frame, called pos_frames.
             # If the anchor is matched ground-truth bounding boxes at least one frame, called pos_clip.
             # When clip_frames=1, pos_clip (clip-level) is same as pos_frames (frame-level)
             # if the object disappears in the clip due to occlusion or other cases, the box is supplemented
@@ -154,17 +151,13 @@ class MultiBoxLoss(nn.Module):
                     kdx = idx*T_out + jdx
 
                     # To define the positive and negative matcher
-                    if self.frame2clip_expand_proposals:
-                        ind_range = [jdx]
-                    elif self.cfg.CiCo.MATCHER_CENTER:
+                    if self.cfg.CiCo.MATCHER_CENTER:
                         ind_range = range(self.clip_frames//2-1, self.clip_frames//2+1) if self.clip_frames % 2 == 0 \
                             else range(self.clip_frames//2-1, self.clip_frames//2+2)
                     else:
                         ind_range = range(jdx*self.PHL_stride, jdx*self.PHL_stride+self.PHL_kernel_size)
 
-                    if self.num_classes == 25 or self.num_classes == 26:
-                        self.pos_threshold = 0.55
-                    match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[idx], loc_data[kdx],
+                    match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[kdx], loc_data[kdx],
                                loc_t, conf_t, idx_t, ids_t, kdx, jdx, self.pos_threshold,
                                self.neg_threshold, use_cir_boxes=self.use_cir_boxes, ind_range=ind_range)
 

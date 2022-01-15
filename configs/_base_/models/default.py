@@ -309,7 +309,6 @@ _C.CiCo.CPH_TOWER133 = False
 _C.CiCo.CPH_LAYER_KERNEL_SIZE = (3, 3, 3)
 _C.CiCo.CPH_LAYER_PADDING = (0, 1, 1)
 _C.CiCo.CPH_LAYER_STRIDE = (1, 1, 1)
-_C.CiCo.FRAME2CLIP_EXPAND_PROPOSALS = False
 _C.CiCo.MATCHER_CENTER = True
 
 # ---------------------------------------------------------------------------- #

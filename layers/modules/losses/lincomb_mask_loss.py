@@ -55,16 +55,15 @@ class LincombMaskLoss(object):
                     with torch.no_grad():
                         N_gt, n_frames, H_gt, W_gt = masks_gt_cur.size()
                         # Mask loss for non-occluded part, [n_pos, 2, h, w]
-                        masks_gt_cur_intraclass = masks_gt_cur.new_zeros(masks_gt_cur.size())
+                        masks_gt_cur_intraclass = masks_gt_cur.clone()
                         # Assign non-target objects as 1, then target objects as 0
                         for m_idx in range(N_gt):
                             keep_intraclass = labels_gt_cur == labels_gt_cur[m_idx]
-                            if N_gt > 1 and keep_intraclass.sum() > 1:
-                                non_target_objects = (masks_gt_cur[keep_intraclass].sum(dim=0) > 0) & (masks_gt_cur[m_idx] == 0)
-                                masks_gt_cur_intraclass[m_idx][non_target_objects] = 1
+                            intraclass_objects = masks_gt_cur[keep_intraclass].sum(dim=0) > 0
+                            masks_gt_cur_intraclass[m_idx][intraclass_objects] = 1
 
                     mask_t = masks_gt_cur[idx_t_cur]  # [n_pos, n_frames, mask_h, mask_w]
-                    mask_t_intraclass = torch.cat([mask_t, masks_gt_cur_intraclass[idx_t_cur]], dim=0)
+                    mask_t_intraclass = masks_gt_cur_intraclass[idx_t_cur]
 
                     # if self.cfg.MODEL.MASK_HEADS.PROTO_CROP or self.cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
                     # Only use circumscribed boxes to crop mask
@@ -128,11 +127,11 @@ class LincombMaskLoss(object):
                     loss += pre_loss.mean()
 
                     # add a segmentation loss to distinguish intra-class objects
-                    pre_loss_intraclass = F.binary_cross_entropy(torch.cat([pred_masks, 1 - pred_masks], dim=0),
-                                                                 mask_t_intraclass, reduction='none')
-                    loss_intraclass += (pre_loss_intraclass * mask_t_intraclass).sum() / mask_t_intraclass.sum()
+                    # pre_loss_intraclass = F.binary_cross_entropy(pred_masks[mask_t_intraclass == 1],
+                    #                                              mask_t[[mask_t_intraclass == 1]], reduction='none')
+                    # loss_intraclass += pre_loss_intraclass.mean()
 
-        loss = loss / max(bs, 1) * self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA * n_frames
+        loss = loss / max(bs, 1) * self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA * max(n_frames//2, 1)
         losses = {'M_dice': 2*loss} if self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF else {'M_bce': loss}
         # losses['M_intraclass'] = loss_intraclass / max(bs, 1) * self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA
         # losses['M_l1'] = sparse_loss / max(bs, 1)

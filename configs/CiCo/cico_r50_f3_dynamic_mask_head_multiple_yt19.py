@@ -1,10 +1,8 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/_base_/models/swint_base.yaml',
-          'configs/CiCo/base_vis.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/CiCo/base_vis.py']
 
 MODEL = dict(
     BACKBONE=dict(
-        SWINT=dict(
-            path='swint_base_coco_dynamic_mask_head_300_576_21_420000.pth')
+        PATH='swint_base_coco_dynamic_mask_head_300_576_21_420000.pth')
     ),
 
     PREDICTION_HEADS=dict(

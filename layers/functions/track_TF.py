@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from layers.utils import jaccard,  mask_iou, generate_track_gaussian, compute_comp_scores, compute_kl_div, generate_mask, \
-    center_size, point_form
+    center_size, point_form, crop
 from .TF_utils import CandidateShift
 import numpy as np
 
@@ -18,18 +18,20 @@ class Track_TF(object):
     # TODO: Refactor this whole class away. It needs to go.
 
     def __init__(self, net, cfg):
-        self.prev_candidate = None
+        self.net = net
         self.cfg = cfg
+        self.prev_candidate = None
         self.match_coeff = cfg.MODEL.TRACK_HEADS.MATCH_COEFF
         self.correlation_patch_size = cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE
         self.conf_thresh = cfg.TEST.NMS_CONF_THRESH
         self.track_by_Gaussian = cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN
+        self.use_dynamic_mask = cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK
         self.proto_coeff_occlu = cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION
         self.img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
         if self.track_by_Gaussian:
             self.img_level_keys += ['track']
         self.num_clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-        self.use_cubic_TF = False
+        self.use_cubic_TF = True
 
         if self.cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
             self.CandidateShift = CandidateShift(net, cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE,
@@ -62,11 +64,12 @@ class Track_TF(object):
             self.prev_candidate = None
 
         # generate mean and variance of Gaussian for objects
-        det_masks_soft = candidate['mask'] if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS else None
-        if self.track_by_Gaussian:
-            candidate['track_mu'], candidate['track_var'] = generate_track_gaussian(candidate['track'], det_masks_soft,
-                                                                                    candidate['box'])
-        track_dim = candidate['track'].size(-1)
+        if candidate['box'].nelement() > 0:
+            det_masks_soft = candidate['mask'] if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS else None
+            if self.track_by_Gaussian:
+                candidate['track_mu'], candidate['track_var'] = generate_track_gaussian(candidate['track'],
+                                                                                        det_masks_soft,
+                                                                                        candidate['box'])
 
         # compared bboxes in current frame with bboxes in previous frame to achieve tracking
         if is_first or (not is_first and self.prev_candidate is None):
@@ -90,11 +93,22 @@ class Track_TF(object):
                 self.CandidateShift(candidate, self.prev_candidate, img=img, img_meta=img_meta)
             if self.use_cubic_TF:
                 # Tracked masks by temporal coherence: P_t * coeff_{t-1} between two adjacent clips
-                prev_boxes_cir = center_size(self.prev_candidate['box_cir'])
-                prev_boxes_cir[:, 2:] *= 1.2
-                self.prev_candidate['mask'] = generate_mask(candidate['proto'], self.prev_candidate['mask_coeff'],
-                                                            point_form(prev_boxes_cir))
-                self.prev_candidate['score'] *= 0.9**(self.prev_candidate['mask'].size(1))
+                prev_boxes_cir_c = center_size(self.prev_candidate['box_cir'])
+                prev_boxes_cir_c[:, 2:] *= 1.2
+                prev_boxes_cir_expand = point_form(prev_boxes_cir_c)
+                if self.use_dynamic_mask:
+                    pred_masks = self.net.ProtoNet.DynamicMaskHead(candidate['proto'].permute(2, 3, 0, 1).contiguous(),
+                                                                   self.prev_candidate['mask_coeff'],
+                                                                   self.prev_candidate['box_cir'],
+                                                                   self.prev_candidate['prior_levels'])
+                    if not self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF:
+                        pred_masks = crop(pred_masks.permute(2, 3, 1, 0).contiguous(), prev_boxes_cir_expand)
+                        pred_masks = pred_masks.permute(3, 2, 0, 1).contiguous()
+                else:
+                    pred_masks = generate_mask(candidate['proto'], self.prev_candidate['mask_coeff'],
+                                               prev_boxes_cir_expand)
+                self.prev_candidate['mask'] = pred_masks
+                self.prev_candidate['score'] *= 0.8**self.num_clip_frames
 
             for k, v in candidate.items():
                 if k in self.img_level_keys:
@@ -109,12 +123,12 @@ class Track_TF(object):
             else:
                 # get bbox and class after NMS
                 det_bbox, det_score = candidate['box'], candidate['score']
-                n_dets = det_bbox.size(0)
+                n_dets, track_dim = det_bbox.size(0), candidate['track'].size(-1)
                 candidate['tracked_mask'] = torch.zeros(n_dets)
 
                 match_type = 1
                 if match_type == 1:
-                    img_over_idx = torch.nonzero(self.prev_candidate['img_ids'].unsqueeze(1)==candidate['img_ids'],
+                    img_over_idx = torch.nonzero(self.prev_candidate['img_ids'].unsqueeze(1) == candidate['img_ids'],
                                                  as_tuple=False)
 
                     if img_over_idx.nelement() > 0:
@@ -131,12 +145,11 @@ class Track_TF(object):
                                                  self.prev_candidate['box'][:, prev_idx*4:(prev_idx+1)*4])
                                                  for prev_idx, cur_idx in zip(prev_overlapped_idx, cur_overlapped_idx)
                                                  ]).mean(dim=0)
+                        self.prev_candidate['box_cir'] = self.prev_candidate['box'][:, -4:].clone()
+                        self.prev_candidate['box'] = self.prev_candidate['box_cir'].repeat(1, self.num_clip_frames)
 
-                    if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
-                        label_delta = torch.zeros_like(bbox_ious)
-                    else:
-                        det_labels = candidate['class']
-                        label_delta = (self.prev_candidate['class'] == det_labels.view(-1, 1)).float()
+                    det_labels = candidate['class']
+                    label_delta = (self.prev_candidate['class'] == det_labels.view(-1, 1)).float()
 
                     if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
                         det_masks, prev_masks = det_masks_soft.gt(0.5).float(), self.prev_candidate['mask'].gt(0.5).float()
@@ -188,7 +201,7 @@ class Track_TF(object):
                 match_likelihood, match_ids = torch.max(comp_scores, dim=1)
 
                 # Translate match_ids to det_obj_ids, assign new id to new objects
-                # update tracking features/bboxes of exisiting object,
+                # update tracking features/bboxes of existing object,
                 # add tracking features/bboxes of new object
                 candidate['box_ids'] = torch.ones(n_dets, dtype=torch.int64) * (-1)
                 best_match_scores = torch.ones(n_prev) * (-1)

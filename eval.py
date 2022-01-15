@@ -71,7 +71,7 @@ def parse_args(argv=None):
                         help='The output file for coco bbox results if --coco_results is set.')
     parser.add_argument('--config', default=None,
                         help='The config object to use.')
-    parser.add_argument('--display_lincomb', default=False, type=str2bool,
+    parser.add_argument('--display_lincomb', dest='display_lincomb', action='store_true',
                         help='If the config uses lincomb masks, output a visualization of how those masks are created.')
     parser.add_argument('--image', default=None, type=str,
                         help='A path to an image to use for display.')
@@ -500,9 +500,9 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
         print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
 
         # Inverse direction
-        # if args.display:
-        #     vdx = -vdx - 1
-        #     vid = dataset.vid_ids[vdx]
+        if args.display:
+            vdx = -vdx - 1
+            vid = dataset.vid_ids[vdx]
 
         vid_objs = {}
         if data_type == 'vis':

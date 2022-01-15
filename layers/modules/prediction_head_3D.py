@@ -70,9 +70,7 @@ class PredictionModule_3D(nn.Module):
             self.mask_dim = self.mask_dim
 
         padding, stride = (0, 1, 1), (1, 1, 1)
-        if self.cfg.CiCo.FRAME2CLIP_EXPAND_PROPOSALS:
-            kernel_size = (1, 3, 3)
-        elif self.cfg.CiCo.MATCHER_CENTER:
+        if self.cfg.CiCo.MATCHER_CENTER:
             kernel_size = (self.clip_frames, 3, 3)
         else:
             kernel_size, padding = cfg.CiCo.CPH_LAYER_KERNEL_SIZE, cfg.CiCo.CPH_LAYER_PADDING
