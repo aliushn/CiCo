@@ -263,7 +263,7 @@ _C.MODEL.MASK_HEADS.DISABLE_REL_COORDS = False
 
 
 # ---------------------------------------------------------------------------- #
-# STMask (CVPR2021) Options
+# STMask (CVPR2021) Options, https://arxiv.org/abs/2104.05606
 # ---------------------------------------------------------------------------- #
 _C.STMASK = CN()
 

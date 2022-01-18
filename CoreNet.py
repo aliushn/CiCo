@@ -61,7 +61,8 @@ class CoreNet(nn.Module):
 
             self.Track = Track_TF(self, cfg)
             if cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
-                # A Temporal Fusion built on two adjacent frames for tracking
+                # A Temporal Fusion built on two adjacent frames for tracking in STMask, clik here
+                # https://arxiv.org/abs/2104.05606
                 self.TF_correlation_selected_layer = cfg.STMASK.T2S_HEADS.CORRELATION_SELECTED_LAYER
                 corr_channels = 2*self.fpn_num_features + cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE**2
                 self.TemporalNet = TemporalNet(corr_channels, cfg.MODEL.MASK_HEADS.MASK_DIM,
