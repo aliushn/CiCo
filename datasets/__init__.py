@@ -1,4 +1,4 @@
-from .utils import random_scale, show_ann, get_dataset, ImageList_from_tensors
+from .utils import random_scale, show_ann, get_dataset, ImageList_from_tensors, GtList_from_tensor
 
 from .ytvos import YTVOSDataset
 from .ytvos import detection_collate as detection_collate_vis
@@ -28,7 +28,7 @@ __all__ = [
     'detection_collate_coco', 'detection_collate_vis', 'get_dataset',
     'YTVOSDataset', 'COCODetection',
     'GroupSampler', 'DistributedGroupSampler', 'build_dataloader',
-    'random_scale', 'show_ann', 'prepare_data_vis', 'ImageList_from_tensors', 'prepare_data_coco',
+    'random_scale', 'show_ann', 'prepare_data_vis', 'ImageList_from_tensors', 'GtList_from_tensor', 'prepare_data_coco',
     'SSDAugmentation', 'BaseTransform_coco', 'FastBaseTransform', 'BaseTransform_vis',
     'VIDDataset', 'detection_collate_vid', 'prepare_data_vid',
     'COCOVISDetection', 'detection_collate_cocovis', 'prepare_data_cocovis',

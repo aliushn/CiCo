@@ -188,7 +188,7 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
 
             # Find i, the highest overlap anchor with this gt
             i = best_prior_idx_ext[j]
-            if best_truth_overlap_cir[i] >= thresh:
+            if best_truth_overlap_cir[i] >= thresh*0.5 or best_truth_overlap_cir.max() < pos_thresh:
                 # Set all other overlaps with i to be -1 so that no other gt uses it
                 overlaps_clip_cir[:, i] = -1
                 # Set all other overlaps with j to be -1 so that this loop never uses j again

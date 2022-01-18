@@ -2,14 +2,7 @@ _base_ = ['configs/_base_/models/r50_base.yaml', 'configs/CiCo/base_vis.py']
 
 MODEL = dict(
     BACKBONE=dict(
-        PATH='swint_base_coco_dynamic_mask_head_300_576_21_420000.pth')
-    ),
-
-    PREDICTION_HEADS=dict(
-        CUBIC_MODE=True,
-        CUBIC_3D_MODE=True,
-        CUBIC_MODE_ON_PROTONET=True,
-        CIRCUMSCRIBED_BOXES=False),
+        PATH='swint_base_coco_dynamic_mask_head_300_576_21_420000.pth'),
 
     MASK_HEADS=dict(
         TRAIN_MASKS=True,
@@ -20,9 +13,19 @@ MODEL = dict(
 )
 
 CiCo = dict(
-    MATCHER_CENTER=False,
-    CPH_LAYER_KERNEL_SIZE=(1, 3, 3),
-    CPH_LAYER_STRIDE=(1, 1, 1))
+    ENGINE=True,
+
+    CPH=dict(
+        MATCHER_CENTER=False,
+        CUBIC_MODE=True,
+        LAYER_KERNEL_SIZE=(1, 3, 3),
+        LAYER_STRIDE=(1, 1, 1),
+        CIRCUMSCRIBED_BOXES=False),
+
+    CPN=dict(
+        CUBIC_MODE=True)
+
+)
 
 DATASETS = dict(
     TYPE='vis',

@@ -107,7 +107,7 @@ def results2json_videoseg(results, out_file):
     print('Done')
 
 
-def bbox2result_video(results, preds, frame_idx, types=None):
+def bbox2result_video(results, preds, frame_ids, types=None):
     """Convert detection results to a list of numpy arrays.
 
     Args:
@@ -123,42 +123,42 @@ def bbox2result_video(results, preds, frame_idx, types=None):
         for type in types:
             for obj_id in results:
                 if type == 'segm':
-                    results[obj_id]['segmentations'] += [None]
+                    results[obj_id]['segmentations'] += [None] * len(frame_ids)
                 elif type == 'bbox':
-                    results[obj_id]['bbox'] += [None]
+                    results[obj_id]['bbox'] += [None] * len(frame_ids)
 
     if preds is None or (preds is not None and preds['box'].shape[0] == 0):
         return results
     else:
-        bboxes = preds['box'].cpu().numpy()
         labels = preds['class'].view(-1).cpu().numpy() if 'class' in preds.keys() else None
         scores = preds['score'].view(-1).cpu().numpy()
         obj_ids = preds['box_ids'].view(-1).cpu().numpy()
         for type in types:
-            for idx, score, bbox, obj_id in zip(range(len(obj_ids)), scores, bboxes, obj_ids):
-                if type == 'segm':
-                    segm = preds['mask'][idx]
-                    # segm annotation: png2rle
-                    segm = mask_util.encode(np.array(segm.cpu(), order='F', dtype='uint8'))
-                    # .json file can not deal with var with 'bytes'
-                    segm['counts'] = segm['counts'].decode()
-
+            for idx, score, obj_id in zip(range(len(obj_ids)), scores, obj_ids):
                 if obj_id not in results:
                     results[obj_id] = {'score': [score]}
                     if labels is not None:
                         results[obj_id]['category_id'] = [labels[idx]]
                     if type == 'segm':
-                        results[obj_id]['segmentations'] = [None]*frame_idx + [segm]
+                        results[obj_id]['segmentations'] = [None] * (max(frame_ids)+1)
                     elif type == 'bbox':
-                        results[obj_id]['bbox'] = [None]*frame_idx + [bbox.tolist()]
+                        results[obj_id]['bbox'] = [None] * (max(frame_ids)+1)
                 else:
                     results[obj_id]['score'] += [score]
                     if labels is not None:
                         results[obj_id]['category_id'] += [labels[idx]]
+
+                for t, frame_id in enumerate(frame_ids):
+                    bbox = preds['box'][t, idx].cpu().numpy()
                     if type == 'segm':
-                        results[obj_id]['segmentations'][-1] = segm
+                        segm = preds['mask'][t, idx]
+                        # segm annotation: png2rle
+                        segm = mask_util.encode(np.array(segm.cpu(), order='F', dtype='uint8'))
+                        # .json file can not deal with var with 'bytes'
+                        segm['counts'] = segm['counts'].decode()
+                        results[obj_id]['segmentations'][frame_id] = segm
                     elif type == 'bbox':
-                        results[obj_id]['bbox'][-1] = bbox.tolist()
+                        results[obj_id]['bbox'][frame_id] = bbox.tolist()
 
         return results
 

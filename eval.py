@@ -20,7 +20,6 @@ from configs._base_.datasets import get_dataset_config
 
 import matplotlib.pyplot as plt
 import cv2
-import random
 
 
 def str2bool(v):
@@ -86,273 +85,135 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
 
 
-def prep_display(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0.55):
+def prep_display(dets_out, imgs, img_meta=None, undo_transform=True, mask_alpha=0.55):
     """
     Note: If undo_transform=False then im_h and im_w are allowed to be None.
     -- display_model: 'train', 'test', 'None' means groundtruth results
     """
-    ori_h, ori_w, _ = img_meta['ori_shape']
-    img_h, img_w, _ = img_meta['img_shape']
+    img_meta_temp = img_meta[0] if isinstance(img_meta, list) else img_meta
+    ori_h, ori_w, _ = img_meta_temp['ori_shape']
+    img_h, img_w, _ = img_meta_temp['img_shape']
+    root_dir = os.path.join(args.save_folder, 'out', str(img_meta_temp['video_id']))
+    if not os.path.exists(root_dir):
+        os.makedirs(root_dir)
+
     if undo_transform:
-        img_numpy = undo_image_transformation(img, ori_h, ori_w, img_h, img_w)
-        img_gpu = torch.Tensor(img_numpy).cuda()
+        imgs_numpy = undo_image_transformation(imgs, ori_h, ori_w, img_h, img_w)
+        imgs_gpu = torch.Tensor(imgs_numpy).cuda()
     else:
-        img_gpu = img / 255.0
+        imgs_gpu = imgs / 255.0
 
-    with timer.env('Postprocess'):
-        dets_out = postprocess_ytbvis(dets_out, img_meta,
-                                      visualize_lincomb=args.display_lincomb,
-                                      output_file=args.save_folder)
-        torch.cuda.synchronize()
-
-    num_dets_to_consider = min(args.top_k, dets_out['box'].size(0))
+    # torch.cuda.synchronize()
+    num_dets_to_consider = min(args.top_k, dets_out['box'].size(1))
     scores = dets_out['score'][:args.top_k].view(-1).detach().cpu().numpy()
-    boxes = dets_out['box'][:args.top_k].detach().cpu().numpy()
     color_type = dets_out['box_ids'].view(-1)
     num_tracked_mask = dets_out['tracked_mask'] if 'tracked_mask' in dets_out.keys() else None
     boxes_cir = dets_out['box_cir'] if 'box_cir' in dets_out.keys() else None
-    if 'mask' in dets_out.keys():
-        masks = dets_out['mask'][:args.top_k]
 
-    if num_dets_to_consider == 0:
-        # No detections found so just output the original image
-        return (img_gpu * 255).byte().cpu().numpy()
+    for t in range(imgs_gpu.size(0)):
+        img_gpu = imgs_gpu[t]
+        boxes = dets_out['box'][t, :args.top_k].detach().cpu().numpy()
+        if 'mask' in dets_out.keys():
+            masks = dets_out['mask'][t, :args.top_k]
 
-    # First, draw the masks on the GPU where we can do it really fast
-    # Beware: very fast but possibly unintelligible mask-drawing code ahead
-    # I wish I had access to OpenGL or Vulkan but alas, I guess Pytorch tensor operations will have to suffice
-    if args.display_masks:
-        # After this, mask is of size [num_dets, h, w, 1]
-        masks = masks[:num_dets_to_consider, :, :, None]
+        if num_dets_to_consider == 0:
+            # No detections found so just output the original image
+            img_numpy = (img_gpu * 255).byte().cpu().numpy()
 
-        # Prepare the RGB images for each mask given their color (size [num_dets, h, w, 1])
-        colors = torch.cat(
-            [get_color(j, color_type, on_gpu=img_gpu.device.index, undo_transform=undo_transform).view(1, 1, 1, 3)
-             for j in range(num_dets_to_consider)], dim=0)
-        masks_color = masks.repeat(1, 1, 1, 3) * colors * mask_alpha
+        else:
+            # First, draw the masks on the GPU where we can do it really fast
+            # Beware: very fast but possibly unintelligible mask-drawing code ahead
+            # I wish I had access to OpenGL or Vulkan but alas, I guess Pytorch tensor operations will have to suffice
+            if args.display_masks:
+                # After this, mask is of size [num_dets, h, w, 1]
+                masks = masks[:num_dets_to_consider, :, :, None]
 
-        # This is 1 everywhere except for 1-mask_alpha where the mask is
-        inv_alph_masks = masks * (-mask_alpha) + 1
+                # Prepare the RGB images for each mask given their color (size [num_dets, h, w, 1])
+                colors = torch.cat(
+                    [get_color(j, color_type, on_gpu=img_gpu.device.index, undo_transform=undo_transform).view(1, 1, 1, 3)
+                     for j in range(num_dets_to_consider)], dim=0)
+                masks_color = masks.repeat(1, 1, 1, 3) * colors * mask_alpha
 
-        # I did the math for this on pen and paper. This whole block should be equivalent to:
-        #    for j in range(num_dets_to_consider):
-        #        img_gpu = img_gpu * inv_alph_masks[j] + masks_color[j]
-        masks_color_summand = masks_color[0]
-        if num_dets_to_consider > 1:
-            inv_alph_cumul = inv_alph_masks[:(num_dets_to_consider - 1)].cumprod(dim=0)
-            masks_color_cumul = masks_color[1:] * inv_alph_cumul
-            masks_color_summand += masks_color_cumul.sum(dim=0)
-        img_gpu = img_gpu * inv_alph_masks.prod(dim=0) + masks_color_summand
+                # This is 1 everywhere except for 1-mask_alpha where the mask is
+                inv_alph_masks = masks * (-mask_alpha) + 1
 
-    # Then draw the stuff that needs to be done on the cpu
-    # Note, make sure this is a uint8 tensor or opencv will not anti alias text for whatever reason
-    img_numpy = (img_gpu * 255).byte().cpu().numpy()
+                # I did the math for this on pen and paper. This whole block should be equivalent to:
+                #    for j in range(num_dets_to_consider):
+                #        img_gpu = img_gpu * inv_alph_masks[j] + masks_color[j]
+                masks_color_summand = masks_color[0]
+                if num_dets_to_consider > 1:
+                    inv_alph_cumul = inv_alph_masks[:(num_dets_to_consider - 1)].cumprod(dim=0)
+                    masks_color_cumul = masks_color[1:] * inv_alph_cumul
+                    masks_color_summand += masks_color_cumul.sum(dim=0)
+                img_gpu = img_gpu * inv_alph_masks.prod(dim=0) + masks_color_summand
 
-    if args.display_text or args.display_bboxes:
-        for j in reversed(range(num_dets_to_consider)):
-            color = get_color(j, color_type)
-            # get the bbox_idx to know box's layers (after FPN): p3-p7
-            # if 'priors' in dets_out.keys():
-            #     px1, py1, px2, py2 = dets_out['priors'][j, :]
-            #     draw_dotted_rectangle(img_numpy, px1, py1, px2, py2, color, 3, gap=10)
+            # Then draw the stuff that needs to be done on the cpu
+            # Note, make sure this is a uint8 tensor or opencv will not anti alias text for whatever reason
+            img_numpy = (img_gpu * 255).byte().cpu().numpy()
 
-            if args.display_bboxes_cir and boxes_cir is not None:
-                x1, y1, x2, y2 = boxes_cir[j, :]
-            else:
-                x1, y1, x2, y2 = boxes[j, :]
-            score = scores[j]
-            num_tracked_mask_j = num_tracked_mask[j] if num_tracked_mask is not None else None
+            if args.display_text or args.display_bboxes:
+                for j in reversed(range(num_dets_to_consider)):
+                    color = get_color(j, color_type)
+                    # get the bbox_idx to know box's layers (after FPN): p3-p7
+                    # if 'priors' in dets_out.keys():
+                    #     px1, py1, px2, py2 = dets_out['priors'][j, :]
+                    #     draw_dotted_rectangle(img_numpy, px1, py1, px2, py2, color, 3, gap=10)
 
-            if args.display_bboxes:
-                cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 3)
-                if num_tracked_mask_j == 0 or num_tracked_mask_j is None:
-                    cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 3)
-                else:
-                    draw_dotted_rectangle(img_numpy, x1, y1, x2, y2, color, 3, gap=10)
-
-            if args.display_text:
-                classes = dets_out['class'][:args.top_k].view(-1).detach().cpu().numpy()
-                if classes[j] - 1 < 0:
-                    _class = 'None'
-                else:
-                    _class = class_names[classes[j] - 1]
-
-                if score is not None:
-                    if 'score_global' in dets_out.keys():
-                        rescore = dets_out['score_global'][:args.top_k].view(-1).detach().cpu().numpy()[j]
-                        text_str = '%s: %.2f: %.2f: %s' % (_class, score, rescore, str(color_type[j].cpu().numpy())) \
-                            if args.display_scores else _class
-                    # if 'centerness' in dets_out.keys():
-                    #     rescore = dets_out['centerness'][:args.top_k].view(-1).detach().cpu().numpy()[j]
-                    #     text_str = '%s: %.2f: %.2f: %s' % (_class, score, rescore, str(color_type[j].cpu().numpy())) \
-                    #         if args.display_scores else _class
+                    if args.display_bboxes_cir and boxes_cir is not None:
+                        x1, y1, x2, y2 = boxes_cir[j, :]
                     else:
-                        text_str = '%s: %.2f: %s' % (
-                            _class, score, str(color_type[j].cpu().numpy())) if args.display_scores else _class
-                else:
-                    text_str = '%s' % _class
+                        x1, y1, x2, y2 = boxes[j, :]
+                    score = scores[j]
+                    num_tracked_mask_j = num_tracked_mask[j] if num_tracked_mask is not None else None
 
-                font_face = cv2.FONT_HERSHEY_DUPLEX
-                font_scale = 0.8 * max((max(img_numpy.shape) // 640), 1)
-                font_thickness = max((max(img_numpy.shape) // 640), 1)
+                    if args.display_bboxes:
+                        cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 3)
+                        if num_tracked_mask_j == 0 or num_tracked_mask_j is None:
+                            cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 3)
+                        else:
+                            draw_dotted_rectangle(img_numpy, x1, y1, x2, y2, color, 3, gap=10)
 
-                text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
+                    if args.display_text:
+                        classes = dets_out['class'][:args.top_k].view(-1).detach().cpu().numpy()
+                        if classes[j] - 1 < 0:
+                            _class = 'None'
+                        else:
+                            _class = class_names[classes[j] - 1]
 
-                text_pt = (max(x1, 0), max(y1 - 3, 25))
-                text_color = [255, 255, 255]
-                x1, y1 = max(x1, 0), max(y1, 30)
-                cv2.rectangle(img_numpy, (x1, y1), (x1 + text_w+2, y1 - text_h - 4), color, -1)
-                cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness,
-                            cv2.LINE_AA)
+                        if score is not None:
+                            if 'score_global' in dets_out.keys():
+                                rescore = dets_out['score_global'][:args.top_k].view(-1).detach().cpu().numpy()[j]
+                                text_str = '%s: %.2f: %.2f: %s' % (_class, score, rescore, str(color_type[j].cpu().numpy())) \
+                                    if args.display_scores else _class
+                            else:
+                                text_str = '%s: %.2f: %s' % (
+                                    _class, score, str(color_type[j].cpu().numpy())) if args.display_scores else _class
+                        else:
+                            text_str = '%s' % _class
 
-    return img_numpy
+                        font_face = cv2.FONT_HERSHEY_DUPLEX
+                        font_scale = 0.8 * max((max(img_numpy.shape) // 640), 1)
+                        font_thickness = max((max(img_numpy.shape) // 640), 1)
+
+                        text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
+
+                        text_pt = (max(x1, 0), max(y1 - 3, 25))
+                        text_color = [255, 255, 255]
+                        x1, y1 = max(x1, 0), max(y1, 30)
+                        cv2.rectangle(img_numpy, (x1, y1), (x1 + text_w+2, y1 - text_h - 4), color, -1)
+                        cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness,
+                                    cv2.LINE_AA)
+
+        plt.imshow(img_numpy)
+        plt.axis('off')
+        plt.savefig(''.join([root_dir, '/', str(img_meta[t]['frame_id']), '.jpg']), bbox_inches='tight', pad_inches=0)
+        plt.clf()
 
 
-def prep_display_single(dets_out, img, img_meta=None, undo_transform=True, mask_alpha=0.45,
-                        fps_str='', display_mode=None):
-    """
-    Note: If undo_transform=False then im_h and im_w are allowed to be None.
-    -- display_model: 'train', 'test', 'None' means groundtruth results
-    """
-    ori_h, ori_w, _ = img_meta['ori_shape']
-    img_h, img_w, _ = img_meta['img_shape']
+def temp(targets, h, w, img_metas):
+    gt_masks, gt_boxes, gt_labels, _ = targets
 
-    if undo_transform:
-        img_numpy = undo_image_transformation(img, ori_h, ori_w, img_h, img_w)
-        img_gpu = torch.Tensor(img_numpy).cuda()
-    else:
-        img_gpu = img / 255.0
-
-    with timer.env('Postprocess'):
-        dets_out = postprocess_ytbvis(dets_out, img_meta,
-                                      visualize_lincomb=args.display_lincomb,
-                                      output_file=args.mask_det_file[:-12])
-        torch.cuda.synchronize()
-        scores = dets_out['score'][:args.top_k].detach().cpu().numpy()
-        boxes = dets_out['box'][:args.top_k].detach().cpu().numpy()
-        masks = dets_out['mask'][:args.top_k]
-
-    classes = dets_out['class'][:args.top_k].detach().cpu().numpy()
-
-    num_dets_to_consider = min(args.top_k, classes.shape[0])
-    color_type = dets_out['box_ids']
-    for j in range(num_dets_to_consider):
-        if scores[j] < args.score_threshold:
-            num_dets_to_consider = j
-            break
-
-    if num_dets_to_consider == 0:
-        # No detections found so just output the original image
-        return (img_gpu * 255).byte().cpu().numpy()
-
-    # First, draw the masks on the GPU where we can do it really fast
-    # Beware: very fast but possibly unintelligible mask-drawing code ahead
-    # I wish I had access to OpenGL or Vulkan but alas, I guess Pytorch tensor operations will have to suffice
-    if args.display_masks:
-        # After this, mask is of size [num_dets, h, w, 1]
-        masks = masks[:num_dets_to_consider, :, :, None]
-
-        # Prepare the RGB images for each mask given their color (size [num_dets, h, w, 1])
-        colors = torch.cat(
-            [get_color(j, color_type, on_gpu=img_gpu.device.index, undo_transform=undo_transform).view(1, 1, 1, 3)
-             for j in range(num_dets_to_consider)], dim=0)
-        masks_color = masks.repeat(1, 1, 1, 3) * colors * mask_alpha
-
-        # This is 1 everywhere except for 1-mask_alpha where the mask is
-        inv_alph_masks = masks * (-mask_alpha) + 1
-
-        # I did the math for this on pen and paper. This whole block should be equivalent to:
-        #    for j in range(num_dets_to_consider):
-        #        img_gpu = img_gpu * inv_alph_masks[j] + masks_color[j]
-        masks_color_summand = masks_color[0]
-        if num_dets_to_consider > 1:
-            inv_alph_cumul = inv_alph_masks[:(num_dets_to_consider - 1)].cumprod(dim=0)
-            masks_color_cumul = masks_color[1:] * inv_alph_cumul
-            masks_color_summand += masks_color_cumul.sum(dim=0)
-        img_gpu = img_gpu * inv_alph_masks.prod(dim=0) + masks_color_summand
-
-    if args.display_fps:
-        # Draw the box for the fps on the GPU
-        font_face = cv2.FONT_HERSHEY_DUPLEX
-        font_scale = 0.6
-        font_thickness = 1
-
-        text_w, text_h = cv2.getTextSize(fps_str, font_face, font_scale, font_thickness)[0]
-
-        img_gpu[0:text_h + 8, 0:text_w + 8] *= 0.6  # 1 - Box alpha
-
-    # Then draw the stuff that needs to be done on the cpu
-    # Note, make sure this is a uint8 tensor or opencv will not anti alias text for whatever reason
-    img_numpy = (img_gpu * 255).byte().cpu().numpy()
-
-    if args.display_fps:
-        # Draw the text on the CPU
-        text_pt = (4, text_h + 2)
-        text_color = [255, 255, 255]
-
-        cv2.putText(img_numpy, fps_str, text_pt, font_face, font_scale, text_color, font_thickness, cv2.LINE_AA)
-
-    if args.display_text or args.display_bboxes:
-        for j in reversed(range(num_dets_to_consider)):
-            x1, y1, x2, y2 = boxes[j, :]
-            color = get_color(j, color_type)
-            # plot priors
-            priors = dets_out['priors'].detach().cpu().numpy()
-            if j < dets_out['priors'].size(0):
-                cpx, cpy, pw, ph = priors[j, :] * [img_w, img_h, img_w, img_h]
-                px1, py1 = cpx - pw / 2.0, cpy - ph / 2.0
-                px2, py2 = cpx + pw / 2.0, cpy + ph / 2.0
-                px1, py1, px2, py2 = int(px1), int(py1), int(px2), int(py2)
-                pcolor = [255, 0, 255]
-
-            # plot the range of features for classification and regression
-            pred_scales = [24, 48, 96, 192, 384]
-            x = torch.clamp(torch.tensor([x1, x2]), min=2, max=638).tolist(),
-            y = torch.clamp(torch.tensor([y1, y2]), min=2, max=358).tolist(),
-            x, y = x[0], y[0]
-
-            if display_mode is not None:
-                score = scores[j]
-
-            font_thickness = 0.5*max(min(ori_h, ori_w)//360, 1)
-
-            if args.display_bboxes:
-                cv2.rectangle(img_numpy, (x[0], y[0]), (x[1], y[1]), color, 1)
-                if j < dets_out['priors'].size(0):
-                    cv2.rectangle(img_numpy, (px1, py1), (px2, py2), pcolor, font_thickness, lineType=8)
-                # cv2.rectangle(img_numpy, (x[4], y[4]), (x[5], y[5]), fcolor, 2)
-
-            if args.display_text:
-                if classes[j] - 1 < 0:
-                    _class = 'None'
-                else:
-                    _class = class_names[classes[j] - 1]
-
-                if display_mode == 'test':
-                    # if cfg.use_maskiou and not cfg.rescore_bbox:
-                    train_centerness = False
-                    if train_centerness:
-                        rescore = dets_out['DIoU_score'][j] * score
-                        text_str = '%s: %.2f: %.2f: %s' % (_class, score, rescore, str(color_type[j].cpu().numpy())) \
-                            if args.display_scores else _class
-                    else:
-
-                        text_str = '%s: %.2f: %s' % (
-                            _class, score, str(color_type[j].cpu().numpy())) if args.display_scores else _class
-                else:
-                    text_str = '%s' % _class
-
-                font_face = cv2.FONT_HERSHEY_DUPLEX
-                font_scale = 0.5
-
-                text_w, text_h = cv2.getTextSize(text_str, font_face, font_scale, font_thickness)[0]
-                text_pt = (x1, y1 - 3)
-                text_color = [255, 255, 255]
-                cv2.rectangle(img_numpy, (x1, y1), (x1 + text_w, y1 - text_h - 4), color, -1)
-                cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness,
-                            cv2.LINE_AA)
-
-    return img_numpy
+    gt_masks, gt_bboxes, img_metas = GtList_from_tensor(h, w, gt_masks, gt_boxes, img_metas)
 
 
 def evaluate(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, eval_clip_frames=1, output_dir=None):
@@ -383,6 +244,7 @@ def evaluate(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, eva
         else:
             len_vid = len(dataset.vid_infos[vdx])
             train_masks, use_vid_metric = False, True
+
         if eval_clip_frames == 1:
             len_clips = (len_vid + args.batch_size-1) // args.batch_size
         else:
@@ -402,14 +264,14 @@ def evaluate(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, eva
                 if cdx == len_clips-1:
                     assert clip_frame_ids[-1] == len_vid-1, \
                         'The last clip should include the last frame! Please double check!'
-                images, images_meta, targets = dataset.pull_clip_from_video(vid, clip_frame_ids)
+                images, imgs_meta, targets = dataset.pull_clip_from_video(vid, clip_frame_ids)
                 images = [torch.from_numpy(img).permute(2, 0, 1) for img in images]
                 images = ImageList_from_tensors(images, size_divisibility=32, pad_h=pad_h, pad_w=pad_w).cuda()
                 pad_shape = {'pad_shape': (images.size(-2), images.size(-1), 3)}
-                for k in range(len(images_meta)):
-                    images_meta[k].update(pad_shape)
+                for k in range(len(imgs_meta)):
+                    imgs_meta[k].update(pad_shape)
 
-            preds = net(images, img_meta=images_meta)
+            preds = net(images, img_meta=imgs_meta)
             frame_times.add(timer.total_time())
             progress_bar_clip.set_val(cdx+1)
             avg_fps = 1. / (frame_times.get_avg() / args.batch_size) if vdx > 0 or cdx > 0 else 0
@@ -420,7 +282,7 @@ def evaluate(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, eva
             if eval_clip_frames > 1 and cdx > 0:
                 clip_frame_ids = clip_frame_ids[n_overlapped_frames:]
                 images = images[n_overlapped_frames:]
-                images_meta = images_meta[n_overlapped_frames:]
+                imgs_meta = imgs_meta[n_overlapped_frames:]
                 preds = preds[n_overlapped_frames:]
 
             for batch_id, pred in enumerate(preds):
@@ -429,32 +291,11 @@ def evaluate(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, eva
                     root_dir = os.path.join(output_dir, 'out', str(vid))
                     if not os.path.exists(root_dir):
                         os.makedirs(root_dir)
-                    if not args.display_single_mask:
-                        img_numpy = prep_display(pred, images[batch_id],
-                                                 img_meta=images_meta[batch_id])
-                        plt.imshow(img_numpy)
-                        plt.axis('off')
-                        plt.title(str(img_id))
-                        plt.savefig(''.join([root_dir, '/', str(img_id[1]), '.jpg']))
-                        plt.clf()
-
-                    else:
-                        for p in range(pred['box'].size(0)):
-                            pred_single = {'proto': pred['proto']}
-                            for k, v in pred.items():
-                                if k not in {'proto'}:
-                                    pred_single[k] = v[p].unsqueeze(0)
-
-                            img_numpy = prep_display(pred_single, images[batch_id],
-                                                     img_meta=images_meta[batch_id])
-                            plt.imshow(img_numpy)
-                            plt.axis('off')
-                            plt.savefig(''.join([root_dir, '/', str(img_id[1]), '_', str(p), '.jpg']))
-                            plt.clf()
+                    img_numpy = prep_display(pred, images[batch_id], img_meta=imgs_meta[batch_id])
 
                 else:
                     if pred is not None:
-                        pred = postprocess_ytbvis(pred, images_meta[batch_id], train_masks=train_masks,
+                        pred = postprocess_ytbvis(pred, imgs_meta[batch_id], train_masks=train_masks,
                                                   output_file=output_dir)
 
                     if data_type == 'vid' and use_vid_metric:
@@ -477,8 +318,7 @@ def evaluate(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, eva
     return json_results
 
 
-def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, clip_frames=1, n_clips=1,
-                  TRAIN_INTERCLIPS_CLASS=False, output_dir=None):
+def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, clip_frames=1, use_cico=False):
     '''
     :param net:
     :param dataset:
@@ -487,7 +327,8 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
     :param output_dir:
     :return:
     '''
-    n_newly_frames = clip_frames - args.overlap_frames
+    n_newly_frames = (clip_frames - args.overlap_frames) * args.batch_size
+    n_frames = clip_frames * args.batch_size
     dataset_size = len(dataset.vid_ids)
 
     print()
@@ -499,10 +340,10 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
         print()
         print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
 
-        # Inverse direction
-        if args.display:
-            vdx = -vdx - 1
-            vid = dataset.vid_ids[vdx]
+        # Inverse direction to process videos
+        # if args.display:
+        #     vdx = -vdx - 1
+        #     vid = dataset.vid_ids[vdx]
 
         vid_objs = {}
         if data_type == 'vis':
@@ -512,10 +353,6 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
             len_vid = len(dataset.vid_infos[vdx])
             train_masks, use_vid_metric = False, True
 
-        if TRAIN_INTERCLIPS_CLASS:
-            conf_feats_video = dict()
-            pred_frames_video, images_video, images_meta_video = [], [], []
-
         len_clips = (len_vid + n_newly_frames-1) // n_newly_frames
         progress_bar_clip = ProgressBar(len_clips, len_clips)
         for cdx in range(len_clips):
@@ -524,160 +361,69 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
 
             with timer.env('Load Data'):
                 left = cdx * n_newly_frames
-                if left+clip_frames > len_vid:
-                    clip_frame_ids = list(range(len_vid-clip_frames, len_vid))
-                else:
-                    clip_frame_ids = list(range(left, left+clip_frames))
+                clip_frame_ids = range(left, min(left+n_frames, len_vid))
                 # Just mask sure all frames have been processed
                 if cdx == len_clips-1:
                     assert clip_frame_ids[-1] == len_vid-1, \
-                        'The last clip should include the last frame! Please double check!'
-                images, images_meta, targets = dataset.pull_clip_from_video(vid, clip_frame_ids)
+                        'The last clip should include the last frame!! Please double check!'
+
+                images, imgs_meta, targets = dataset.pull_clip_from_video(vid, clip_frame_ids)
                 images = [torch.from_numpy(img).permute(2, 0, 1).contiguous() for img in images]
                 images = ImageList_from_tensors(images, size_divisibility=32, pad_h=pad_h, pad_w=pad_w).cuda()
                 pad_shape = {'pad_shape': (images.size(-2), images.size(-1), 3)}
-                for k in range(len(images_meta)):
-                    images_meta[k].update(pad_shape)
-                if images.size(0) < clip_frames:
-                    images = images.repeat(clip_frames, 1, 1, 1)[:clip_frames]
-                    images_meta = (images_meta*clip_frames)[:clip_frames]
-                    clip_frame_ids = (clip_frame_ids * clip_frames)[:clip_frames]
+                for k in range(len(imgs_meta)):
+                    imgs_meta[k].update(pad_shape)
+                if use_cico and images.size(0) < n_frames:
+                    images = images.repeat(n_frames, 1, 1, 1)[:n_frames]
+                    imgs_meta = (imgs_meta*n_frames)[:n_frames]
+                imgs_meta = [imgs_meta] if use_cico else imgs_meta
 
             # Interesting tests inputs with different orders
             # order_idx = list(range(clip_frames))[::-1]
             # images = torch.flip(images, [0])
-            order_idx = range(clip_frames)
             t = time.time()
-            preds_clip = net(images, img_meta=[images_meta])
-            avg_fps_wodata = 1. / ((time.time()-t)/clip_frames)
-            pred_clip = preds_clip[0]
+            preds = net(images, img_meta=imgs_meta)
+            avg_fps_wodata = 1. / ((time.time()-t) / n_frames)
             frame_times.add(timer.total_time())
             progress_bar_clip.set_val(cdx+1)
             avg_fps = 0  # 1. / (frame_times.get_avg() / clip_frames) if vdx > 0 or cdx > 0 else 0
             print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)  %5.2f fps  %5.2f fps '
                   % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip, avg_fps, avg_fps_wodata), end='')
 
-            # Here store all classification features for later inter-clips classification
-            if TRAIN_INTERCLIPS_CLASS and pred_clip['box_ids'].nelement() > 0:
-                box_ids = pred_clip['box_ids']
-                for obj_idx, obj_id in enumerate(box_ids):
-                    if int(obj_id) not in conf_feats_video:
-                        conf_feats_video[int(obj_id)] = [pred_clip['conf_feat'][obj_idx]]
-                    else:
-                        conf_feats_video[int(obj_id)] += [pred_clip['conf_feat'][obj_idx]]
-
-            temporal_dependent_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg', 'mask']
-            pred_frame = dict()
-            for k, v in pred_clip.items():
-                if k not in temporal_dependent_keys:
-                    pred_frame[k] = v
-            if 'priors' in pred_clip.keys():
-                pred_frame['priors'] = pred_clip['priors'][:, :4]
-
-            if cdx+1 == len_clips:
-                newly_clip_frame_ids = clip_frame_ids[left-len_vid:]
-                newly_idx = range(clip_frames)[left-len_vid:]
-            else:
-                newly_clip_frame_ids = clip_frame_ids[:n_newly_frames]
-                newly_idx = range(clip_frames)[:n_newly_frames]
-
-            for idx, frame_id in zip(newly_idx, newly_clip_frame_ids):
-                batch_id = order_idx[idx]
-                if pred_clip['box'].size(0) == 0:
-                    if train_masks:
-                        pred_frame['mask'] = torch.Tensor()
-                    pred_frame['box'] = torch.Tensor()
-                else:
-                    if pred_clip['box'].size(-1) != 4:
-                        pred_frame['box'] = pred_clip['box'][:, batch_id*4:(batch_id+1)*4]
-
+            with timer.env('Postprocess'):
+                for tdx, pred_clip in enumerate(preds):
+                    clip_frame_ids = clip_frame_ids[:min(n_newly_frames, len_vid - left)]
+                    images = images[:min(n_newly_frames, len_vid - left)]
+                    imgs_meta = imgs_meta[:min(n_newly_frames, len_vid - left)]
                     for k, v in pred_clip.items():
-                        if k in temporal_dependent_keys:
-                            pred_frame[k] = v[:, batch_id] if k == 'mask' else v[..., batch_id, :]
+                        if k in {'box', 'mask', 'img_ids'}:
+                            pred_clip[k] = v[:min(n_newly_frames, len_vid - left)]
+                    pred_clip_pp = postprocess_ytbvis(pred_clip, imgs_meta, train_masks=train_masks,
+                                                      visualize_lincomb=args.display_lincomb,
+                                                      output_file=args.save_folder)
 
-                if args.display:
-                    if not TRAIN_INTERCLIPS_CLASS:
-                        root_dir = os.path.join(output_dir, 'out', str(vid))
-                        if not os.path.exists(root_dir):
-                            os.makedirs(root_dir)
-                        img_numpy = prep_display(pred_frame, images[batch_id],
-                                                 img_meta=images_meta[idx])
-                        plt.imshow(img_numpy)
-                        plt.axis('off')
-                        plt.savefig(''.join([root_dir, '/', str(frame_id), '.jpg']), bbox_inches='tight', pad_inches=0)
-                        plt.clf()
+                    if args.display:
+                        prep_display(pred_clip_pp, images, img_meta=imgs_meta)
+
                     else:
-                        pred_frame_single = dict()
-                        for k, v in pred_frame.items():
-                            pred_frame_single[k] = v.clone()
-                        pred_frames_video += [pred_frame_single]
-                        images_video += [images[batch_id]]
-                        images_meta_video += [images_meta[idx]]
-
-                else:
-                    preds_cur = postprocess_ytbvis(pred_frame, images_meta[idx], train_masks=train_masks,
-                                                   output_file=output_dir)
-                    if data_type == 'vid' and use_vid_metric:
-                        for k, v in preds_cur.items():
-                            preds_cur[k] = v.tolist()
-                        preds_cur['video_id'] = vid
-                        preds_cur['frame_id'] = frame_id
-                        json_results.append(preds_cur)
-                    else:
-                        bbox2result_video(vid_objs, preds_cur, frame_id, types=args.eval_types)
-
-        # Predict interclips classification or global classification for each objects
-        if TRAIN_INTERCLIPS_CLASS:
-            category_ids_vid = dict()
-            for obj_id, conf_feats_obj in conf_feats_video.items():
-                conf_feats_obj = torch.stack(conf_feats_obj, dim=0)
-                iters = (len(conf_feats_obj)-1)//n_clips+1
-
-                conf_all, category_id_obj_all = [], []
-                for _ in range(1):
-                    selected_idx = torch.randint(len(conf_feats_obj), (iters, n_clips))
-                    conf_data = net.InterclipsClass(conf_feats_obj[selected_idx.reshape(-1)].reshape(iters, -1))
-                    # conf_all, category_id_obj_all = torch.softmax(conf_data, dim=-1).max(-1)
-                    conf, category_id_obj = torch.softmax(conf_data, dim=-1).mean(0).max(0)
-                    if int(category_id_obj+1) not in category_id_obj_all:
-                        conf_all.append(conf)
-                        category_id_obj_all.append(int(category_id_obj+1))
-                    else:
-                        match_idx = category_id_obj_all.index(int(category_id_obj+1))
-                        conf_all[match_idx] = max(conf_all[match_idx], conf)
-
-                category_ids_vid[obj_id] = {'category_id': category_id_obj_all, 'score': conf_all}
-
-            if args.display:
-                root_dir = os.path.join(output_dir, 'out', str(vid))
-                if not os.path.exists(root_dir):
-                    os.makedirs(root_dir)
-                for pred_frame, image, image_meta in zip(pred_frames_video, images_video, images_meta_video):
-                    frame_id = image_meta['frame_id']
-                    pred_frame['class'] = torch.tensor([category_ids_vid[int(id)]['category_id'][0] for id in pred_frame['box_ids']])
-                    pred_frame['score_global'] = torch.tensor([category_ids_vid[int(id)]['score'][0] for id in pred_frame['box_ids']])
-                    img_numpy = prep_display(pred_frame, image, img_meta=image_meta)
-                    plt.imshow(img_numpy)
-                    plt.axis('off')
-                    plt.title(str((vid, frame_id)))
-                    plt.savefig(''.join([root_dir, '/', str(frame_id), '.jpg']))
-                    plt.clf()
+                        if data_type == 'vid' and use_vid_metric:
+                            for k, v in pred_clip_pp.items():
+                                pred_clip_pp[k] = v.tolist()
+                            pred_clip_pp['video_id'] = vid
+                            json_results.append(pred_clip_pp)
+                        else:
+                            bbox2result_video(vid_objs, pred_clip_pp, clip_frame_ids[tdx*clip_frames:(tdx+1)*clip_frames],
+                                              types=args.eval_types)
 
         if not args.display and data_type == 'vis':
             for obj_id, vid_obj in vid_objs.items():
                 vid_obj['video_id'] = vid
                 stuff_score = np.array(vid_obj['score']).mean().item()
-                if TRAIN_INTERCLIPS_CLASS:
-                    for cat_id, score in zip(category_ids_vid[obj_id]['category_id'], category_ids_vid[obj_id]['score']):
-                        vid_obj['category_id'] = cat_id
-                        vid_obj['score'] = stuff_score * score.cpu().numpy().item()
-                        assert len(vid_obj['segmentations']) == len_vid
-                        json_results.append(vid_obj)
-                else:
-                    vid_obj['category_id'] = np.bincount(vid_obj['category_id']).argmax().item()
-                    vid_obj['score'] = stuff_score
-                    assert len(vid_obj['segmentations']) == len_vid
-                    json_results.append(vid_obj)
+                vid_obj['category_id'] = np.bincount(vid_obj['category_id']).argmax().item()
+                vid_obj['score'] = stuff_score
+                assert len(vid_obj['segmentations']) == len_vid, \
+                    'Different lengths between output masks and input images, please double check!!'
+                json_results.append(vid_obj)
 
     timer.print_stats()
     print('Total numbers of instances:', len(json_results))
@@ -743,23 +489,21 @@ def evalvideo(net: CoreNet, input_folder: str, output_folder: str):
     return
 
 
-def evaldatasets(net: CoreNet, val_dataset, data_type, output_dir, eval_clip_frames=1, n_clips=1,
-                 cubic_mode=False, cfg_input=None, TRAIN_INTERCLIPS_CLASS=False):
-    args.save_folder = output_dir
+def evaldatasets(net: CoreNet, val_dataset, data_type, eval_clip_frames=1, n_clips=1,
+                 use_cico=False, cfg_input=None):
     if cfg_input is not None:
         pad_h, pad_w = cfg_input.MIN_SIZE_TEST, cfg_input.MAX_SIZE_TEST
     else:
         pad_h, pad_w = None, None
-    json_path = os.path.join(output_dir, 'results_' + str(args.epoch) + '.json')
+    json_path = os.path.join(args.save_folder, 'results_' + str(args.epoch) + '.json')
     if args.eval:
         print('Begin Inference!')
-        if cubic_mode:
+        if use_cico:
             results = evaluate_clip(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,
-                                    clip_frames=eval_clip_frames, n_clips=n_clips,
-                                    TRAIN_INTERCLIPS_CLASS=TRAIN_INTERCLIPS_CLASS, output_dir=output_dir)
+                                    clip_frames=eval_clip_frames)
         else:
-            results = evaluate(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,
-                               eval_clip_frames=eval_clip_frames, output_dir=output_dir)
+            results = evaluate_clip(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,
+                                    clip_frames=eval_clip_frames, use_cico=use_cico)
 
         if not args.display:
             print()
@@ -795,6 +539,7 @@ if __name__ == '__main__':
         print('Config not specified. Parsed %s from the file name.\n' % args.config)
         cfg = load_config(args.config)
     cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, cfg.NAME)
+    args.save_folder = cfg.OUTPUT_DIR
     global class_names
     class_names = get_dataset_config(cfg.DATASETS.TRAIN, cfg.DATASETS.TYPE)['class_names']
 
@@ -857,9 +602,8 @@ if __name__ == '__main__':
                 evalvideo(net, args.video)
 
         else:
-            evaldatasets(net, val_dataset, cfg.DATASETS.TYPE, cfg.OUTPUT_DIR, cfg.TEST.NUM_CLIP_FRAMES,
-                         cfg.SOLVER.NUM_CLIPS, cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE, cfg.INPUT,
-                         TRAIN_INTERCLIPS_CLASS=cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS)
+            evaldatasets(net, val_dataset, cfg.DATASETS.TYPE, cfg.TEST.NUM_CLIP_FRAMES,
+                         cfg.SOLVER.NUM_CLIPS, cfg.CiCo.ENGINE, cfg.INPUT)
 
 
 

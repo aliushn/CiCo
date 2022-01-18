@@ -7,7 +7,7 @@ from ..visualization_temporal import display_cubic_weights, display_pixle_simila
 from layers.utils import correlate_operator
 
 
-class PredictionModule_3D(nn.Module):
+class ClipPredictionModule(nn.Module):
     """
     The (c) prediction module adapted from DSSD:
     https://arxiv.org/pdf/1701.06659.pdf
@@ -45,7 +45,7 @@ class PredictionModule_3D(nn.Module):
         self.num_priors = len(self.pred_aspect_ratios[0]) * len(self.pred_scales[0])
         self.deform_groups = deform_groups
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-        self.conf_feat_dim = cfg.MODEL.CLASS_HEADS.INTERCLIPS_CLAFEAT_DIM
+        self.use_cico = cfg.CiCo.ENGINE
 
         # generate anchors
         # self.img_h = ((max(cfg.INPUT.MIN_SIZE_TRAIN)-1)//32+1) * 32
@@ -69,41 +69,39 @@ class PredictionModule_3D(nn.Module):
         else:
             self.mask_dim = self.mask_dim
 
-        padding, stride = (0, 1, 1), (1, 1, 1)
-        if self.cfg.CiCo.MATCHER_CENTER:
-            kernel_size = (self.clip_frames, 3, 3)
+        if cfg.CiCo.CPH.CUBIC_MODE:
+            conv = nn.Conv3d
+            if self.cfg.CiCo.MATCHER_CENTER:
+                kernel_size, padding, stride = (self.clip_frames, 3, 3), (0, 1, 1), (1, 1, 1)
+            else:
+                kernel_size, padding = cfg.CiCo.CPH_LAYER_KERNEL_SIZE, cfg.CiCo.CPH_LAYER_PADDING
+                stride = cfg.CiCo.CPH_LAYER_STRIDE
         else:
-            kernel_size, padding = cfg.CiCo.CPH_LAYER_KERNEL_SIZE, cfg.CiCo.CPH_LAYER_PADDING
-            stride = cfg.CiCo.CPH_LAYER_STRIDE
+            conv = nn.Conv2d
+            kernel_size, padding, stride = (3, 3), (1, 1), (1, 1)
 
-        if cfg.MODEL.MASK_HEADS.TRAIN_MASKS and cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
-            self.bbox_layer = nn.Conv3d(self.in_channels, self.num_priors*4,
-                                        kernel_size=kernel_size, padding=padding, stride=stride)
+        if cfg.MODEL.MASK_HEADS.TRAIN_MASKS and cfg.CiCo.CPH.CIRCUMSCRIBED_BOXES:
+            self.bbox_layer = conv(self.in_channels, self.num_priors*4,
+                                   kernel_size=kernel_size, padding=padding, stride=stride)
         else:
-            self.bbox_layer = nn.Conv3d(self.in_channels, self.num_priors*4*self.clip_frames,
-                                        kernel_size=kernel_size, padding=padding, stride=stride)
+            self.bbox_layer = conv(self.in_channels, self.num_priors*4*self.clip_frames,
+                                   kernel_size=kernel_size, padding=padding, stride=stride)
 
         if cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
-            self.centerness_layer = nn.Conv3d(self.in_channels, self.num_priors,
-                                              kernel_size=kernel_size, padding=padding, stride=stride)
-
-        if cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
-            if cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
-                self.conf_layer = nn.Conv3d(self.in_channels, self.num_priors,
-                                            kernel_size=kernel_size, padding=padding, stride=stride)
-                self.conf_feature_layer = nn.Conv3d(self.in_channels, self.num_priors*self.conf_feat_dim,
-                                                    kernel_size=kernel_size, padding=padding, stride=stride)
-            else:
-                self.conf_layer = nn.Conv3d(self.in_channels, self.num_priors*self.num_classes,
-                                            kernel_size=kernel_size, padding=padding, stride=stride)
-
-        if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-            self.track_layer = nn.Conv3d(self.in_channels, self.num_priors*self.track_dim,
+            self.centerness_layer = conv(self.in_channels, self.num_priors,
                                          kernel_size=kernel_size, padding=padding, stride=stride)
 
+        if cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
+            self.conf_layer = conv(self.in_channels, self.num_priors*self.num_classes,
+                                   kernel_size=kernel_size, padding=padding, stride=stride)
+
+        if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
+            self.track_layer = conv(self.in_channels, self.num_priors*self.track_dim,
+                                    kernel_size=kernel_size, padding=padding, stride=stride)
+
         if cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-            self.mask_layer = nn.Conv3d(self.in_channels, self.num_priors*self.mask_dim,
-                                        kernel_size=kernel_size, padding=padding, stride=stride)
+            self.mask_layer = conv(self.in_channels, self.num_priors*self.mask_dim,
+                                   kernel_size=kernel_size, padding=padding, stride=stride)
 
         # What is this ugly lambda doing in the middle of all this clean prediction module code?
         def make_extra(num_layers, in_channels):
@@ -111,12 +109,8 @@ class PredictionModule_3D(nn.Module):
                 return lambda x: x
             else:
                 # Looks more complicated than it is. This just creates an array of num_layers alternating conv-relu
-                if cfg.CiCo.CPH_TOWER133:
-                    kernel_size, padding = (1, 3, 3), (0, 1, 1)
-                else:
-                    kernel_size, padding = 3, 1
                 return nn.Sequential(*sum([[
-                    nn.Conv3d(in_channels, in_channels, kernel_size=kernel_size, padding=padding),
+                    conv(in_channels, in_channels, kernel_size=3, padding=1),
                     nn.ReLU(inplace=True)
                 ] for _ in range(num_layers)], []))
 
@@ -147,55 +141,70 @@ class PredictionModule_3D(nn.Module):
             preds['centerness'] = []
         if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
             preds['conf'] = []
-            if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
-                preds['conf_feat'] = []
 
         for idx in range(len(fpn_outs)):
-            if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
+            if self.use_cico:
                 _, c, h, w = fpn_outs[idx].size()
                 fpn_outs_clip = fpn_outs[idx].reshape(-1, self.clip_frames, c, h, w)
                 x = fpn_outs_clip.permute(0, 2, 1, 3, 4).contiguous()
             else:
                 x = fpn_outs[idx]
 
-            bs, _, T, conv_h, conv_w = x.size()
+            conv_h, conv_w = x.size()[-2:]
             priors, prior_levels = self.make_priors(idx, conv_h, conv_w, x.device)
             preds['priors'] += [priors]
             preds['prior_levels'] += [prior_levels]
 
+            bs = x.size(0)
             # bounding boxes regression
             n_proposals = conv_h*conv_w*self.num_priors
             bbox_x = self.bbox_extra(x)
-            bbox = self.bbox_layer(bbox_x).permute(0, 2, 3, 4, 1).contiguous()
-            T_out = bbox.size(1)
-            preds['loc'] += [bbox.reshape(bs*T_out, n_proposals, -1)]
+            bbox = self.bbox_layer(bbox_x)
+            if self.use_cico:
+                bs *= bbox.size(2)
+                bbox = bbox.permute(0, 2, 3, 4, 1).contiguous()
+            else:
+                bbox = bbox.permute(0, 2, 3, 1).contiguous()
+            preds['loc'] += [bbox.reshape(bs, n_proposals, -1)]
 
             # Centerness for Boxes
             if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
-                centerness = self.centerness_layer(bbox_x).permute(0, 2, 3, 4, 1).contiguous()
-                preds['centerness'] += [torch.sigmoid(centerness.reshape(bs*T_out, n_proposals, -1))]
+                centerness = self.centerness_layer(bbox_x).sigmoid()
+                if self.use_cico:
+                    centerness = centerness.permute(0, 2, 3, 4, 1).contiguous()
+                else:
+                    centerness = centerness.permute(0, 2, 3, 1).contiguous()
+                preds['centerness'] += [centerness.reshape(bs, n_proposals, -1)]
 
             # Classification
             if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
                 conf_x = self.conf_extra(x)
-                conf = self.conf_layer(conf_x).permute(0, 2, 3, 4, 1).contiguous()
-                preds['conf'] += [conf.reshape(bs*T_out, n_proposals, -1)]
-                if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
-                    conf_feature = self.conf_feature_layer(conf_x).permute(0, 2, 3, 4, 1).contiguous()
-                    preds['conf_feat'] += [conf_feature.reshape(bs*T_out, n_proposals, -1)]
-                # display_pixle_similarity(conf, bbox_x, img_meta[0], idx=idx)
+                conf = self.conf_layer(conf_x)
+                if self.use_cico:
+                    conf = conf.permute(0, 2, 3, 4, 1).contiguous()
+                else:
+                    conf = conf.permute(0, 2, 3, 1).contiguous()
+                preds['conf'] += [conf.reshape(bs, n_proposals, -1)]
 
             # Mask coefficients
             if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-                mask = self.mask_layer(bbox_x).permute(0, 2, 3, 4, 1).contiguous()
+                mask = self.mask_layer(bbox_x).tanh()
+                if self.use_cico:
+                    mask = mask.permute(0, 2, 3, 4, 1).contiguous()
+                else:
+                    mask = mask.permute(0, 2, 3, 1).contiguous()
                 # Activation function is Tanh
-                preds['mask_coeff'] += [mask.tanh().reshape(bs*T_out, n_proposals, -1)]
+                preds['mask_coeff'] += [mask.reshape(bs, n_proposals, -1)]
 
             # Tracking
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
                 track_x = self.track_extra(x)
-                track = self.track_layer(track_x).permute(0, 2, 3, 4, 1).contiguous()
-                preds['track'] += [F.normalize(track.reshape(bs*T_out, n_proposals, -1), dim=-1)]
+                track = self.track_layer(track_x)
+                if self.use_cico:
+                    track = track.permute(0, 2, 3, 4, 1).contiguous()
+                else:
+                    track = track.permute(0, 2, 3, 1).contiguous()
+                preds['track'] += [F.normalize(track.reshape(bs, n_proposals, -1), dim=-1)]
 
         for k, v in preds.items():
             preds[k] = torch.cat(v, 1)

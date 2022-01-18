@@ -131,7 +131,7 @@ class LincombMaskLoss(object):
                     #                                              mask_t[[mask_t_intraclass == 1]], reduction='none')
                     # loss_intraclass += pre_loss_intraclass.mean()
 
-        loss = loss / max(bs, 1) * self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA * max(n_frames//2, 1)
+        loss = loss / max(bs, 1) * self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA * n_frames
         losses = {'M_dice': 2*loss} if self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF else {'M_bce': loss}
         # losses['M_intraclass'] = loss_intraclass / max(bs, 1) * self.cfg.MODEL.MASK_HEADS.LOSS_ALPHA
         # losses['M_l1'] = sparse_loss / max(bs, 1)

@@ -187,15 +187,6 @@ _C.MODEL.PREDICTION_HEADS.POSITIVE_IoU_THRESHOLD = 0.5
 _C.MODEL.PREDICTION_HEADS.NEGATIVE_IoU_THRESHOLD = 0.4
 _C.MODEL.PREDICTION_HEADS.CROWD_IoU_THRESHOLD = 0.7
 
-# CUBIC PREDICTION HEADS Options
-_C.MODEL.PREDICTION_HEADS.CUBIC_MODE = False
-_C.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE = False
-_C.MODEL.PREDICTION_HEADS.CUBIC_MODE_ON_PROTONET = False
-_C.MODEL.PREDICTION_HEADS.USE_TEMPORAL_COEFF = False
-_C.MODEL.PREDICTION_HEADS.CORRELATION_PATCH_SIZE = 5
-_C.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES = False
-
-
 # ---------------------------------------------------------------------------- #
 # DETECTION HEADS options
 # ---------------------------------------------------------------------------- #
@@ -221,9 +212,6 @@ _C.MODEL.CLASS_HEADS.FOCAL_LOSS_ALPHA = 0.25
 _C.MODEL.CLASS_HEADS.FOCAL_LOSS_GAMMA = 2
 _C.MODEL.CLASS_HEADS.LOSS_ALPHA = 5
 _C.MODEL.CLASS_HEADS.USE_SPATIO_DCN = False
-
-_C.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS = False
-_C.MODEL.CLASS_HEADS.INTERCLIPS_CLAFEAT_DIM = 64
 
 
 # ---------------------------------------------------------------------------- #
@@ -305,11 +293,18 @@ _C.STMASK.T2S_HEADS.BACKWARD_FLOW = False
 # clip-in clip-out (CVPR2022) Options
 # ---------------------------------------------------------------------------- #
 _C.CiCo = CN()
-_C.CiCo.CPH_TOWER133 = False
-_C.CiCo.CPH_LAYER_KERNEL_SIZE = (3, 3, 3)
-_C.CiCo.CPH_LAYER_PADDING = (0, 1, 1)
-_C.CiCo.CPH_LAYER_STRIDE = (1, 1, 1)
-_C.CiCo.MATCHER_CENTER = True
+_C.CiCo.ENGINE = False
+_C.CiCo.MATCHER_CENTER = False
+_C.CiCo.CPH = CN()
+_C.CiCo.CPH.CUBIC_MODE = False
+_C.CiCo.CPH.LAYER_KERNEL_SIZE = (3, 3, 3)
+_C.CiCo.CPH.LAYER_PADDING = (0, 1, 1)
+_C.CiCo.CPH.LAYER_STRIDE = (1, 1, 1)
+_C.CiCo.CPH.CIRCUMSCRIBED_BOXES = False
+
+_C.CiCo.CPN = CN()
+_C.CiCo.CPN.CUBIC_MODE = False
+
 
 # ---------------------------------------------------------------------------- #
 # ResNe[X]t options (ResNets = {ResNet, ResNeXt}

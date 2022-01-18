@@ -39,7 +39,7 @@ class Track(object):
         results = []
         for batch_idx in range(len(pred_outs_after_NMS)):
             results.append(self.track(pred_outs_after_NMS[batch_idx],
-                                      img_meta[batch_idx*self.clip_frames:(batch_idx+1)*self.clip_frames]))
+                                      img_meta[batch_idx]))
 
         return results
 
@@ -86,11 +86,11 @@ class Track(object):
             n_prev = self.prev_detection['box'].size(0)
             # only support one image at a time
             if self.track_by_Gaussian:
-                kl_divergence = compute_kl_div(self.prev_detection['track_mu'], self.prev_detection['track_var'],
-                                               detection['track_mu'], detection['track_var'])     # value in [[0, +infinite]]
-                sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10  # threshold for kl_divergence = 10
+                kl_div = compute_kl_div(self.prev_detection['track_mu'], self.prev_detection['track_var'],
+                                        detection['track_mu'], detection['track_var'])  # value in [[0, +infinite]]
+                sim_dummy = torch.ones(n_dets, 1, device=det_bbox.device) * 10  # threshold for kl_div = 10
                 # from [0, +infinite] to [0, 1]: sim = 1/ (exp(0.1*kl_div))
-                sim = torch.div(1., torch.exp(0.1 * torch.cat([sim_dummy, kl_divergence], dim=-1)))
+                sim = torch.div(1., torch.exp(0.1 * torch.cat([sim_dummy, kl_div], dim=-1)))
             else:
                 cos_sim = detection['track'] @ self.prev_detection['track'].t()      # [n_dets, n_prev], val in [-1, 1]
                 cos_sim = torch.cat([torch.zeros(n_dets, 1), cos_sim], dim=1)

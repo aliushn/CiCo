@@ -4,19 +4,16 @@ from .BIFPN import BiFPN
 from .FastMaskIoUNet import FastMaskIoUNet
 from .track_to_segment_head import TemporalNet, bbox_feat_extractor
 from .prediction_head_FC import PredictionModule_FC
-from .prediction_head import PredictionModule
-from .prediction_head_3D import PredictionModule_3D
+from .clip_prediction_head import ClipPredictionModule
 from .make_net import make_net
 from .Featurealign import FeatureAlign
 from .Temporal_feature_calibration import TemporalFeatureCalibration
 from .dynamic_mask_head import DynamicMaskHead
-from .protonet import ProtoNet
-from .protonet_3D import ProtoNet3D
-from .InterclipsClass import InterclipsClass
+from .clip_protonet import ClipProtoNet
 
 __all__ = ['MultiBoxLoss', 'FPN', 'BiFPN',
            'FastMaskIoUNet', 'DynamicMaskHead',
            'TemporalNet', 'bbox_feat_extractor',
-           'PredictionModule', 'PredictionModule_FC', 'PredictionModule_3D',
-           'make_net', 'FeatureAlign', 'ProtoNet', 'ProtoNet3D', 'InterclipsClass',
+           'ClipPredictionModule', 'PredictionModule_FC',
+           'make_net', 'FeatureAlign', 'ClipProtoNet',
            'TemporalFeatureCalibration']

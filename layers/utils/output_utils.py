@@ -88,8 +88,7 @@ def postprocess_ytbvis(dets_output, img_meta, train_masks=True, interpolation_mo
 
     Args:
         - dets_output: The lost of dicts that Detect outputs.
-        - w: The real with of the image.
-        - h: The real height of the image.
+        - img_meta: a list of image shape information.
         - batch_idx: If you have multiple images for this batch, the image's index in the batch.
         - interpolation_mode: Can be 'nearest' | 'area' | 'bilinear' (see torch.nn.functional.interpolate)
 
@@ -107,18 +106,20 @@ def postprocess_ytbvis(dets_output, img_meta, train_masks=True, interpolation_mo
     if dets['box'].nelement() == 0:
         return dets
 
+    img_meta = img_meta[0] if isinstance(img_meta, list) else img_meta
     ori_h, ori_w = img_meta['ori_shape'][:2]
     img_h, img_w = img_meta['img_shape'][:2]
     pad_h, pad_w = img_meta['pad_shape'][:2]
     s_w, s_h = img_w / pad_w, img_h / pad_h
 
+    n_objs = dets['box'].size(0)
     # Undo padding for bboxes
-    boxes = dets['box']
+    boxes = dets['box'].reshape(-1, 4)
     boxes[:, 0::2] /= s_w
     boxes[:, 1::2] /= s_h
     boxes[:, 0], boxes[:, 2] = sanitize_coordinates(boxes[:, 0], boxes[:, 2], ori_w, cast=False)
     boxes[:, 1], boxes[:, 3] = sanitize_coordinates(boxes[:, 1], boxes[:, 3], ori_h, cast=False)
-    dets['box'] = boxes.long()
+    dets['box'] = boxes.long().reshape(n_objs, -1, 4)
 
     if 'box_cir' in dets.keys():
         boxes_cir = dets['box_cir']
@@ -155,10 +156,11 @@ def postprocess_ytbvis(dets_output, img_meta, train_masks=True, interpolation_mo
         # Undo padding for masks
         masks = masks[..., :int(s_h*masks.size(-2)), :int(s_w*masks.size(-1))]
         masks = F.interpolate(masks, (ori_h, ori_w), mode=interpolation_mode,
-                              align_corners=False).squeeze(1)
+                              align_corners=False)
+
         # Binarize the masks
         masks.gt_(0.5)
-        dets['mask'] = masks
+        dets['mask'] = masks.squeeze(1) if mask_dim == 3 else masks
 
     return dets
 
@@ -174,12 +176,12 @@ def undo_image_transformation(img, ori_h, ori_w, img_h=None, img_w=None, interpo
         img_w, img_h = pad_w, pad_h
 
     # Undo padding
-    img = img[:, :img_h, :img_w]
-    img = F.interpolate(img.unsqueeze(0), (ori_h, ori_w), mode=interpolation_mode,
-                        align_corners=False).squeeze(0)
-
-    img = img.permute(1, 2, 0).contiguous()
-    img = img[:, :, (2, 1, 0)]  # To BRG
+    img = img[..., :img_h, :img_w]
+    img_dim = img.dim()
+    img = img.unsqueeze(0) if img_dim == 3 else img
+    img = F.interpolate(img, (ori_h, ori_w), mode=interpolation_mode,align_corners=False)
+    img = img.permute(0, 2, 3, 1).contiguous()
+    img = img[..., (2, 1, 0)]  # To BRG
 
     # TODO: If the backbone is not Resnet, please double check the image transformation according to backbone.py
     # if cfg.backbone.transform.normalize:
@@ -187,7 +189,7 @@ def undo_image_transformation(img, ori_h, ori_w, img_h=None, img_w=None, interpo
     # elif cfg.backbone.transform.subtract_means:
     #     img_numpy = (img_numpy / 255.0 + np.array(MEANS) / 255.0).astype(np.float32)
 
-    img = img[:, :, (2, 1, 0)]  # To RGB
+    img = img[..., (2, 1, 0)]  # To RGB
     img_numpy = torch.clamp(img, 0, 1).cpu().numpy()
 
     return img_numpy

@@ -6,7 +6,7 @@ from ..utils import aligned_bilinear
 from ..visualization_temporal import display_cubic_weights
 
 
-class ProtoNet3D(nn.Module):
+class ClipProtoNet(nn.Module):
     def __init__(self, cfg, in_channels):
         super().__init__()
         self.cfg = cfg
@@ -28,7 +28,7 @@ class ProtoNet3D(nn.Module):
         # The include_last_relu=false here is because we might want to change it to another function
         norm_type = 'batch_norm' if cfg.MODEL.MASK_HEADS.USE_BN else None
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-        self.use_3D = True if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_ON_PROTONET else False
+        self.use_3D = True if cfg.CiCo.CPH.CUBIC_MODE else False
         self.proto_net, proto_channels = make_net(in_channels, cfg.MODEL.MASK_HEADS.PROTO_NET, use_3D=self.use_3D,
                                                   norm_type=norm_type, include_last_relu=True)
         # the last two Conv layers for predicting prototypes

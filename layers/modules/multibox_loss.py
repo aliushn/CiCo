@@ -26,12 +26,6 @@ class MultiBoxLoss(nn.Module):
         L(x,c,l,g) = (Lconf(x, c) + αLloc(x,l,g)) / N
         Where, Lconf is the CrossEntropy Loss and Lloc is the SmoothL1 Loss
         weighted by α which is set to 1 by cross val.
-        Args:
-            c: class confidences,
-            l: predicted boxes,
-            g: ground truth boxes
-            N: number of matched default boxes
-        See: https://arxiv.org/pdf/1512.02325.pdf for more details.
     """
 
     def __init__(self, cfg, net, num_classes, pos_threshold, neg_threshold):
@@ -100,10 +94,10 @@ class MultiBoxLoss(nn.Module):
                     if missed_objects.sum() > 0:
                         for kdx, missed in enumerate(missed_objects):
                             if missed and (~missed_flag[kdx]).sum() > 0:
-                                missed_cdx = torch.arange(self.clip_frames)[missed_flag[kdx, :] == 1]
+                                miss_cdx = torch.arange(self.clip_frames)[missed_flag[kdx, :] == 1]
                                 occur_cdx = torch.arange(self.clip_frames)[missed_flag[kdx, :] == 0]
-                                supp_cdx = torch.abs(missed_cdx.reshape(-1, 1) - occur_cdx.reshape(1, -1)).min(dim=-1)[1]
-                                gt_boxes[idx][kdx, missed_cdx] = gt_boxes[idx][kdx, occur_cdx[supp_cdx]]
+                                supp_cdx = torch.abs(miss_cdx.reshape(-1, 1) - occur_cdx.reshape(1, -1)).min(dim=-1)[1]
+                                gt_boxes[idx][kdx, miss_cdx] = gt_boxes[idx][kdx, occur_cdx[supp_cdx]]
 
         losses, ids_t = self.multibox_loss(predictions, gt_boxes, gt_labels, gt_masks, gt_ids, num_crowds)
         for k, v in losses.items():
@@ -132,7 +126,7 @@ class MultiBoxLoss(nn.Module):
         idx_t = loc_data.new(num_bsT, num_priors).long()
         ids_t = loc_data.new(num_bsT, num_priors).long() if gt_ids is not None else None  # object ids for tracking
 
-        # Matcher: assign positive samples
+        # --------------------------- Matcher: assign positive samples ------------------------------
         crowd_boxes = None
         for idx in range(batch_size):
             # Split the crowd annotations because they come bundled in
@@ -156,7 +150,6 @@ class MultiBoxLoss(nn.Module):
                             else range(self.clip_frames//2-1, self.clip_frames//2+2)
                     else:
                         ind_range = range(jdx*self.PHL_stride, jdx*self.PHL_stride+self.PHL_kernel_size)
-
                     match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[kdx], loc_data[kdx],
                                loc_t, conf_t, idx_t, ids_t, kdx, jdx, self.pos_threshold,
                                self.neg_threshold, use_cir_boxes=self.use_cir_boxes, ind_range=ind_range)
@@ -173,8 +166,9 @@ class MultiBoxLoss(nn.Module):
         if gt_ids is not None:
             ids_t = Variable(ids_t, requires_grad=False)
 
-        pos = conf_t > 0
+        # Compute losses
         losses = dict()
+        pos = conf_t > 0
         if pos.sum() > 0:
             # ---------------------------  Localization Loss (Smooth L1) -------------------------------------------
             losses_loc, pred_boxes_p, gt_boxes_p = self.loclization_loss(pos, priors, loc_data, loc_t, centerness_data)
@@ -197,7 +191,7 @@ class MultiBoxLoss(nn.Module):
 
             # --------------------------------- Confidence loss ------------------------------------------------
             # Focal loss for COCO (crowded objects > 10),
-            # Ohem loss for VIS dataset (sparse objects < 6, tooo many negative samples)
+            # Ohem loss for OVIS dataset
             if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
                 conf_t_unfold = conf_t.reshape(-1)
                 pos_unfold = pos.float().reshape(-1)
@@ -356,7 +350,7 @@ class MultiBoxLoss(nn.Module):
         n_clips = self.cfg.SOLVER.NUM_CLIPS
         if self.cfg.DATASETS.TYPE != 'cocovis':
             n_clips *= T_out
-        bs = track_data.size(0) // n_clips
+        bs = max(track_data.size(0) // n_clips, 1.)
 
         loss = torch.tensor(0., device=track_data.device)
         for i in range(bs):
@@ -373,7 +367,7 @@ class MultiBoxLoss(nn.Module):
             # loss += ((1 - cos_sim) * inst_eq + cos_sim * (1 - inst_eq)).sum() / (cos_sim.size(0) * cos_sim.size(1))
             # pos: -log(cos_sim), neg: -log(1-cos_sim)
             cos_sim_diff = torch.clamp(1 - cos_sim, min=1e-10)
-            loss_t = -1 * (inst_eq * torch.clamp(cos_sim, min=1e-10).log() + (1 - inst_eq) * cos_sim_diff.log())
+            loss_t = -1 * (torch.clamp(cos_sim, min=1e-10).log()*inst_eq + cos_sim_diff.log()*(1-inst_eq))
             loss += loss_t.mean()
 
         return {'T': loss / bs * self.cfg.MODEL.TRACK_HEADS.LOSS_ALPHA}
@@ -383,33 +377,35 @@ class MultiBoxLoss(nn.Module):
         if idx_t.dim() == 2:
             idx_t = idx_t.reshape(bs, T_out, -1)
         loss = torch.tensor(0., device=track_data.device)
-        n_bs_track = 0
 
         for i in range(bs):
             masks_cur, bbox_cur, obj_ids = gt_masks[i], gt_boxes[i], gt_ids[i]
             if self.cfg.MODEL.TRACK_HEADS.CROP_WITH_PRED_MASK:
                 masks_cur, bbox_cur, obj_ids = masks_cur[idx_t[i][pos]], bbox_cur[idx_t[i][pos]], obj_ids[pos]
-            mu, var = generate_track_gaussian(track_data[i], masks_cur, bbox_cur)
+
+            # Instances may disappear in a frames of the clip due to occlusion or new-appeared,
+            # then, we hope the Gaussian space to focus on those valid objects.
+            area_masks = masks_cur.sum(dim=(-1, -2)).view(-1) > 5
+            mu, var = generate_track_gaussian(track_data[i], masks_cur.transpose(0, 1).contiguous(),
+                                              bbox_cur.transpose(0, 1).contiguous())       # [T, n, t_dim]
             mu, var = mu.reshape(-1, t_dim), var.reshape(-1, t_dim)
             obj_ids = obj_ids.reshape(-1, 1).repeat(1, T_out).reshape(-1)
-            n_objs = mu.size(0)
 
             if len(obj_ids) > 1:
-                n_bs_track += 1
-
                 # to calculate the kl_divergence for two Gaussian distributions, where c is the dim of variables
-                kl_divergence = compute_kl_div(mu, var) + 1e-5  # value in [1e-5, +infinite]
+                kl_div = compute_kl_div(mu, var) + 1e-5  # value in [1e-5, +infinite]
 
                 # We hope the kl_divergence between same instance Ids is small, otherwise the kl_divergence is large.
                 inst_eq = (obj_ids.view(-1, 1) == obj_ids.view(1, -1)).float()
+                valid_masks = (area_masks.view(-1, 1) & area_masks.view(1, -1))
 
                 # If they are the same instance, use cosine distance, else use consine similarity
                 # pos: log(1+kl), neg: exp(1-kl)
-                pre_loss = inst_eq * (1 + 2 * kl_divergence).log() \
-                           + (1. - inst_eq) * torch.exp(1 - 0.1 * kl_divergence)
-                loss += pre_loss.sum() / n_objs / max(n_objs-1, 1)
+                pre_loss = inst_eq * (1 + 2 * kl_div).log() \
+                           + (1. - inst_eq) * torch.exp(1 - 0.1 * kl_div)
+                loss += (pre_loss * valid_masks).sum() / max(valid_masks.sum(), 1)
 
-        losses = {'T': 0.5 * self.cfg.MODEL.TRACK_HEADS.LOSS_ALPHA * loss / max(n_bs_track, 1)}
+        losses = {'T_kl': 0.5 * self.cfg.MODEL.TRACK_HEADS.LOSS_ALPHA * loss / max(bs, 1)}
 
         return losses
 

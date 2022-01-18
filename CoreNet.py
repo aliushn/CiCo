@@ -3,10 +3,9 @@ import torch.nn as nn
 import numpy as np
 from collections import defaultdict
 
-from layers.modules import PredictionModule_FC, PredictionModule, PredictionModule_3D, make_net, FPN, BiFPN, \
-    TemporalNet, ProtoNet, ProtoNet3D
+from layers.modules import PredictionModule_FC, ClipPredictionModule, make_net, FPN, BiFPN, \
+    TemporalNet, ClipProtoNet
 from layers.functions import Detect, Track, Track_TF, Track_TF_Clip
-from layers.modules import InterclipsClass
 from layers.backbones import construct_backbone, SwinTransformer
 from utils import timer
 
@@ -39,24 +38,15 @@ class CoreNet(nn.Module):
         # ------------ build ProtoNet ------------
         self.train_masks = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
         if self.train_masks:
-            self.ProtoNet = ProtoNet(cfg, self.fpn_num_features) if not cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE else \
-                ProtoNet3D(cfg, self.fpn_num_features)
+            self.ProtoNet = ClipProtoNet(cfg, self.fpn_num_features)
 
         # ------- Build multi-scales prediction head  ------------
         self.num_priors = len(cfg.MODEL.BACKBONE.PRED_SCALES[0]) * len(cfg.MODEL.BACKBONE.PRED_ASPECT_RATIOS[0])
         # prediction layers for loc, conf, mask, track
-        if cfg.MODEL.PREDICTION_HEADS.CUBIC_3D_MODE:
-            self.prediction_layers = PredictionModule_3D(cfg, self.fpn_num_features, deform_groups=1)
+        if cfg.STMASK.FC.USE_FCA:
+            self.prediction_layers = PredictionModule_FC(cfg, self.fpn_num_features, deform_groups=1)
         else:
-            if cfg.STMASK.FC.USE_FCA:
-                self.prediction_layers = PredictionModule_FC(cfg, self.fpn_num_features, deform_groups=1)
-            else:
-                self.prediction_layers = PredictionModule(cfg, self.fpn_num_features, deform_groups=1)
-
-        # InterClips Classification branch not yet??
-        if cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
-            self.InterclipsClass = InterclipsClass(cfg.MODEL.CLASS_HEADS.INTERCLIPS_CLAFEAT_DIM, cfg.SOLVER.NUM_CLIPS,
-                                                   cfg.SOLVER.NUM_CLIP_FRAMES, cfg.DATASETS.NUM_CLASSES)
+            self.prediction_layers = ClipPredictionModule(cfg, self.fpn_num_features, deform_groups=1)
 
         # ---------------- Build detection ----------------
         self.Detect = Detect(cfg, display)
@@ -69,24 +59,15 @@ class CoreNet(nn.Module):
                 self.track_conv, _ = make_net(self.fpn_num_features, track_arch, use_3D=self.use_3D,
                                               norm_type='batch_norm', include_last_relu=False)
 
-            if not cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE and not cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
-                # Track objects frame-by-frame
-                self.Track = Track(cfg.MODEL.TRACK_HEADS.MATCH_COEFF, self.clip_frames, train_masks=self.train_masks,
-                                   track_by_Gaussian=cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN)
-            else:
-                if cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE and cfg.TEST.NUM_CLIP_FRAMES > 1:
-                    self.Track = Track_TF_Clip(self, cfg.MODEL.TRACK_HEADS.MATCH_COEFF)
-                else:
-                    self.Track = Track_TF(self, cfg)
-
-                if cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
-                    # A Temporal Fusion built on two adjacent frames for tracking
-                    self.TF_correlation_selected_layer = cfg.STMASK.T2S_HEADS.CORRELATION_SELECTED_LAYER
-                    corr_channels = 2*self.fpn_num_features + cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE**2
-                    self.TemporalNet = TemporalNet(corr_channels, cfg.MODEL.MASK_HEADS.MASK_DIM,
-                                                   maskshift_loss=cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT,
-                                                   use_sipmask=cfg.MODEL.MASK_HEADS.USE_SIPMASK,
-                                                   sipmask_head=cfg.MODEL.MASK_HEADS.SIPMASK_HEAD)
+            self.Track = Track_TF(self, cfg)
+            if cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
+                # A Temporal Fusion built on two adjacent frames for tracking
+                self.TF_correlation_selected_layer = cfg.STMASK.T2S_HEADS.CORRELATION_SELECTED_LAYER
+                corr_channels = 2*self.fpn_num_features + cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE**2
+                self.TemporalNet = TemporalNet(corr_channels, cfg.MODEL.MASK_HEADS.MASK_DIM,
+                                               maskshift_loss=cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT,
+                                               use_sipmask=cfg.MODEL.MASK_HEADS.USE_SIPMASK,
+                                               sipmask_head=cfg.MODEL.MASK_HEADS.SIPMASK_HEAD)
 
         if cfg.MODEL.MASK_HEADS.TRAIN_MASKS and cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS:
             sem_seg_head = [(self.fpn_num_features, 3, 1)]*2 + [(cfg.DATASETS.NUM_CLASSES, 1, 0)]
@@ -307,11 +288,8 @@ class CoreNet(nn.Module):
         if self.training:
             return pred_outs
         else:
-            if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
-                pred_outs['conf'] = pred_outs['conf'].sigmoid()
-            else:
-                pred_outs['conf'] = pred_outs['conf'].sigmoid() if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS \
-                    else pred_outs['conf'].softmax(dim=-1)
+            pred_outs['conf'] = pred_outs['conf'].sigmoid() if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS \
+                else pred_outs['conf'].softmax(dim=-1)
 
             # Detection
             with timer.env('Detect'):
