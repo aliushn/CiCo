@@ -8,10 +8,9 @@ pyximport.install(setup_args={"include_dirs":np.get_include()}, reload_support=T
 
 
 class Track(object):
-    """At test time, Detect is the final layer of SSD.  Decode location preds,
-    apply non-maximum suppression to location predictions based on conf
-    scores and threshold to a top_k number of output predictions for both
-    confidence score and locations, as the predicted masks.
+    """
+    The original tracking version of MaskTrack R-CNN for VIS task.
+    (https://openaccess.thecvf.com/content_ICCV_2019/papers/Yang_Video_Instance_Segmentation_ICCV_2019_paper.pdf)
     """
     # TODO: Refactor this whole class away. It needs to go.
 

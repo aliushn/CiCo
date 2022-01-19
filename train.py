@@ -180,7 +180,7 @@ def train(cfg):
 
     global loss_types  # Forms the print order
     loss_types = ['B', 'BIoU', 'B_cir', 'BIoU_cir', 'center', 'Rep', 'C', 'C_focal', 'stuff', 'CI', 'M_bce', 'M_dice',
-                  'M_coeff', 'M_intraclass', 'M_l1', 'T', 'T_kl', 'B_shift', 'BIoU_shift', 'M_shift', 'P', 'D', 'S', 'I']
+                  'M_coeff', 'M_intraclass', 'M_l1', 'T', 'T_kl', 'B_T2S', 'BIoU_T2S', 'M_T2S', 'P', 'D', 'S', 'I']
     loss_avgs = {k: MovingAverage(100) for k in loss_types}
 
     if args.local_rank == 0:
@@ -386,9 +386,8 @@ def compute_validation_map(net, dataset):
         net.eval()
         print()
         print("Computing validation mAP (this may take a while)...", flush=True)
-        eval_script.evaldatasets(net, dataset, cfg.DATASETS.TYPE, cfg.OUTPUT_DIR, cfg.TEST.NUM_CLIP_FRAMES,
-                                 cfg.SOLVER.NUM_CLIPS, cubic_mode=cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE,
-                                 cfg_input=cfg.INPUT, TRAIN_INTERCLIPS_CLASS=cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS)
+        eval_script.evaldatasets(net, dataset, cfg.DATASETS.TYPE, cfg.TEST.NUM_CLIP_FRAMES,
+                                 cfg.SOLVER.NUM_CLIPS, use_cico=cfg.CiCo.ENGINE, cfg_input=cfg.INPUT)
         net.train()
 
 
@@ -412,7 +411,8 @@ def setup_eval(epoch):
     eval_type = 'bbox' if cfg.DATASETS.TYPE == 'vid' else 'segm'
     eval_script.parse_args(['--batch_size=' + str(cfg.TEST.IMS_PER_BATCH),
                             '--eval_types=' + eval_type,
-                            '--epoch=' + str(epoch)])
+                            '--epoch=' + str(epoch),
+                            '--save_folder=' + str(cfg.OUTPUT_DIR)])
 
 
 def setup_eval_coco():

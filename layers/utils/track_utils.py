@@ -1,36 +1,36 @@
 # -*- coding: utf-8 -*-
 import torch
-from .box_utils import center_size, point_form, crop
 import torch.distributions as dist
 import matplotlib.pyplot as plt
 import os
 import torch.nn.functional as F
+from .box_utils import center_size, decode,  point_form, crop
 
 
-def correlate_operator(x1, x2, patch_size=11, kernel_size=1, stride=1, dilation_patch=1):
-    """
-    :param x1: features 1
-    :param x2: features 2
-    :param patch_size: the size of whole patch is used to calculate the correlation
-    :return:
-    """
+def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta, small_objects=None,
+                        add_bbox_dummy=False, bbox_dummy_iou=0, match_coeff=None):
+    # compute comprehensive matching score based on matchig likelihood,
+    # bbox confidence, and ious
+    if add_bbox_dummy:
+        bbox_iou_dummy = torch.ones(bbox_ious.size(0), 1,
+                                    device=torch.cuda.current_device()) * bbox_dummy_iou
+        if small_objects is not None:
+            bbox_iou_dummy[small_objects] *= 0.5
+        bbox_ious = torch.cat((bbox_iou_dummy, bbox_ious), dim=1)
+        mask_ious = torch.cat((bbox_iou_dummy, mask_ious), dim=1)
+        label_dummy = torch.ones(bbox_ious.size(0), 1,
+                                 device=torch.cuda.current_device())
+        label_delta = torch.cat((label_dummy, label_delta), dim=1)
 
-    # Output sizes oH and oW are no longer dependant of patch size, but only of kernel size and padding
-    # patch_size is now the whole patch, and not only the radii.
-    # stride1 is now stride and stride2 is dilation_patch, which behave like dilated convolutions
-    # equivalent max_displacement is then dilation_patch * (patch_size - 1) / 2.
-    # to get the right parameters for FlowNetC, you would have
-    from spatial_correlation_sampler import spatial_correlation_sample
-    out_corr = spatial_correlation_sample(x1,
-                                          x2,
-                                          kernel_size=kernel_size,
-                                          patch_size=patch_size,
-                                          stride=stride,
-                                          padding=int((kernel_size - 1)/2),
-                                          dilation_patch=dilation_patch)
-    b, ph, pw, h, w = out_corr.size()
-    out_corr = out_corr.view(b, ph*pw, h, w) / x1.size(1)
-    return F.leaky_relu_(out_corr, 0.1)
+    if match_coeff is None:
+        return match_ll
+    else:
+        # match coeff needs to be length of 4
+        assert (len(match_coeff) == 4)
+        return match_ll + match_coeff[0] * bbox_scores \
+               + match_coeff[1] * mask_ious \
+               + match_coeff[2] * bbox_ious \
+               + match_coeff[3] * label_delta
 
 
 def split_bbox(bbox, idx_bbox_ori, nums_bbox_per_layer):
@@ -137,32 +137,6 @@ def compute_kl_div(p_mu, p_var, q_mu=None, q_var=None):
     return kl_divergence if use_batch else kl_divergence.squeeze(0)
 
 
-def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta, small_objects=None,
-                        add_bbox_dummy=False, bbox_dummy_iou=0, match_coeff=None):
-    # compute comprehensive matching score based on matchig likelihood,
-    # bbox confidence, and ious
-    if add_bbox_dummy:
-        bbox_iou_dummy = torch.ones(bbox_ious.size(0), 1,
-                                    device=torch.cuda.current_device()) * bbox_dummy_iou
-        if small_objects is not None:
-            bbox_iou_dummy[small_objects] *= 0.5
-        bbox_ious = torch.cat((bbox_iou_dummy, bbox_ious), dim=1)
-        mask_ious = torch.cat((bbox_iou_dummy, mask_ious), dim=1)
-        label_dummy = torch.ones(bbox_ious.size(0), 1,
-                                 device=torch.cuda.current_device())
-        label_delta = torch.cat((label_dummy, label_delta), dim=1)
-
-    if match_coeff is None:
-        return match_ll
-    else:
-        # match coeff needs to be length of 4
-        assert (len(match_coeff) == 4)
-        return match_ll + match_coeff[0] * bbox_scores \
-               + match_coeff[1] * mask_ious \
-               + match_coeff[2] * bbox_ious \
-               + match_coeff[3] * label_delta
-
-
 def display_association_map(embedding_tensor, mu, cov, save_dir, video_id=0, frame_id=0):
     """
     Note that the dimension should be small for visualization
@@ -189,6 +163,7 @@ def display_association_map(embedding_tensor, mu, cov, save_dir, video_id=0, fra
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     plt.savefig(''.join([save_dir, str(video_id), '_', str(frame_id), '.png']))
+
 
 
 

@@ -7,9 +7,10 @@ from ..visualization_temporal import display_cubic_weights
 
 
 class ClipProtoNet(nn.Module):
-    def __init__(self, cfg, in_channels):
+    def __init__(self, cfg, in_channels, mask_dim):
         super().__init__()
         self.cfg = cfg
+        self.mask_dim = mask_dim
 
         self.proto_src = cfg.MODEL.MASK_HEADS.PROTO_SRC
         if self.proto_src is not None and len(self.proto_src) > 1:
@@ -28,11 +29,10 @@ class ClipProtoNet(nn.Module):
         # The include_last_relu=false here is because we might want to change it to another function
         norm_type = 'batch_norm' if cfg.MODEL.MASK_HEADS.USE_BN else None
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-        self.use_3D = True if cfg.CiCo.CPH.CUBIC_MODE else False
+        self.use_3D = True if cfg.CiCo.CPN.CUBIC_MODE else False
         self.proto_net, proto_channels = make_net(in_channels, cfg.MODEL.MASK_HEADS.PROTO_NET, use_3D=self.use_3D,
                                                   norm_type=norm_type, include_last_relu=True)
         # the last two Conv layers for predicting prototypes
-        self.mask_dim = cfg.MODEL.MASK_HEADS.MASK_DIM
         proto_arch = [(proto_channels, 3, 1), (self.mask_dim, 1, 0)]
         self.proto_conv, _ = make_net(proto_channels, proto_arch, use_3D=self.use_3D, norm_type=norm_type,
                                       include_last_relu=False)

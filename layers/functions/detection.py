@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from layers.utils import jaccard, mask_iou, crop, generate_mask, point_form, center_size, decode, circum_boxes
+from ..utils import jaccard, crop, point_form, center_size, decode, circum_boxes, generate_mask, mask_iou
 
 
 class Detect(object):
@@ -192,10 +192,7 @@ class Detect(object):
         # don't have a higher scoring box that would supress it in normal NMS.
         idx_out = idx[iou_max <= iou_threshold]
 
-        if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
-            out_after_NMS = {'score': rescores[idx_out]}
-        else:
-            out_after_NMS = {'score': scores[idx_out, classes[idx_out]], 'class': classes[idx_out]+1}
+        out_after_NMS = {'score': scores[idx_out, classes[idx_out]], 'class': classes[idx_out]+1}
         for k, v in candidate.items():
             if k not in self.img_level_keys and k not in {'conf', 'loc'}:
                 out_after_NMS[k] = v[:, idx_out] if k in {'box', 'mask'} else v[idx_out]

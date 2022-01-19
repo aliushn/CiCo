@@ -1,10 +1,9 @@
-import torch, torchvision
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from itertools import product
 from math import sqrt
 from ..visualization_temporal import display_cubic_weights, display_pixle_similarity
-from layers.utils import correlate_operator
 
 
 class ClipPredictionModule(nn.Module):
@@ -32,13 +31,13 @@ class ClipPredictionModule(nn.Module):
                          from parent instead of from this module.
     """
 
-    def __init__(self, cfg, in_channels, deform_groups=1):
+    def __init__(self, cfg, in_channels, mask_dim=32, deform_groups=1):
         super().__init__()
 
         self.cfg = cfg
         self.in_channels = in_channels
         self.num_classes = cfg.DATASETS.NUM_CLASSES if cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS else cfg.DATASETS.NUM_CLASSES + 1
-        self.mask_dim = cfg.MODEL.MASK_HEADS.MASK_DIM
+        self.mask_dim = mask_dim
         self.track_dim = cfg.MODEL.TRACK_HEADS.TRACK_DIM
         self.pred_aspect_ratios = cfg.MODEL.BACKBONE.PRED_ASPECT_RATIOS
         self.pred_scales = cfg.MODEL.BACKBONE.PRED_SCALES
@@ -59,23 +58,13 @@ class ClipPredictionModule(nn.Module):
         # self.priors_list = torch.cat(self.priors_list, dim=1).cpu()
         # self.prior_levels_list = torch.cat(self.prior_levels_list, dim=1).cpu()
 
-        if cfg.MODEL.MASK_HEADS.USE_SIPMASK:
-            self.mask_dim = self.mask_dim * cfg.MODEL.MASK_HEADS.SIPMASK_HEAD
-        elif cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
-            self.mask_dim = self.mask_dim ** 2 * (cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS - 1) \
-                            + self.mask_dim * cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS + 1
-            if not cfg.MODEL.MASK_HEADS.DISABLE_REL_COORDS:
-                self.mask_dim += cfg.MODEL.MASK_HEADS.MASK_DIM
-        else:
-            self.mask_dim = self.mask_dim
-
         if cfg.CiCo.CPH.CUBIC_MODE:
             conv = nn.Conv3d
-            if self.cfg.CiCo.MATCHER_CENTER:
+            if self.cfg.CiCo.CPH.MATCHER_CENTER:
                 kernel_size, padding, stride = (self.clip_frames, 3, 3), (0, 1, 1), (1, 1, 1)
             else:
-                kernel_size, padding = cfg.CiCo.CPH_LAYER_KERNEL_SIZE, cfg.CiCo.CPH_LAYER_PADDING
-                stride = cfg.CiCo.CPH_LAYER_STRIDE
+                kernel_size, padding = cfg.CiCo.CPH.LAYER_KERNEL_SIZE, cfg.CiCo.CPH.LAYER_PADDING
+                stride = cfg.CiCo.CPH.LAYER_STRIDE
         else:
             conv = nn.Conv2d
             kernel_size, padding, stride = (3, 3), (1, 1), (1, 1)
@@ -119,7 +108,7 @@ class ClipPredictionModule(nn.Module):
         if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
             self.track_extra = make_extra(cfg.MODEL.TRACK_HEADS.TOWER_LAYERS, self.in_channels)
 
-    def forward(self, fpn_outs, img_meta=None):
+    def forward(self, fpn_outs):
         """
         Args:
             - x: The convOut from a layer in the backbone network

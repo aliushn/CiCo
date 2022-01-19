@@ -1,13 +1,11 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from collections import defaultdict
-
-from layers.modules import PredictionModule_FC, ClipPredictionModule, make_net, FPN, BiFPN, \
-    TemporalNet, ClipProtoNet
-from layers.functions import Detect, Track, Track_TF, Track_TF_Clip
-from layers.backbones import construct_backbone, SwinTransformer
 from utils import timer
+from collections import defaultdict
+from layers.backbones import construct_backbone, SwinTransformer
+from layers.modules import PredictionModule_FC, ClipPredictionModule, ClipProtoNet, make_net, FPN, T2S_Head
+from layers.functions import Detect, Track_TF
 
 # This is required for Pytorch 1.0.1 on Windows to initialize Cuda on some driver versions.
 # See the bug report here: https://github.com/pytorch/pytorch/issues/17108
@@ -36,17 +34,24 @@ class CoreNet(nn.Module):
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
 
         # ------------ build ProtoNet ------------
-        self.train_masks = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
-        if self.train_masks:
-            self.ProtoNet = ClipProtoNet(cfg, self.fpn_num_features)
+        self.mask_dim = cfg.MODEL.MASK_HEADS.MASK_DIM
+        if cfg.MODEL.MASK_HEADS.USE_SIPMASK:
+            self.mask_dim = self.mask_dim * cfg.MODEL.MASK_HEADS.SIPMASK_HEAD
+        elif cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
+            self.mask_dim = self.mask_dim ** 2 * (cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS - 1) \
+                            + self.mask_dim * cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS + 1
+            if not cfg.MODEL.MASK_HEADS.DISABLE_REL_COORDS:
+                self.mask_dim += cfg.MODEL.MASK_HEADS.MASK_DIM
+        if cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
+            self.ProtoNet = ClipProtoNet(cfg, self.fpn_num_features, self.mask_dim)
 
         # ------- Build multi-scales prediction head  ------------
         self.num_priors = len(cfg.MODEL.BACKBONE.PRED_SCALES[0]) * len(cfg.MODEL.BACKBONE.PRED_ASPECT_RATIOS[0])
         # prediction layers for loc, conf, mask, track
         if cfg.STMASK.FC.USE_FCA:
-            self.prediction_layers = PredictionModule_FC(cfg, self.fpn_num_features, deform_groups=1)
+            self.prediction_layers = PredictionModule_FC(cfg, self.fpn_num_features, self.mask_dim, deform_groups=1)
         else:
-            self.prediction_layers = ClipPredictionModule(cfg, self.fpn_num_features, deform_groups=1)
+            self.prediction_layers = ClipPredictionModule(cfg, self.fpn_num_features, self.mask_dim, deform_groups=1)
 
         # ---------------- Build detection ----------------
         self.Detect = Detect(cfg, display)
@@ -60,15 +65,13 @@ class CoreNet(nn.Module):
                                               norm_type='batch_norm', include_last_relu=False)
 
             self.Track = Track_TF(self, cfg)
+
             if cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
-                # A Temporal Fusion built on two adjacent frames for tracking in STMask, clik here
+                # A Temporal Fusion built on two adjacent frames for tracking in STMask, clik here for more details
                 # https://arxiv.org/abs/2104.05606
                 self.TF_correlation_selected_layer = cfg.STMASK.T2S_HEADS.CORRELATION_SELECTED_LAYER
                 corr_channels = 2*self.fpn_num_features + cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE**2
-                self.TemporalNet = TemporalNet(corr_channels, cfg.MODEL.MASK_HEADS.MASK_DIM,
-                                               maskshift_loss=cfg.STMASK.T2S_HEADS.TRAIN_MASKSHIFT,
-                                               use_sipmask=cfg.MODEL.MASK_HEADS.USE_SIPMASK,
-                                               sipmask_head=cfg.MODEL.MASK_HEADS.SIPMASK_HEAD)
+                self.T2S_Head = T2S_Head(cfg.STMASK.T2S_HEADS, corr_channels, self.mask_dim)
 
         if cfg.MODEL.MASK_HEADS.TRAIN_MASKS and cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS:
             sem_seg_head = [(self.fpn_num_features, 3, 1)]*2 + [(cfg.DATASETS.NUM_CLASSES, 1, 0)]
@@ -82,11 +85,15 @@ class CoreNet(nn.Module):
         for key in list(state_dict.keys()):
             if key.startswith('module.'):
                 state_dict[key[7:]] = state_dict.pop(key)
+
+            new_key = None
             if key.split('.')[0] in {'mask_refine', 'proto_net', 'proto_conv'}:
                 new_key = 'ProtoNet.'+key
-                state_dict[new_key] = state_dict.pop(key)
             elif key.split('.')[0] == 'prediction_layers' and key.split('.')[1] == '0':
                 new_key = 'prediction_layers.' + '.'.join(key.split('.')[2:])
+            elif key.startswith('TemporalNet'):
+                new_key = 'T2S_Head.TemporalFusionNet.' + '.'.join(key.split('.')[1:])
+            if new_key is not None:
                 state_dict[new_key] = state_dict.pop(key)
 
         # For backward compatability, remove these (the new variable is called layers)
@@ -252,7 +259,7 @@ class CoreNet(nn.Module):
             fpn_outs = self.fpn(outs)
 
         with timer.env('Pred_heads'):
-            pred_outs = self.prediction_layers(fpn_outs, img_meta)
+            pred_outs = self.prediction_layers(fpn_outs)
 
         with timer.env('Protonet'):
             if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:

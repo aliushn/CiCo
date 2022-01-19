@@ -216,108 +216,6 @@ def temp(targets, h, w, img_metas):
     gt_masks, gt_bboxes, img_metas = GtList_from_tensor(h, w, gt_masks, gt_boxes, img_metas)
 
 
-def evaluate(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, eval_clip_frames=1, output_dir=None):
-    '''
-    :param net:
-    :param dataset:
-    :param data_type: 'vis' or 'vid'
-    :param eval_clip_frames:
-    :param output_dir:
-    :return:
-    '''
-    n_overlapped_frames = args.overlap_frames
-    n_newly_frames = eval_clip_frames - n_overlapped_frames
-    dataset_size = len(dataset.vid_ids)
-
-    print()
-    json_results = []
-    frame_times = MovingAverage()
-    for vdx, vid in enumerate(dataset.vid_ids):
-        progress = (vdx + 1) / dataset_size * 100
-        print()
-        print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
-        results_video = {}
-
-        if data_type == 'vis':
-            len_vid = dataset.vid_infos[vdx]['length']
-            train_masks, use_vid_metric = True, False
-        else:
-            len_vid = len(dataset.vid_infos[vdx])
-            train_masks, use_vid_metric = False, True
-
-        if eval_clip_frames == 1:
-            len_clips = (len_vid + args.batch_size-1) // args.batch_size
-        else:
-            len_clips = (len_vid + n_newly_frames-1) // n_newly_frames
-        progress_bar_clip = ProgressBar(len_clips, len_clips)
-        for cdx in range(len_clips):
-            progress_clip = (cdx + 1) / len_clips * 100
-            progress_bar_clip.set_val(cdx+1)
-
-            timer.reset()
-            with timer.env('Load Data'):
-                if eval_clip_frames == 1:
-                    clip_frame_ids = range(cdx*args.batch_size, min((cdx+1)*args.batch_size, len_vid))
-                else:
-                    left = cdx * n_newly_frames
-                    clip_frame_ids = range(left, min(left+eval_clip_frames, len_vid))
-                if cdx == len_clips-1:
-                    assert clip_frame_ids[-1] == len_vid-1, \
-                        'The last clip should include the last frame! Please double check!'
-                images, imgs_meta, targets = dataset.pull_clip_from_video(vid, clip_frame_ids)
-                images = [torch.from_numpy(img).permute(2, 0, 1) for img in images]
-                images = ImageList_from_tensors(images, size_divisibility=32, pad_h=pad_h, pad_w=pad_w).cuda()
-                pad_shape = {'pad_shape': (images.size(-2), images.size(-1), 3)}
-                for k in range(len(imgs_meta)):
-                    imgs_meta[k].update(pad_shape)
-
-            preds = net(images, img_meta=imgs_meta)
-            frame_times.add(timer.total_time())
-            progress_bar_clip.set_val(cdx+1)
-            avg_fps = 1. / (frame_times.get_avg() / args.batch_size) if vdx > 0 or cdx > 0 else 0
-            print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)   %5.2f FPS  '
-                  % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip, avg_fps), end='')
-
-            # Remove overlapped frames
-            if eval_clip_frames > 1 and cdx > 0:
-                clip_frame_ids = clip_frame_ids[n_overlapped_frames:]
-                images = images[n_overlapped_frames:]
-                imgs_meta = imgs_meta[n_overlapped_frames:]
-                preds = preds[n_overlapped_frames:]
-
-            for batch_id, pred in enumerate(preds):
-                if args.display:
-                    img_id = (vid, clip_frame_ids[batch_id])
-                    root_dir = os.path.join(output_dir, 'out', str(vid))
-                    if not os.path.exists(root_dir):
-                        os.makedirs(root_dir)
-                    img_numpy = prep_display(pred, images[batch_id], img_meta=imgs_meta[batch_id])
-
-                else:
-                    if pred is not None:
-                        pred = postprocess_ytbvis(pred, imgs_meta[batch_id], train_masks=train_masks,
-                                                  output_file=output_dir)
-
-                    if data_type == 'vid' and use_vid_metric:
-                        for k, v in pred.items():
-                            pred[k] = v.tolist()
-                        pred['video_id'] = vid
-                        pred['frame_id'] = clip_frame_ids[batch_id]
-                        json_results.append(pred)
-                    else:
-                        bbox2result_video(results_video, pred, clip_frame_ids[batch_id], types=args.eval_types)
-
-        if not args.display:
-            for obj_id, result_obj in results_video.items():
-                result_obj['video_id'] = vid
-                result_obj['score'] = np.array(result_obj['score']).mean().item()
-                result_obj['category_id'] = np.bincount(result_obj['category_id']).argmax().item()
-                json_results.append(result_obj)
-
-    timer.print_stats()
-    return json_results
-
-
 def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, clip_frames=1, use_cico=False):
     '''
     :param net:
@@ -392,18 +290,23 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
 
             with timer.env('Postprocess'):
                 for tdx, pred_clip in enumerate(preds):
-                    clip_frame_ids = clip_frame_ids[:min(n_newly_frames, len_vid - left)]
-                    images = images[:min(n_newly_frames, len_vid - left)]
-                    imgs_meta = imgs_meta[:min(n_newly_frames, len_vid - left)]
-                    for k, v in pred_clip.items():
-                        if k in {'box', 'mask', 'img_ids'}:
-                            pred_clip[k] = v[:min(n_newly_frames, len_vid - left)]
-                    pred_clip_pp = postprocess_ytbvis(pred_clip, imgs_meta, train_masks=train_masks,
+                    interval = n_newly_frames if use_cico else clip_frames
+                    left, right = tdx * interval, (tdx+1) * interval
+                    clip_frame_ids_cur = clip_frame_ids[left:min(right, len_vid - left)]
+                    images_cur = images[left:min(right, len_vid - left)]
+                    if use_cico:
+                        imgs_meta_cur = imgs_meta[tdx]
+                        for k, v in pred_clip.items():
+                            if k in {'box', 'mask', 'img_ids'}:
+                                pred_clip[k] = v[left:min(right, len_vid - left)]
+                    else:
+                        imgs_meta_cur = imgs_meta[left:min(right, len_vid - left)]
+                    pred_clip_pp = postprocess_ytbvis(pred_clip, imgs_meta_cur, train_masks=train_masks,
                                                       visualize_lincomb=args.display_lincomb,
                                                       output_file=args.save_folder)
 
                     if args.display:
-                        prep_display(pred_clip_pp, images, img_meta=imgs_meta)
+                        prep_display(pred_clip_pp, images_cur, img_meta=imgs_meta_cur)
 
                     else:
                         if data_type == 'vid' and use_vid_metric:
@@ -412,8 +315,7 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
                             pred_clip_pp['video_id'] = vid
                             json_results.append(pred_clip_pp)
                         else:
-                            bbox2result_video(vid_objs, pred_clip_pp, clip_frame_ids[tdx*clip_frames:(tdx+1)*clip_frames],
-                                              types=args.eval_types)
+                            bbox2result_video(vid_objs, pred_clip_pp, clip_frame_ids_cur, types=args.eval_types)
 
         if not args.display and data_type == 'vis':
             for obj_id, vid_obj in vid_objs.items():
@@ -489,8 +391,7 @@ def evalvideo(net: CoreNet, input_folder: str, output_folder: str):
     return
 
 
-def evaldatasets(net: CoreNet, val_dataset, data_type, eval_clip_frames=1, n_clips=1,
-                 use_cico=False, cfg_input=None):
+def evaldatasets(net: CoreNet, val_dataset, data_type, eval_clip_frames=1, n_clips=1, use_cico=False, cfg_input=None):
     if cfg_input is not None:
         pad_h, pad_w = cfg_input.MIN_SIZE_TEST, cfg_input.MAX_SIZE_TEST
     else:
@@ -498,12 +399,8 @@ def evaldatasets(net: CoreNet, val_dataset, data_type, eval_clip_frames=1, n_cli
     json_path = os.path.join(args.save_folder, 'results_' + str(args.epoch) + '.json')
     if args.eval:
         print('Begin Inference!')
-        if use_cico:
-            results = evaluate_clip(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,
-                                    clip_frames=eval_clip_frames)
-        else:
-            results = evaluate_clip(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,
-                                    clip_frames=eval_clip_frames, use_cico=use_cico)
+        results = evaluate_clip(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,
+                                clip_frames=eval_clip_frames, use_cico=use_cico)
 
         if not args.display:
             print()

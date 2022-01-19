@@ -3,12 +3,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-from layers.utils import decode, jaccard, generate_mask, compute_kl_div, generate_track_gaussian, \
-    log_sum_exp, DIoU_loss
+from fvcore.nn import sigmoid_focal_loss_jit, giou_loss
+from ..utils import decode, jaccard, log_sum_exp, DIoU_loss
 from .match_samples import match, match_clip
 from .losses import LincombMaskLoss, T2SLoss
-from fvcore.nn import sigmoid_focal_loss_jit, giou_loss
-import random
 
 
 class MultiBoxLoss(nn.Module):
@@ -36,9 +34,9 @@ class MultiBoxLoss(nn.Module):
         self.pos_threshold = pos_threshold
         self.neg_threshold = neg_threshold
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-        self.use_cir_boxes = self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES
-        self.PHL_kernel_size, self.PHL_padding = cfg.CiCo.CPH_LAYER_KERNEL_SIZE[0], cfg.CiCo.CPH_LAYER_PADDING[0]
-        self.PHL_stride = cfg.CiCo.CPH_LAYER_STRIDE[0]
+        self.use_cir_boxes = self.cfg.CiCo.CPH.CIRCUMSCRIBED_BOXES
+        self.PHL_kernel_size, self.PHL_padding = cfg.CiCo.CPH.LAYER_KERNEL_SIZE[0], cfg.CiCo.CPH.LAYER_PADDING[0]
+        self.PHL_stride = cfg.CiCo.CPH.LAYER_STRIDE[0]
 
         self.T2SLoss = T2SLoss(cfg, net)
         self.LincombMaskLoss = LincombMaskLoss(cfg, net)
@@ -115,7 +113,7 @@ class MultiBoxLoss(nn.Module):
         centerness_data = predictions['centerness'] if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS else None
         track_data = predictions['track'] if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK else None
         priors, prior_levels = predictions['priors'], predictions['prior_levels']
-        if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE and not self.cfg.MODEL.PREDICTION_HEADS.CIRCUMSCRIBED_BOXES:
+        if self.cfg.CiCo.ENGINE and not self.cfg.CiCo.CPH.CIRCUMSCRIBED_BOXES:
             priors = priors.repeat(T_out, 1, self.clip_frames)
             prior_levels = prior_levels.repeat(1, self.clip_frames)
 
@@ -140,7 +138,7 @@ class MultiBoxLoss(nn.Module):
                     _, gt_labels[idx] = split(gt_labels[idx])
                     _, gt_masks[idx] = split(gt_masks[idx])
 
-            if self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
+            if self.cfg.CiCo.ENGINE:
                 for jdx in range(T_out):
                     kdx = idx*T_out + jdx
 
@@ -195,53 +193,27 @@ class MultiBoxLoss(nn.Module):
             if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
                 conf_t_unfold = conf_t.reshape(-1)
                 pos_unfold = pos.float().reshape(-1)
-                if self.cfg.MODEL.CLASS_HEADS.TRAIN_INTERCLIPS_CLASS:
-                    # Stuff loss
-                    stuff_data_unfold = torch.flatten(predictions['conf'])
-                    stuff_target = pos_unfold.float()
-                    if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS:
-                        # filter out those samples with IoU threshold between 0.4 and 0.5
-                        keep = conf_t_unfold != -1
-                        stuff_loss = sigmoid_focal_loss_jit(
-                            stuff_data_unfold[keep],
-                            stuff_target[keep],
-                            alpha=self.cfg.MODEL.CLASS_HEADS.FOCAL_LOSS_ALPHA,
-                            gamma=self.cfg.MODEL.CLASS_HEADS.FOCAL_LOSS_GAMMA,
-                            reduction='sum')
-                        stuff_loss = stuff_loss / pos_unfold.sum()
-                    else:
-                        neg = self.select_neg_bboxes(stuff_data_unfold, conf_t_unfold, ratio=3, type='stuff')
-                        keep = (pos_unfold + neg).gt(0)
-                        stuff_loss = F.binary_cross_entropy_with_logits(stuff_data_unfold[keep], stuff_target[keep],
-                                                                        reduction='mean')
-                    losses['stuff'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * stuff_loss
+                conf_data_unfold = torch.flatten(predictions['conf'], end_dim=-2)
 
-                    # InterClips classification loss or global classification
-                    intercla_loss = self.interclips_classification_loss(pos, gt_labels, predictions['conf_feat'], idx_t)
-                    losses['CI'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * intercla_loss
-
+                if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS:
+                    pos_inds = torch.nonzero(conf_t_unfold > 0, as_tuple=False)
+                    # prepare one_hot
+                    class_target = torch.zeros_like(conf_data_unfold)
+                    class_target[pos_inds, conf_t_unfold[pos_inds] - 1] = 1
+                    # filter out those samples with IoU threshold between 0.4 and 0.5
+                    keep = conf_t_unfold != -1
+                    class_loss = sigmoid_focal_loss_jit(
+                        conf_data_unfold[keep],
+                        class_target[keep],
+                        alpha=self.cfg.MODEL.CLASS_HEADS.FOCAL_LOSS_ALPHA,
+                        gamma=self.cfg.MODEL.CLASS_HEADS.FOCAL_LOSS_GAMMA,
+                        reduction='sum')
+                    losses['C_focal'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * class_loss / len(pos_inds)
                 else:
-                    conf_data_unfold = torch.flatten(predictions['conf'], end_dim=-2)
-
-                    if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS:
-                        pos_inds = torch.nonzero(conf_t_unfold > 0, as_tuple=False)
-                        # prepare one_hot
-                        class_target = torch.zeros_like(conf_data_unfold)
-                        class_target[pos_inds, conf_t_unfold[pos_inds] - 1] = 1
-                        # filter out those samples with IoU threshold between 0.4 and 0.5
-                        keep = conf_t_unfold != -1
-                        class_loss = sigmoid_focal_loss_jit(
-                            conf_data_unfold[keep],
-                            class_target[keep],
-                            alpha=self.cfg.MODEL.CLASS_HEADS.FOCAL_LOSS_ALPHA,
-                            gamma=self.cfg.MODEL.CLASS_HEADS.FOCAL_LOSS_GAMMA,
-                            reduction='sum')
-                        losses['C_focal'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * class_loss / len(pos_inds)
-                    else:
-                        neg = self.select_neg_bboxes(conf_data_unfold, conf_t_unfold, ratio=3)
-                        keep = (pos_unfold + neg).gt(0)
-                        class_loss = F.cross_entropy(conf_data_unfold[keep], conf_t_unfold[keep], reduction='mean')
-                        losses['C'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * class_loss
+                    neg = self.select_neg_bboxes(conf_data_unfold, conf_t_unfold, ratio=3)
+                    keep = (pos_unfold + neg).gt(0)
+                    class_loss = F.cross_entropy(conf_data_unfold[keep], conf_t_unfold[keep], reduction='mean')
+                    losses['C'] = self.cfg.MODEL.CLASS_HEADS.LOSS_ALPHA * class_loss
 
             # --------------------------------- Tracking loss ------------------------------------------------
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
@@ -373,6 +345,7 @@ class MultiBoxLoss(nn.Module):
         return {'T': loss / bs * self.cfg.MODEL.TRACK_HEADS.LOSS_ALPHA}
 
     def track_gauss_loss(self, track_data, gt_masks, gt_boxes, gt_ids, pos, ids_t, idx_t):
+        from ..utils import generate_track_gaussian, compute_kl_div
         bs, T_out, track_h, track_w, t_dim = track_data.size()
         if idx_t.dim() == 2:
             idx_t = idx_t.reshape(bs, T_out, -1)

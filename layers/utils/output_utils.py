@@ -310,23 +310,4 @@ def display_fpn_outs(outs, img_ids=None, mask_det_file=None):
             plt.show()
 
 
-def display_conf_outs(tensor, img_id=0, mask_det_file=None):
-    mask_det_file = 'weights/COCO/weights_r50_m32_yolact_DIoU_012_640_768_randomclip_c5/'
-    tensor = torch.tanh(tensor)
-
-    for batch_idx in range(tensor.size(0)):
-        import matplotlib.pyplot as plt
-        h, w = tensor.size()[-2:]
-        arr_img = np.zeros([3 * h, 3 * w])
-        for idx in range(3):
-            for jdx in range(3):
-                cur_conf = tensor[batch_idx][24 * ((idx * 3) + jdx)]
-                arr_img[jdx * h:(jdx + 1) * h, idx * w:(idx + 1) * w] = ((cur_conf - cur_conf.min()) / cur_conf.max()).cpu().numpy()
-
-        plt.imshow(arr_img)
-        plt.axis('off')
-        plt.savefig(''.join([mask_det_file, 'out/', str(img_id), '_proto', '.png']))
-        plt.clf()
-
-
 

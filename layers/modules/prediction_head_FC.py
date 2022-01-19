@@ -32,32 +32,19 @@ class PredictionModule_FC(nn.Module):
                          from parent instead of from this module.
     """
 
-    def __init__(self, cfg, in_channels, deform_groups=1):
+    def __init__(self, cfg, in_channels, mask_dim=32, deform_groups=1):
         super().__init__()
 
         self.cfg = cfg
         self.in_channels = in_channels
         self.num_classes = cfg.DATASETS.NUM_CLASSES if cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS else cfg.DATASETS.NUM_CLASSES + 1
-        self.mask_dim = cfg.MODEL.MASK_HEADS.MASK_DIM
+        self.mask_dim = mask_dim
         self.track_dim = cfg.MODEL.TRACK_HEADS.TRACK_DIM
         self.deform_groups = deform_groups
         self.pred_scales = cfg.MODEL.BACKBONE.PRED_SCALES
-        self.num_priors = len(self.pred_scales)
+        self.num_priors = len(self.pred_scales[0])
         self.pred_conv_kernels = cfg.STMASK.FC.FCA_CONV_KERNELS
-
-        if cfg.MODEL.MASK_HEADS.USE_SIPMASK:
-            self.mask_dim = self.mask_dim * cfg.MODEL.MASK_HEADS.SIPMASK_HEAD
-        elif cfg.MODEL.MASK_HEADS.PROTO_COEFF_OCCLUSION:
-            self.mask_dim = self.mask_dim * 3
-        elif cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
-            self.mask_dim = self.mask_dim ** 2 * (cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS - 1) \
-                            + self.mask_dim * cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS + 1
-            if not cfg.MODEL.MASK_HEADS.DISABLE_REL_COORDS:
-                self.mask_dim += self.mask_dim * 2
-        else:
-            self.mask_dim = self.mask_dim
-
-        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE else 1
+        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
 
         # init single or multi kernel prediction modules
         self.bbox_layer, self.mask_layer = nn.ModuleList([]), nn.ModuleList([])
@@ -205,13 +192,13 @@ class PredictionModule_FC(nn.Module):
             # cat for all anchors
             preds['loc'] += [torch.cat(bbox, dim=-1).view(x.size(0), -1, 4*self.clip_frames)]
             if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
-                preds['centerness'] += [torch.cat(centerness_data, dim=1).view(x.size(0), -1, self.clip_frames).sigmoid()]
+                preds['centerness'] += [torch.cat(centerness_data, dim=1).sigmoid().view(x.size(0), -1, self.clip_frames)]
             if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
                 preds['conf'] += [torch.cat(conf, dim=-1).view(x.size(0), -1, self.num_classes)]
             else:
                 preds['stuff'] += [torch.cat(stuff, dim=-1).view(x.size(0), -1, 1)]
             if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-                preds['mask_coeff'] += [torch.tanh(torch.cat(mask, dim=-1).view(x.size(0), -1, self.mask_dim))]
+                preds['mask_coeff'] += [torch.cat(mask, dim=-1).tanh().view(x.size(0), -1, self.mask_dim)]
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
                 preds['track'] += [F.normalize(torch.cat(track, dim=-1).view(x.size(0), -1, self.track_dim), dim=-1)]
 
