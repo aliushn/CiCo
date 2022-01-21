@@ -4,21 +4,20 @@
 # TODO: you must additionally install nVidia drivers, eg. on Ubuntu linux
 # `apt install nvidia-driver-440` (change the 440 for whatever version you need/have).
 #
-name: cico-env
+name: cico
 
 channels:
   - conda-forge
   - pytorch
   - defaults
 dependencies:
-  - python==3.7
+  - python==3.8
   - pip
   - cython
-  - pytorch::torchvision ==0.7.0
-  - pytorch::pytorch ==1.6.0
-  - cudatoolkit
+  - pytorch=1.7.0
+  - torchvision=0.8.0
+  - cudatoolkit=11.0
   - cudnn
-  - pytorch::cuda100
   - matplotlib
   - git
   - pip:
@@ -26,5 +25,9 @@ dependencies:
     - pillow <7.0 # bug PILLOW_VERSION in torchvision, must be < 7.0 until torchvision is upgraded
     - pycocotools
     - PyQt5 # needed on KDE/Qt envs for matplotlib
+    - fvcore
+    - timm
+    - scipy
+    - einops
 
 

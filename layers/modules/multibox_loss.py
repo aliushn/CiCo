@@ -143,7 +143,7 @@ class MultiBoxLoss(nn.Module):
                     kdx = idx*T_out + jdx
 
                     # To define the positive and negative matcher
-                    if self.cfg.CiCo.MATCHER_CENTER:
+                    if self.cfg.CiCo.CPH.MATCHER_CENTER:
                         ind_range = range(self.clip_frames//2-1, self.clip_frames//2+1) if self.clip_frames % 2 == 0 \
                             else range(self.clip_frames//2-1, self.clip_frames//2+2)
                     else:

@@ -140,6 +140,30 @@ _C.MODEL.BACKBONE.SWINT.frozen_stages = -1
 _C.MODEL.BACKBONE.SWINT.use_checkpoint = False
 _C.MODEL.BACKBONE.SWINT.path = None
 
+# ---------------------------------------------------------------------------- #
+# SwinTransformer3D Backbone options
+# ---------------------------------------------------------------------------- #
+_C.MODEL.BACKBONE.SWINT3D = CN()
+_C.MODEL.BACKBONE.SWINT3D.engine = False
+_C.MODEL.BACKBONE.SWINT3D.patch_size = 4
+_C.MODEL.BACKBONE.SWINT3D.in_chans = 3
+_C.MODEL.BACKBONE.SWINT3D.embed_dim = 96
+_C.MODEL.BACKBONE.SWINT3D.depths = [2, 2, 6, 2]
+_C.MODEL.BACKBONE.SWINT3D.num_heads = [3, 6, 12, 24]
+_C.MODEL.BACKBONE.SWINT3D.window_size = 7
+_C.MODEL.BACKBONE.SWINT3D.mlp_ratio = 4.
+_C.MODEL.BACKBONE.SWINT3D.qkv_bias = True
+_C.MODEL.BACKBONE.SWINT.qk_scale = None
+_C.MODEL.BACKBONE.SWINT.drop_rate = 0.
+_C.MODEL.BACKBONE.SWINT.attn_drop_rate = 0.
+_C.MODEL.BACKBONE.SWINT.drop_path_rate = 0.2
+_C.MODEL.BACKBONE.SWINT.ape = False
+_C.MODEL.BACKBONE.SWINT.patch_norm = True
+_C.MODEL.BACKBONE.SWINT.out_indices = (0, 1, 2, 3)
+_C.MODEL.BACKBONE.SWINT.frozen_stages = -1
+_C.MODEL.BACKBONE.SWINT.use_checkpoint = False
+_C.MODEL.BACKBONE.SWINT.path = None
+
 
 # ---------------------------------------------------------------------------- #
 # FPN options

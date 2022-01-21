@@ -5,17 +5,22 @@ MODEL = dict(
         CONV_BODY='ResNet50',
         PATH='resnet50_coco_46.pth'),
 
-    PREDICTION_HEADS=dict(
-        CUBIC_MODE=True,
-        CUBIC_3D_MODE=True,
-        CUBIC_MODE_ON_PROTONET=True,
-        CIRCUMSCRIBED_BOXES=False)
 )
 
 CiCo = dict(
-    MATCHER_CENTER=False,
-    CPH_LAYER_KERNEL_SIZE=(1, 3, 3),
-    CPH_LAYER_STRIDE=(1, 1, 1))
+    ENGINE=True,
+
+    CPH=dict(
+        CUBIC_MODE=True,
+        LAYER_KERNEL_SIZE=(1, 3, 3),
+        LAYER_STRIDE=(1, 1, 1),
+        MATCHER_CENTER=False,
+        CIRCUMSCRIBED_BOXES=False),
+
+    CPN=dict(
+        CUBIC_MODE=True)
+
+)
 
 DATASETS = dict(
     TYPE='vis',

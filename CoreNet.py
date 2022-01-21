@@ -157,7 +157,7 @@ class CoreNet(nn.Module):
                 if model_dict[key].shape == state_dict[key].shape:
                     model_dict[key] = state_dict[key]
                 else:
-                    if not self.cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE:
+                    if not self.cfg.CiCo.ENGINE:
                         print('Size is different in pre-trained model and current model:', key)
                     else:
                         # Init weights from 2D to 3D
@@ -176,11 +176,8 @@ class CoreNet(nn.Module):
                             c_out, c_in, t, kh, kw = model_dict[key].size()
                             if [kh_p, kw_p] == [kh, kw] and c_out % c_out_p == 0:
                                 print('load 3D parameters from pre-trained models:', key)
-                                scale = model_dict[key].size(0)//state_dict[key].size(0)
-                                if t == 1:
-                                    model_dict[key] = state_dict[key].repeat(scale,1,1,1).unsqueeze(2).to(device)
-                                else:
-                                    model_dict[key] = state_dict[key].unsqueeze(2).repeat(scale,1,t,1,1).to(device)/t
+                                scale = c_out // c_out_p
+                                model_dict[key] = state_dict[key].unsqueeze(2).repeat(scale,1,t,1,1).to(device)/scale/t
                             else:
                                 print('Size is different in pre-trained model and current model:', key)
 
@@ -242,7 +239,7 @@ class CoreNet(nn.Module):
         """ Adapted from https://discuss.pytorch.org/t/how-to-train-with-frozen-batchnorm/12106/8 """
         for name, module in self.named_modules():
             if name.startswith('backbone') and isinstance(module, nn.BatchNorm2d):
-                print('Freeze BN of backbone: ', name)
+                # print('Freeze BN of backbone: ', name)
                 module.train() if enable else module.eval()
 
                 module.weight.requires_grad = enable

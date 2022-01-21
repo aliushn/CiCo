@@ -114,11 +114,11 @@ def train(cfg):
         print('Initializing weights based', bb_path)
         if cfg.DATASETS.TYPE == 'coco':
             print('Initializing weights based ImageNet ...')
-            net.init_weights(backbone_path='weights/pretrained_models_coco/' + bb_path,
+            net.init_weights(backbone_path='outputs/pretrained_models/' + bb_path,
                              local_rank=args.local_rank)
         else:
             print('Initializing weights based COCO ...')
-            net.init_weights_coco(backbone_path='weights/pretrained_models_coco/' + bb_path,
+            net.init_weights_coco(backbone_path='outputs/pretrained_models/' + bb_path,
                                   local_rank=args.local_rank)
 
     # loss counters

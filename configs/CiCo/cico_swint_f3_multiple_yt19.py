@@ -10,21 +10,26 @@ MODEL = dict(
     FPN=dict(
         NUM_FEATURES=256),
 
-    PREDICTION_HEADS=dict(
-        CUBIC_MODE=True,
-        CUBIC_3D_MODE=True,
-        CUBIC_MODE_ON_PROTONET=True,
-        CIRCUMSCRIBED_BOXES=False),
-
     MASK_HEADS=dict(
         TRAIN_MASKS=True,
         PROTO_NET=[(192, 3, 1), (192, 3, 1), (192, 3, 1), (None, -2, {})])
 )
 
 CiCo = dict(
-    MATCHER_CENTER=False,
-    CPH_LAYER_KERNEL_SIZE=(1, 3, 3),
-    CPH_LAYER_STRIDE=(1, 1, 1))
+    ENGINE=True,
+
+    CPH=dict(
+        CUBIC_MODE=True,
+        LAYER_KERNEL_SIZE=(1, 3, 3),
+        LAYER_STRIDE=(1, 1, 1),
+        MATCHER_CENTER=False,
+        CIRCUMSCRIBED_BOXES=False),
+
+    CPN=dict(
+        CUBIC_MODE=True)
+
+)
+
 
 DATASETS = dict(
     TYPE='vis',

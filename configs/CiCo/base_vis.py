@@ -3,7 +3,6 @@ _base_ = ['configs/_base_/models/r50_base.yaml']
 MODEL = dict(
     PREDICTION_HEADS=dict(
         USE_DIoU=True,
-        CUBIC_MODE=False,
         USE_PREDICTION_MATCHING=False),
 
     BOX_HEADS=dict(

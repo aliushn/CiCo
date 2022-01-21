@@ -44,6 +44,7 @@ layers/functions/track_TF_within_clip.py
 web/
 cocoapi/
 weights/
+outputs/
 external/
 results/ 
 others/
