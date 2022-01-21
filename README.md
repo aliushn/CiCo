@@ -53,6 +53,6 @@ An offical code repository for our paper submitted in CVPR2022
 
 ### Training
    ```Shell
-   # Trains CiCo with 4 GPUs
+   # Train CiCo with a 3-frame clip on 4 GPUs
    CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py --config=configs/CiCo/cico_r50_f3_multiple_yt19.py
    ```
