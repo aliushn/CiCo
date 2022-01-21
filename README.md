@@ -1,7 +1,8 @@
 # CiCo
 An offical code repository for our paper submitted in CVPR2022
 - Clip-in Clip-out: An Alignment-free One-stage Video Instance Segmentation Approach 
-
+   
+  ![](https://github.com/MinghanLi/CiCo/blob/main/imgs/CiCo.png)
   ![](https://github.com/MinghanLi/CiCo/blob/main/imgs/cico_entire.png)
  
 # Installation
