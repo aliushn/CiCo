@@ -224,17 +224,17 @@ class Detect(object):
             masks = candidate['mask'].gt(0.5).float()
             T, _, h, w = masks.size()
             flag = masks.sum(dim=[-1, -2]) > 5
-            flag = flag.unsqueeze(-1) * flag.unsqueeze(-2)  # [T, n_dets, n_dets]
+            flag = flag.unsqueeze(-1) & flag.unsqueeze(-2)  # [T, n_dets, n_dets]
 
-            box_iou = (box_iou_ori * flag).sum(0) / flag.sum(0)
-            box_iou = torch.stack([box_iou[idx[c]][:, idx[c]] for c in range(idx.size(0))], dim=0)
+            box_iou = (box_iou_ori * flag).sum(0) / torch.clamp(flag.sum(0), min=1)
+            box_iou = torch.stack([box_iou[idx[c]][:, idx[c]] for c in range(idx.size(0))])
             iou = 0.5 * box_iou + 0.5 * box_cir_iou
 
             if self.nms_with_miou:
                 # In case of out of memory when the length of the clip T >= 5
                 miou_ori = torch.stack([mask_iou(masks[i], masks[i]) for i in range(masks.size(0))])
-                miou_ori = (miou_ori * flag).sum(0) / flag.sum(0)
-                m_iou = torch.stack([miou_ori[idx[c]][:, idx[c]] for c in range(idx.size(0))], dim=0)
+                miou_ori = (miou_ori * flag).sum(0) / torch.clamp(flag.sum(0), min=1)
+                m_iou = torch.stack([miou_ori[idx[c]][:, idx[c]] for c in range(idx.size(0))])
                 iou = iou * 0.5 + m_iou * 0.5
 
         iou.triu_(diagonal=1)

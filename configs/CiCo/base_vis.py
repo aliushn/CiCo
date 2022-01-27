@@ -58,7 +58,7 @@ TEST = dict(
     NMS_WITH_BIoU=True,
     NMS_WITH_MIoU=True)
 
-OUTPUT_DIR = 'weights/'
+OUTPUT_DIR = 'outputs/'
 NAME = 'base_VIS'
 
 

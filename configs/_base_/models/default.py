@@ -108,7 +108,7 @@ _C.MODEL.BACKBONE = CN()
 _C.MODEL.BACKBONE.CONV_BODY = 'ResNet101'
 _C.MODEL.BACKBONE.PATH = 'resnet101_reducedfc.pth'
 _C.MODEL.BACKBONE.TYPE = 'ResNetBackbone'
-_C.MODEL.BACKBONE.ARGS = ([3, 4, 6, 3]),
+_C.MODEL.BACKBONE.ARGS = ([3, 4, 6, 3], )
 _C.MODEL.BACKBONE.SELECTED_LAYERS = list(range(2, 8))
 _C.MODEL.BACKBONE.PRED_SCALES = [[24], [48], [96], [192], [384]]
 _C.MODEL.BACKBONE.PRED_ASPECT_RATIOS = [[1, 0.5, 2], [1, 0.5, 2], [1, 0.5, 2], [1, 0.5, 2], [1, 0.5, 2]]
@@ -497,6 +497,7 @@ _C.TEST.NMS_IoU_THRESH = 0.5
 _C.TEST.NMS_CONF_THRESH = 0.1
 _C.TEST.NMS_WITH_BIoU = True
 _C.TEST.NMS_WITH_MIoU = False
+_C.TEST.OVERLAP_FRAMES = 0
 
 
 # ---------------------------------------------------------------------------- #

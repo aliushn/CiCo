@@ -412,6 +412,7 @@ def setup_eval(epoch):
     eval_script.parse_args(['--batch_size=' + str(cfg.TEST.IMS_PER_BATCH),
                             '--eval_types=' + eval_type,
                             '--epoch=' + str(epoch),
+                            '--overlap_frames' + str(cfg.TEST.OVERLAP_FRAMES),
                             '--save_folder=' + str(cfg.OUTPUT_DIR)])
 
 

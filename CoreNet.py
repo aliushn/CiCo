@@ -59,7 +59,7 @@ class CoreNet(nn.Module):
         # ---------------- Build track head ----------------
         if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
             if cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-                self.use_3D = True if cfg.MODEL.PREDICTION_HEADS.CUBIC_MODE_ON_PROTONET else False
+                self.use_3D = True if cfg.MODEL.CiCo.CPN.CUBIC_MODE else False
                 track_arch = [(self.fpn_num_features, 3, 1)] * 2 + [(cfg.MODEL.TRACK_HEADS.TRACK_DIM, 1, 0)]
                 self.track_conv, _ = make_net(self.fpn_num_features, track_arch, use_3D=self.use_3D,
                                               norm_type='batch_norm', include_last_relu=False)

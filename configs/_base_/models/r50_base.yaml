@@ -2,10 +2,10 @@ MODEL:
   BACKBONE:
     CONV_BODY: 'ResNet50'
     PATH: 'resnet50-19c8e357.pth'
-    ARGS: ([3, 4, 6, 3]),
-    SELECTED_LAYERS: [1, 2, 3]
-    PRED_SCALES: [[24], [48], [96], [192], [384]]
-    PRED_ASPECT_RATIOS: [[1, 0.5, 2], [1, 0.5, 2], [1, 0.5, 2], [1, 0.5, 2], [1, 0.5, 2]]
+    SELECTED_LAYERS: [ 1, 2, 3 ]
+    PRED_SCALES: [ [ 24 ], [ 48 ], [ 96 ], [ 192 ], [ 384 ] ]
+    PRED_ASPECT_RATIOS: [ [ 1, 0.5, 2 ], [ 1, 0.5, 2 ], [ 1, 0.5, 2 ], [ 1, 0.5, 2 ], [ 1, 0.5, 2 ] ]
+    ARGS: ([3, 4, 6, 3], )
 
   FPN:
     NUM_FEATURES: 256

@@ -104,23 +104,24 @@ def prep_display(dets_out, imgs, img_meta=None, undo_transform=True, mask_alpha=
         imgs_gpu = imgs / 255.0
 
     # torch.cuda.synchronize()
-    num_dets_to_consider = min(args.top_k, dets_out['box'].size(1))
-    scores = dets_out['score'][:args.top_k].view(-1).detach().cpu().numpy()
-    color_type = dets_out['box_ids'].view(-1)
-    num_tracked_mask = dets_out['tracked_mask'] if 'tracked_mask' in dets_out.keys() else None
-    boxes_cir = dets_out['box_cir'] if 'box_cir' in dets_out.keys() else None
-
-    for t in range(imgs_gpu.size(0)):
-        img_gpu = imgs_gpu[t]
-        boxes = dets_out['box'][t, :args.top_k].detach().cpu().numpy()
-        if 'mask' in dets_out.keys():
-            masks = dets_out['mask'][t, :args.top_k]
-
-        if num_dets_to_consider == 0:
-            # No detections found so just output the original image
+    if dets_out['box'].nelement() == 0:
+        # No detections found so just output the original image
+        for t in range(imgs_gpu.size(0)):
+            img_gpu = imgs_gpu[t]
             img_numpy = (img_gpu * 255).byte().cpu().numpy()
+    else:
+        num_dets_to_consider = min(args.top_k, dets_out['box'].size(1))
+        scores = dets_out['score'][:args.top_k].view(-1).detach().cpu().numpy()
+        color_type = dets_out['box_ids'].view(-1)
+        num_tracked_mask = dets_out['tracked_mask'] if 'tracked_mask' in dets_out.keys() else None
+        boxes_cir = dets_out['box_cir'] if 'box_cir' in dets_out.keys() else None
 
-        else:
+        for t in range(imgs_gpu.size(0)):
+            img_gpu = imgs_gpu[t]
+            boxes = dets_out['box'][t, :args.top_k].detach().cpu().numpy()
+            if 'mask' in dets_out.keys():
+                masks = dets_out['mask'][t, :args.top_k]
+
             # First, draw the masks on the GPU where we can do it really fast
             # Beware: very fast but possibly unintelligible mask-drawing code ahead
             # I wish I had access to OpenGL or Vulkan but alas, I guess Pytorch tensor operations will have to suffice
@@ -204,10 +205,10 @@ def prep_display(dets_out, imgs, img_meta=None, undo_transform=True, mask_alpha=
                         cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness,
                                     cv2.LINE_AA)
 
-        plt.imshow(img_numpy)
-        plt.axis('off')
-        plt.savefig(''.join([root_dir, '/', str(img_meta[t]['frame_id']), '.jpg']), bbox_inches='tight', pad_inches=0)
-        plt.clf()
+    plt.imshow(img_numpy)
+    plt.axis('off')
+    plt.savefig(''.join([root_dir, '/', str(img_meta[t]['frame_id']), '.jpg']), bbox_inches='tight', pad_inches=0)
+    plt.clf()
 
 
 def temp(targets, h, w, img_metas):

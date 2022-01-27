@@ -61,7 +61,7 @@ class Bottleneck(nn.Module):
 class ResNetBackbone(nn.Module):
     """ Adapted from torchvision.models.resnet """
 
-    def __init__(self, layer, dcn_layers=[0, 0, 0, 0], dcn_interval=1, atrous_layers=[], stride_layers=[1, 2, 2, 2],
+    def __init__(self, layer, dcn_layers=[0,0,0,0], dcn_interval=1, atrous_layers=[], stride_layers=[1, 2, 2, 2],
                  block=Bottleneck, frozen_stages=-1, norm_layer=nn.BatchNorm2d):
         super().__init__()
 
