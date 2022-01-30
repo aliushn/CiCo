@@ -5,7 +5,7 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 from .augmentations_vis import BaseTransform_vis
-from .augmentations_coco import BaseTransform_coco
+from .augmentations_coco import BaseTransform_coco, SSDAugmentation
 from .augmentations_vid import BaseTransform_vid
 import torch.nn.functional as F
 
@@ -218,16 +218,18 @@ def get_dataset(data_type, data_name, input, num_clip_frame, num_clips=1, infere
                                     resize_gt=resize_gt,
                                     pad_gt=pad_gt))
     elif data_type == 'coco':
+        transform = BaseTransform_coco
         dataset = COCODetection(image_path=dataset_config['img_prefix'],
                                 info_file=dataset_config['ann_file'],
-                                transform=BaseTransform_coco(
+                                transform=transform(
                                     min_size=min_size,
                                     max_size=max_size,
                                     Flip=flip,
                                     MS_train=MS_train,
                                     backbone_transform=backbone_transform,
                                     resize_gt=resize_gt,
-                                    pad_gt=pad_gt))
+                                    pad_gt=pad_gt)
+                                )
     else:
         RuntimeError("Dataset not available: {}".format(data_name))
 

@@ -63,7 +63,7 @@ class LincombMaskLoss(object):
                             masks_gt_cur_intraclass[m_idx][intraclass_objects] = 1
 
                     mask_t = masks_gt_cur[idx_t_cur]  # [n_pos, n_frames, mask_h, mask_w]
-                    mask_t_intraclass = masks_gt_cur_intraclass[idx_t_cur]
+                    # mask_t_intraclass = masks_gt_cur_intraclass[idx_t_cur]
 
                     # if self.cfg.MODEL.MASK_HEADS.PROTO_CROP or self.cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
                     # Only use circumscribed boxes to crop mask
@@ -91,8 +91,8 @@ class LincombMaskLoss(object):
                         pred_masks = pred_masks.reshape(-1, n_frames, pred_masks.size(-2), pred_masks.size(-1))
                     else:
                         fpn_levels = prior_levels[i][pos_cur.view(-1)]
-                        pred_masks = self.net.ProtoNet.DynamicMaskHead(proto_data[i].permute(2, 3, 0, 1).contiguous(),
-                                                                       mask_coeff_cur, boxes_cur, fpn_levels)
+                        pred_masks = self.net.DynamicMaskHead(proto_data[i].permute(2, 3, 0, 1).contiguous(),
+                                                              mask_coeff_cur, boxes_cur, fpn_levels)
                         if not self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF:
                             pred_masks = crop(pred_masks.permute(2, 3, 1, 0).contiguous(), boxes_cur_expand)
                             pred_masks = pred_masks.permute(3, 2, 0, 1).contiguous()

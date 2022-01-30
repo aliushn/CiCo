@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=1 python eval.py --config=configs/CiCo/cico_r50_f5_multiple_yt19.py  --trained_model=outputs/YTVIS2019/cico_r50_f5_multiple_yt19/cico_r50_f5_multiple_yt19_wofbn_11_50000.pth --eval_data=valid --batch_size=1 --overlap_frames=0 --display

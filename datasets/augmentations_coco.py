@@ -149,25 +149,19 @@ class Resize(object):
     def __call__(self, image, masks, boxes, labels=None):
         img_h, img_w, _ = image.shape
         if self.MS_train:
-            size = np.random.randint(min(self.min_size), self.max_size)
+            max_size = self.max_size if len(self.min_size) == 1 else max(self.min_size)
+            size = np.random.randint(min(self.min_size), max_size)
             size = int(((size-1) // 32 + 1) * 32)
         else:
-            size = self.max_size
+            size = self.min_size if isinstance(self.min_size, int) else max(self.min_size)
         # resize short edges
         if img_w < img_h:
-            height = int(img_h * (size / img_w))
-            if height > int(self.max_size*1.5):
-                width = int(self.max_size*1.5/height * size)
-                height = int(self.max_size*1.5)
-            else:
-                width = size
+            height = min(int(img_h * (size / img_w)), self.max_size)
+            width = int(img_w * (height / img_h))
+
         else:
-            width = int(img_w * (size / img_h))
-            if width > int(self.max_size*1.5):
-                height = int(self.max_size*1.5/width * size)
-                width = int(self.max_size*1.5)
-            else:
-                height = size
+            width = min(int(img_w * (size / img_h)), self.max_size)
+            height = int(img_h * (width / img_w))
         image = cv2.resize(image, (width, height))
         
         if self.resize_gt:
@@ -673,7 +667,7 @@ class SSDAugmentation(object):
     """ Transform to be used when training. """
 
     def __init__(self, backbone_transform, min_size, max_size, MS_train=True, mean=MEANS, std=STD,
-                 augment_expand=True, augment_random_flip=True):
+                 augment_expand=True, Flip=True, resize_gt=True, pad_gt=True):
         self.augment = Compose([
             ConvertFromInts(),
             # if cfg.augment_expand = True, it is easier to compile
@@ -684,10 +678,10 @@ class SSDAugmentation(object):
             enable_if(augment_expand, ToPercentCoords()),
             # enable_if(cfg.augment_random_sample_crop, RandomSampleCrop()),
             # enable_if(cfg.augment_random_mirror, RandomMirror()),
-            enable_if(augment_random_flip, RandomFlip()),
+            enable_if(Flip, RandomFlip()),
             # enable_if(cfg.augment_random_rot90, RandomRot90()),
-            Resize(min_size, max_size,  MS_train=MS_train),
-            # Pad(img_scales, mean, MS_train=MS_train),
+            Resize(min_size, max_size,  MS_train=MS_train, resize_gt=resize_gt),
+            # Pad(img_scales, mean),
             # ToPercentCoords(),
             BackboneTransform(backbone_transform, mean, std, 'BGR')
         ])

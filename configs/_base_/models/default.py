@@ -320,6 +320,7 @@ _C.CiCo = CN()
 _C.CiCo.ENGINE = False
 _C.CiCo.CPH = CN()
 _C.CiCo.CPH.MATCHER_CENTER = False
+_C.CiCo.CPH.TOWER_CUBIC_MODE = False
 _C.CiCo.CPH.CUBIC_MODE = False
 _C.CiCo.CPH.LAYER_KERNEL_SIZE = (3, 3, 3)
 _C.CiCo.CPH.LAYER_PADDING = (0, 1, 1)
@@ -498,6 +499,8 @@ _C.TEST.NMS_CONF_THRESH = 0.1
 _C.TEST.NMS_WITH_BIoU = True
 _C.TEST.NMS_WITH_MIoU = False
 _C.TEST.OVERLAP_FRAMES = 0
+
+_C.display = False
 
 
 # ---------------------------------------------------------------------------- #

@@ -879,7 +879,7 @@ def evaluate(cfg, net: CoreNet, train_mode=False, epoch=None, iteration=None):
 
             with timer.env('Load Data'):
                 imgs, img_metas, (gt_boxes, gt_labels, gt_masks, num_crowds) = data_batch
-                imgs = ImageList_from_tensors(imgs, size_divisibility=32, pad_h=cfg.INPUT.MIN_SIZE_TEST, pad_w=cfg.INPUT.MAX_SIZE_TEST)
+                imgs = ImageList_from_tensors(imgs, size_divisibility=32)
                 gt_boxes = [torch.from_numpy(boxes).cuda() for boxes in gt_boxes]
                 gt_labels = [torch.from_numpy(labels).cuda() for labels in gt_labels]
                 gt_masks = [torch.from_numpy(masks).cuda() for masks in gt_masks]
@@ -1026,6 +1026,7 @@ if __name__ == '__main__':
         print('Config not specified. Parsed %s from the file name.\n' % args.config)
         cfg = load_config(args.config)
     cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, cfg.NAME)
+    cfg.display = args.display
     global class_names
     class_names = get_dataset_config(cfg.DATASETS.TRAIN, cfg.DATASETS.TYPE)['class_names']
 

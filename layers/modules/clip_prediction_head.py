@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from itertools import product
 from math import sqrt
-from ..visualization_temporal import display_cubic_weights, display_pixle_similarity
+# from ..visualization_temporal import display_cubic_weights, display_pixle_similarity
 
 
 class ClipPredictionModule(nn.Module):
@@ -44,29 +44,29 @@ class ClipPredictionModule(nn.Module):
         self.num_priors = len(self.pred_aspect_ratios[0]) * len(self.pred_scales[0])
         self.deform_groups = deform_groups
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-        self.use_cico = cfg.CiCo.ENGINE
 
         # generate anchors
         # self.img_h = ((max(cfg.INPUT.MIN_SIZE_TRAIN)-1)//32+1) * 32
         # self.img_w = cfg.INPUT.MAX_SIZE_TRAIN
-        # layers_idx = range(min(cfg.MODEL.BACKBONE.SELECTED_LAYERS), min(cfg.MODEL.BACKBONE.SELECTED_LAYERS)+len(self.pred_scales))
-        # self.priors_list, self.prior_levels_list = [], []
+        # layers_idx = range(min(cfg.MODEL.BACKBONE.SELECTED_LAYERS), min(cfg.MODEL.BACKBONE.SELECTED_LAYERS)
+        #                    + len(self.pred_scales))
+        # self.priors, self.prior_levels = [], []
         # for idx, ldx in enumerate(layers_idx):
         #     priors, prior_levels = self.make_priors(idx, self.img_h//(2**(ldx+2)), self.img_w//(2**(ldx+2)))
-        #     self.priors_list += [priors]
-        #     self.prior_levels_list += [prior_levels]
-        # self.priors_list = torch.cat(self.priors_list, dim=1).cpu()
-        # self.prior_levels_list = torch.cat(self.prior_levels_list, dim=1).cpu()
+        #     self.priors += [priors]
+        #     self.prior_levels += [prior_levels]
+        # self.priors = torch.cat(self.priors, dim=1).cpu()
+        # self.prior_levels = torch.cat(self.prior_levels, dim=1).cpu()
 
         if cfg.CiCo.CPH.CUBIC_MODE:
-            conv = nn.Conv3d
+            self.conv_type, conv = 'conv3d', nn.Conv3d
             if self.cfg.CiCo.CPH.MATCHER_CENTER:
                 kernel_size, padding, stride = (self.clip_frames, 3, 3), (0, 1, 1), (1, 1, 1)
             else:
                 kernel_size, padding = cfg.CiCo.CPH.LAYER_KERNEL_SIZE, cfg.CiCo.CPH.LAYER_PADDING
                 stride = cfg.CiCo.CPH.LAYER_STRIDE
         else:
-            conv = nn.Conv2d
+            self.conv_type, conv = 'conv2d', nn.Conv2d
             kernel_size, padding, stride = (3, 3), (1, 1), (1, 1)
 
         if cfg.MODEL.MASK_HEADS.TRAIN_MASKS and cfg.CiCo.CPH.CIRCUMSCRIBED_BOXES:
@@ -93,13 +93,14 @@ class ClipPredictionModule(nn.Module):
                                    kernel_size=kernel_size, padding=padding, stride=stride)
 
         # What is this ugly lambda doing in the middle of all this clean prediction module code?
+        self.conv_tower_type, conv_tower = ('conv3d', nn.Conv3d) if cfg.CiCo.CPH.TOWER_CUBIC_MODE else ('conv2d', nn.Conv2d)
         def make_extra(num_layers, in_channels):
             if num_layers == 0:
                 return lambda x: x
             else:
                 # Looks more complicated than it is. This just creates an array of num_layers alternating conv-relu
                 return nn.Sequential(*sum([[
-                    conv(in_channels, in_channels, kernel_size=3, padding=1),
+                    conv_tower(in_channels, in_channels, kernel_size=3, padding=1),
                     nn.ReLU(inplace=True)
                 ] for _ in range(num_layers)], []))
 
@@ -132,73 +133,58 @@ class ClipPredictionModule(nn.Module):
             preds['conf'] = []
 
         for idx in range(len(fpn_outs)):
-            if self.use_cico:
-                _, c, h, w = fpn_outs[idx].size()
-                fpn_outs_clip = fpn_outs[idx].reshape(-1, self.clip_frames, c, h, w)
-                x = fpn_outs_clip.permute(0, 2, 1, 3, 4).contiguous()
-            else:
-                x = fpn_outs[idx]
-
-            conv_h, conv_w = x.size()[-2:]
-            priors, prior_levels = self.make_priors(idx, conv_h, conv_w, x.device)
+            _, c, conv_h, conv_w = fpn_outs[idx].size()
+            n_proposals = conv_h * conv_w * self.num_priors
+            priors, prior_levels = self.make_priors(idx, conv_h, conv_w, fpn_outs[idx].device)
             preds['priors'] += [priors]
             preds['prior_levels'] += [prior_levels]
 
-            bs = x.size(0)
+            x = fpn_outs[idx]
+            x = self.unfold_tensor(x) if self.conv_tower_type == 'conv3d' else x
+
             # bounding boxes regression
-            n_proposals = conv_h*conv_w*self.num_priors
             bbox_x = self.bbox_extra(x)
-            bbox = self.bbox_layer(bbox_x)
-            if self.use_cico:
-                bs *= bbox.size(2)
-                bbox = bbox.permute(0, 2, 3, 4, 1).contiguous()
-            else:
-                bbox = bbox.permute(0, 2, 3, 1).contiguous()
+            bbox_x = self.unfold_tensor(bbox_x) if self.conv_type != self.conv_tower_type else bbox_x
+            bbox = self.permute_channels(self.bbox_layer(bbox_x))
+            bs = bbox.size(0) * bbox.size(1) if bbox.dim() == 5 else bbox.size(0)
             preds['loc'] += [bbox.reshape(bs, n_proposals, -1)]
 
             # Centerness for Boxes
             if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
-                centerness = self.centerness_layer(bbox_x).sigmoid()
-                if self.use_cico:
-                    centerness = centerness.permute(0, 2, 3, 4, 1).contiguous()
-                else:
-                    centerness = centerness.permute(0, 2, 3, 1).contiguous()
+                centerness = self.permute_channels(self.centerness_layer(bbox_x).sigmoid())
                 preds['centerness'] += [centerness.reshape(bs, n_proposals, -1)]
 
             # Classification
             if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
                 conf_x = self.conf_extra(x)
-                conf = self.conf_layer(conf_x)
-                if self.use_cico:
-                    conf = conf.permute(0, 2, 3, 4, 1).contiguous()
-                else:
-                    conf = conf.permute(0, 2, 3, 1).contiguous()
+                conf_x = self.unfold_tensor(conf_x) if self.conv_type != self.conv_tower_type else conf_x
+                conf = self.permute_channels(self.conf_layer(conf_x))
                 preds['conf'] += [conf.reshape(bs, n_proposals, -1)]
 
             # Mask coefficients
             if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-                mask = self.mask_layer(bbox_x).tanh()
-                if self.use_cico:
-                    mask = mask.permute(0, 2, 3, 4, 1).contiguous()
-                else:
-                    mask = mask.permute(0, 2, 3, 1).contiguous()
+                mask = self.permute_channels(self.mask_layer(bbox_x).tanh())
                 # Activation function is Tanh
                 preds['mask_coeff'] += [mask.reshape(bs, n_proposals, -1)]
 
             # Tracking
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
                 track_x = self.track_extra(x)
-                track = self.track_layer(track_x)
-                if self.use_cico:
-                    track = track.permute(0, 2, 3, 4, 1).contiguous()
-                else:
-                    track = track.permute(0, 2, 3, 1).contiguous()
+                track_x = self.unfold_tensor(track_x) if self.conv_type != self.conv_tower_type else track_x
+                track = self.permute_channels(self.track_layer(track_x))
                 preds['track'] += [F.normalize(track.reshape(bs, n_proposals, -1), dim=-1)]
 
         for k, v in preds.items():
             preds[k] = torch.cat(v, 1)
 
         return preds
+
+    def unfold_tensor(self, x):
+        _, c, h, w = x.size()
+        return x.reshape(-1, self.clip_frames, c, h, w).transpose(1, 2)
+
+    def permute_channels(self, x):
+        return x.permute(0, 2, 3, 1).contiguous() if x.dim() == 4 else x.permute(0, 2, 3, 4, 1).contiguous()
 
     def make_priors(self, idx, conv_h, conv_w, device=None):
         """ Note that priors are [x,y,width,height] where (x,y) is the center of the box. """

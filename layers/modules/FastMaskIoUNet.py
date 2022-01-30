@@ -3,12 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .make_net import make_net
 
-try:
-    from dcn_v2 import DCN, DCNv2
-except ImportError:
-    def DCN(*args, **kwdargs):
-        raise Exception('DCN could not be imported. If you want to use YOLACT++ models, compile DCN. Check the README for instructions.')
-
 # As of March 10, 2019, Pytorch DataParallel still doesn't support JIT Script Modules
 use_jit = torch.cuda.device_count() <= 1
 if not use_jit:

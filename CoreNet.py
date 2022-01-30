@@ -4,7 +4,7 @@ import numpy as np
 from utils import timer
 from collections import defaultdict
 from layers.backbones import construct_backbone, SwinTransformer
-from layers.modules import PredictionModule_FC, ClipPredictionModule, ClipProtoNet, make_net, FPN, T2S_Head
+from layers.modules import PredictionModule_FC, ClipPredictionModule, ClipProtoNet, make_net, FPN, T2S_Head, DynamicMaskHead
 from layers.functions import Detect, Track_TF
 
 # This is required for Pytorch 1.0.1 on Windows to initialize Cuda on some driver versions.
@@ -14,7 +14,7 @@ prior_cache = defaultdict(lambda: None)
 
 
 class CoreNet(nn.Module):
-    def __init__(self, cfg, display=False):
+    def __init__(self, cfg):
         super().__init__()
 
         self.cfg = cfg
@@ -37,24 +37,24 @@ class CoreNet(nn.Module):
         self.mask_dim = cfg.MODEL.MASK_HEADS.MASK_DIM
         if cfg.MODEL.MASK_HEADS.USE_SIPMASK:
             self.mask_dim = self.mask_dim * cfg.MODEL.MASK_HEADS.SIPMASK_HEAD
-        elif cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
-            self.mask_dim = self.mask_dim ** 2 * (cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS - 1) \
-                            + self.mask_dim * cfg.MODEL.MASK_HEADS.DYNAMIC_MASK_HEAD_LAYERS + 1
-            if not cfg.MODEL.MASK_HEADS.DISABLE_REL_COORDS:
-                self.mask_dim += cfg.MODEL.MASK_HEADS.MASK_DIM
         if cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
             self.ProtoNet = ClipProtoNet(cfg, self.fpn_num_features, self.mask_dim)
+            if cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
+                self.DynamicMaskHead = DynamicMaskHead(cfg)
+                self.mask_coeff_dim = self.DynamicMaskHead.num_gen_params
+            else:
+                self.mask_coeff_dim = self.mask_dim
 
         # ------- Build multi-scales prediction head  ------------
         self.num_priors = len(cfg.MODEL.BACKBONE.PRED_SCALES[0]) * len(cfg.MODEL.BACKBONE.PRED_ASPECT_RATIOS[0])
         # prediction layers for loc, conf, mask, track
         if cfg.STMASK.FC.USE_FCA:
-            self.prediction_layers = PredictionModule_FC(cfg, self.fpn_num_features, self.mask_dim, deform_groups=1)
+            self.prediction_layers = PredictionModule_FC(cfg, self.fpn_num_features, self.mask_coeff_dim, deform_groups=1)
         else:
-            self.prediction_layers = ClipPredictionModule(cfg, self.fpn_num_features, self.mask_dim, deform_groups=1)
+            self.prediction_layers = ClipPredictionModule(cfg, self.fpn_num_features, self.mask_coeff_dim, deform_groups=1)
 
         # ---------------- Build detection ----------------
-        self.Detect = Detect(cfg, display)
+        self.Detect = Detect(cfg)
 
         # ---------------- Build track head ----------------
         if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
@@ -239,7 +239,7 @@ class CoreNet(nn.Module):
         """ Adapted from https://discuss.pytorch.org/t/how-to-train-with-frozen-batchnorm/12106/8 """
         for name, module in self.named_modules():
             if name.startswith('backbone') and isinstance(module, nn.BatchNorm2d):
-                # print('Freeze BN of backbone: ', name)
+                print('Freeze BN of backbone: ', name)
                 module.train() if enable else module.eval()
 
                 module.weight.requires_grad = enable
@@ -279,7 +279,7 @@ class CoreNet(nn.Module):
 
         return fpn_outs, pred_outs
 
-    def forward(self, x, img_meta=None):
+    def forward(self, x, img_meta=None, use_cross_class_nms=False):
         batch_size, c, h, w = x.size()
         fpn_outs, pred_outs = self.forward_single(x, img_meta)
         # Expand data for nn.DataParallel
@@ -298,7 +298,7 @@ class CoreNet(nn.Module):
 
             # Detection
             with timer.env('Detect'):
-                pred_outs_after_NMS = self.Detect(self, pred_outs)
+                pred_outs_after_NMS = self.Detect(self, pred_outs, use_cross_class_nms)
 
             # track instances frame-by-frame
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:

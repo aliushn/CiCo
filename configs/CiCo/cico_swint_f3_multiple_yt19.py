@@ -19,6 +19,7 @@ CiCo = dict(
     ENGINE=True,
 
     CPH=dict(
+        TOWER_CUBIC_MODE=True,
         CUBIC_MODE=True,
         LAYER_KERNEL_SIZE=(1, 3, 3),
         LAYER_STRIDE=(1, 1, 1),
@@ -48,5 +49,5 @@ TEST = dict(
     IMS_PER_BATCH=1,
     NUM_CLIP_FRAMES=3)
 
-OUTPUT_DIR = 'weights/YTVIS2019/'
+OUTPUT_DIR = 'outputs/YTVIS2019/'
 NAME = 'cico_swint_f3_multiple_yt19'

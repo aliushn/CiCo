@@ -1,8 +1,11 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/CiCo/base_vis.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/_base_/models/swint_base.yaml',
+          'configs/CiCo/base_vis.py']
 
 MODEL = dict(
     BACKBONE=dict(
-        PATH='swint_base_coco_dynamic_mask_head_300_576_21_420000.pth'),
+        SWINT=dict(
+            path='swint_base_coco_dynamic_mask_head_300_576_21_420000.pth')
+    ),
 
     MASK_HEADS=dict(
         TRAIN_MASKS=True,
@@ -16,9 +19,10 @@ CiCo = dict(
     ENGINE=True,
 
     CPH=dict(
+        TOWER_CUBIC_MODE=False,
         MATCHER_CENTER=False,
         CUBIC_MODE=True,
-        LAYER_KERNEL_SIZE=(1, 3, 3),
+        LAYER_KERNEL_SIZE=(3, 3, 3),
         LAYER_STRIDE=(1, 1, 1),
         CIRCUMSCRIBED_BOXES=False),
 
@@ -36,13 +40,13 @@ DATASETS = dict(
     TEST='test_YouTube_VOS2019_dataset')
 
 SOLVER = dict(
-    IMS_PER_BATCH=4,
-    NUM_CLIP_FRAMES=3,
+    IMS_PER_BATCH=2,
+    NUM_CLIP_FRAMES=5,
     NUM_CLIPS=1)
 
 TEST = dict(
     IMS_PER_BATCH=1,
-    NUM_CLIP_FRAMES=3)
+    NUM_CLIP_FRAMES=5)
 
-OUTPUT_DIR = 'weights/YTVIS2019/'
-NAME = 'cico_swint_f3_dynamic_mask_head_multiple_yt19'
+OUTPUT_DIR = 'outputs/YTVIS2019/'
+NAME = 'cico_swint_f5_dynamic_mask_head_multiple_yt19'

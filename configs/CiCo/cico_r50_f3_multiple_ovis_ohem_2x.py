@@ -6,6 +6,7 @@ MODEL = dict(
         PATH='resnet50_coco_46.pth'),
 
     PREDICTION_HEADS=dict(
+        TOWER_CUBIC_MODE=True,
         CUBIC_MODE=True,
         CUBIC_3D_MODE=True,
         CUBIC_MODE_ON_PROTONET=True,

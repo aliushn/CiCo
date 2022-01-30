@@ -35,13 +35,11 @@ def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, train_masks=True, interpol
     if dets is None:
         return [torch.Tensor()] * 4  # Warning, this is 4 copies of the same thing
 
+    proto_data = dets['proto']
     if score_threshold > 0:
         keep = dets['score'] > score_threshold
 
-        for k in dets:
-            if k != 'proto':
-                dets[k] = dets[k][keep]
-
+        dets = {k: v[keep] for k, v in dets.items() if k != 'proto'}
         if dets['score'].size(0) == 0:
             return [torch.Tensor()] * 4
 
@@ -49,15 +47,15 @@ def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, train_masks=True, interpol
         return [torch.Tensor()] * 4
 
     # Actually extract everything from dets now
-    masks = dets['mask'].squeeze(1)
+    masks = dets['mask'].squeeze(1) if dets['mask'].dim() == 4 else dets['mask']
     classes = dets['class']
-    boxes = dets['box']
+    boxes = dets['box'].reshape(-1, 4)
     scores = dets['score']
     masks_coeff = dets['mask_coeff']
 
     if train_masks:
         # At this points masks is only the coefficients
-        proto_data = dets['proto'][:int(dets['proto'].size(0)*s_h), :int(dets['proto'].size(1)*s_w)]
+        proto_data = proto_data[:int(proto_data.size(0)*s_h), :int(proto_data.size(1)*s_w)]
 
         # First undo padding area and then scale masks up to the full image
         masks = masks[:, :int(s_h*masks.size(1)), :int(s_w*masks.size(2))]
@@ -192,7 +190,7 @@ def undo_image_transformation(img, ori_h, ori_w, img_h=None, img_w=None, interpo
     img = img[..., (2, 1, 0)]  # To RGB
     img_numpy = torch.clamp(img, 0, 1).cpu().numpy()
 
-    return img_numpy
+    return img_numpy.squeeze(0) if img_dim == 3 else img_numpy
 
 
 def display_lincomb(protos_data, masks_coeff=None, img_ids=None, output_file=None):

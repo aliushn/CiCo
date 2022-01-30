@@ -1,7 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
 from .make_net import make_net
-from .dynamic_mask_head import DynamicMaskHead
 from ..utils import aligned_bilinear
 from ..visualization_temporal import display_cubic_weights
 
@@ -36,8 +35,6 @@ class ClipProtoNet(nn.Module):
         proto_arch = [(proto_channels, 3, 1), (self.mask_dim, 1, 0)]
         self.proto_conv, _ = make_net(proto_channels, proto_arch, use_3D=self.use_3D, norm_type=norm_type,
                                       include_last_relu=False)
-        if cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK:
-            self.DynamicMaskHead = DynamicMaskHead(cfg)
 
     def forward(self, x, fpn_outs, img_meta=None):
         if self.proto_src is None:

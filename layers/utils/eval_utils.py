@@ -127,7 +127,7 @@ def bbox2result_video(results, preds, frame_ids, types=None):
                 elif type == 'bbox':
                     results[obj_id]['bbox'] += [None] * len(frame_ids)
 
-    if preds is None or (preds is not None and preds['box'].shape[0] == 0):
+    if preds is None or (preds is not None and preds['box'].nelement() == 0):
         return results
     else:
         labels = preds['class'].view(-1).cpu().numpy() if 'class' in preds.keys() else None
@@ -149,9 +149,9 @@ def bbox2result_video(results, preds, frame_ids, types=None):
                         results[obj_id]['category_id'] += [labels[idx]]
 
                 for t, frame_id in enumerate(frame_ids):
-                    bbox = preds['box'][t, idx].cpu().numpy()
+                    bbox = preds['box'][idx, t].cpu().numpy()
                     if type == 'segm':
-                        segm = preds['mask'][t, idx]
+                        segm = preds['mask'][idx, t]
                         # segm annotation: png2rle
                         segm = mask_util.encode(np.array(segm.cpu(), order='F', dtype='uint8'))
                         # .json file can not deal with var with 'bytes'

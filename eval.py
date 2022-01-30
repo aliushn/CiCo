@@ -109,8 +109,13 @@ def prep_display(dets_out, imgs, img_meta=None, undo_transform=True, mask_alpha=
         for t in range(imgs_gpu.size(0)):
             img_gpu = imgs_gpu[t]
             img_numpy = (img_gpu * 255).byte().cpu().numpy()
+            plt.imshow(img_numpy)
+            plt.axis('off')
+            plt.savefig(''.join([root_dir, '/', str(img_meta[t]['frame_id']), '.jpg']), bbox_inches='tight',
+                        pad_inches=0)
+            plt.clf()
     else:
-        num_dets_to_consider = min(args.top_k, dets_out['box'].size(1))
+        num_dets_to_consider = min(args.top_k, dets_out['box'].size(0))
         scores = dets_out['score'][:args.top_k].view(-1).detach().cpu().numpy()
         color_type = dets_out['box_ids'].view(-1)
         num_tracked_mask = dets_out['tracked_mask'] if 'tracked_mask' in dets_out.keys() else None
@@ -118,9 +123,9 @@ def prep_display(dets_out, imgs, img_meta=None, undo_transform=True, mask_alpha=
 
         for t in range(imgs_gpu.size(0)):
             img_gpu = imgs_gpu[t]
-            boxes = dets_out['box'][t, :args.top_k].detach().cpu().numpy()
+            boxes = dets_out['box'][:args.top_k, t].detach().cpu().numpy()
             if 'mask' in dets_out.keys():
-                masks = dets_out['mask'][t, :args.top_k]
+                masks = dets_out['mask'][:args.top_k, t]
 
             # First, draw the masks on the GPU where we can do it really fast
             # Beware: very fast but possibly unintelligible mask-drawing code ahead
@@ -205,10 +210,10 @@ def prep_display(dets_out, imgs, img_meta=None, undo_transform=True, mask_alpha=
                         cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness,
                                     cv2.LINE_AA)
 
-    plt.imshow(img_numpy)
-    plt.axis('off')
-    plt.savefig(''.join([root_dir, '/', str(img_meta[t]['frame_id']), '.jpg']), bbox_inches='tight', pad_inches=0)
-    plt.clf()
+            plt.imshow(img_numpy)
+            plt.axis('off')
+            plt.savefig(''.join([root_dir, '/', str(img_meta[t]['frame_id']), '.jpg']), bbox_inches='tight', pad_inches=0)
+            plt.clf()
 
 
 def temp(targets, h, w, img_metas):
@@ -235,14 +240,11 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
     # Main eval loop, only support a single clip
     frame_times = MovingAverage()
     for vdx, vid in enumerate(dataset.vid_ids):
-        progress = (vdx + 1) / dataset_size * 100
-        print()
-        print('Processing Videos:  %2d / %2d (%5.2f%%) ' % (vdx+1, dataset_size, progress))
-
+        progress_videos = (vdx + 1) / dataset_size * 100
         # Inverse direction to process videos
-        # if args.display:
-        #     vdx = -vdx - 1
-        #     vid = dataset.vid_ids[vdx]
+        if args.display:
+            vdx = -vdx - 1
+            vid = dataset.vid_ids[vdx]
 
         vid_objs = {}
         if data_type == 'vis':
@@ -253,11 +255,10 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
             train_masks, use_vid_metric = False, True
 
         len_clips = (len_vid + n_newly_frames-1) // n_newly_frames
-        progress_bar_clip = ProgressBar(len_clips, len_clips)
         for cdx in range(len_clips):
             timer.reset()
-            progress_clip = (cdx + 1) / len_clips * 100
 
+            t = time.time()
             with timer.env('Load Data'):
                 left = cdx * n_newly_frames
                 clip_frame_ids = range(left, min(left+n_frames, len_vid))
@@ -280,14 +281,13 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
             # Interesting tests inputs with different orders
             # order_idx = list(range(clip_frames))[::-1]
             # images = torch.flip(images, [0])
-            t = time.time()
             preds = net(images, img_meta=imgs_meta)
             avg_fps_wodata = 1. / ((time.time()-t) / n_frames)
             frame_times.add(timer.total_time())
-            progress_bar_clip.set_val(cdx+1)
-            avg_fps = 0  # 1. / (frame_times.get_avg() / clip_frames) if vdx > 0 or cdx > 0 else 0
-            print('\rProcessing Clips of Video %s  %6d / %6d (%5.2f%%)  %5.2f fps  %5.2f fps '
-                  % (repr(progress_bar_clip), cdx+1, len_clips, progress_clip, avg_fps, avg_fps_wodata), end='')
+            avg_fps = 1. / (frame_times.get_avg() / clip_frames) if vdx > 0 or cdx > 0 else 0
+            print('\rProcessing videos:  %2d / %2d (%5.2f %%), clips:  %2d / %2d;  '
+                  'FPS w /wo load_data: %5.2f / %5.2f fps '
+                  % (vdx+1, dataset_size, progress_videos, cdx+1, len_clips, avg_fps, avg_fps_wodata), end='')
 
             with timer.env('Postprocess'):
                 for tdx, pred_clip in enumerate(preds):
@@ -298,7 +298,9 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
                     if use_cico:
                         imgs_meta_cur = imgs_meta[tdx]
                         for k, v in pred_clip.items():
-                            if k in {'box', 'mask', 'img_ids'}:
+                            if k in {'box', 'mask'} and v.nelement() > 0:
+                                pred_clip[k] = v[:, left:min(right, len_vid - left)]
+                            elif k in {'img_ids'}:
                                 pred_clip[k] = v[left:min(right, len_vid - left)]
                     else:
                         imgs_meta_cur = imgs_meta[left:min(right, len_vid - left)]
@@ -438,6 +440,7 @@ if __name__ == '__main__':
         cfg = load_config(args.config)
     cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, cfg.NAME)
     args.save_folder = cfg.OUTPUT_DIR
+    cfg.display = args.display
     global class_names
     class_names = get_dataset_config(cfg.DATASETS.TRAIN, cfg.DATASETS.TYPE)['class_names']
 
@@ -472,7 +475,7 @@ if __name__ == '__main__':
             torch.set_default_tensor_type('torch.FloatTensor')
 
         print('Loading model from {}'.format(args.trained_model))
-        net = CoreNet(cfg, args.display)
+        net = CoreNet(cfg)
         net.load_weights(args.trained_model)
         net.eval()
         print('Loading model Done.')

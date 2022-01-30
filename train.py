@@ -69,7 +69,7 @@ def train(cfg):
         device = torch.cuda.current_device()
 
     imgs_per_gpu = cfg.SOLVER.IMS_PER_BATCH * cfg.SOLVER.NUM_CLIPS // torch.cuda.device_count()
-    if imgs_per_gpu < 6:
+    if imgs_per_gpu < 5:
         print('Per-GPU batch size is less than the recommended limit for batch norm. Disabling batch norm.')
         cfg.freeze_bn = True
     else:

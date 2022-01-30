@@ -60,8 +60,8 @@ def split_bbox(bbox, idx_bbox_ori, nums_bbox_per_layer):
 def generate_track_gaussian(track_data, masks=None, boxes=None):
     '''
     :param track_data: [h, w, c] or [n, h, w, c]
-    :param masks: [T, n, h, w]
-    :param boxes: [n, 4]
+    :param masks: [n, T, h, w]
+    :param boxes: [n, T, 4]
     :return: [n, T, c]
     the means and variances of multi-vairants Gaussian distribution for tracking
     '''
@@ -71,14 +71,14 @@ def generate_track_gaussian(track_data, masks=None, boxes=None):
     if dim == 3:
         track_data = track_data.unsqueeze(0)
     _, h, w, c = track_data.size()
-    track_data = track_data.unsqueeze(1).repeat(1, n_objs, 1, 1, 1)
+    track_data = track_data.unsqueeze(0).repeat(n_objs, 1, 1, 1, 1)
 
     assert masks is not None or boxes is not None
 
     if masks is not None:
         # use pred masks as the fired area to crop track_data and evaluate multi-vairants Gaussian distribution
         used_masks = F.interpolate(masks.float(), (h, w), mode='bilinear', align_corners=False).gt(0.5)
-        cropped_track_data = track_data * used_masks.unsqueeze(-1)       # [T, n, h, w, c]
+        cropped_track_data = track_data * used_masks.unsqueeze(-1)       # [n, T, h, w, c]
         n_pixels = used_masks.sum(dim=(-1, -2)).view(-1, 1)
     else:
         # only use the center region of pred boxes to evaluate multi-vairants Gaussian distribution
@@ -87,12 +87,12 @@ def generate_track_gaussian(track_data, masks=None, boxes=None):
         if non_small_objs.sum() > 0:
             c_boxes[non_small_objs, 2:] *= 0.75
         n_pixels = c_boxes[:, 2] * c_boxes[:, 3] * h * w
-        boxes = point_form(c_boxes).reshape(-1, n_objs, 4)
+        boxes = point_form(c_boxes).reshape(n_objs, -1, 4)
         cropped_track_data = crop(track_data.reshape(-1, h, w, c).permute(1, 2, 3, 0).contiguous(),
                                   boxes.reshape(-1, 4))                   # [h, w, c, n_pos*T]
-        cropped_track_data = cropped_track_data.permute(3, 0, 1, 2).contiguous().reshape(-1, n_objs, h, w, c)
+        cropped_track_data = cropped_track_data.permute(3, 0, 1, 2).contiguous().reshape(n_objs, -1, h, w, c)
 
-    mu = cropped_track_data.sum(dim=(-2, -3)) / torch.clamp(n_pixels.reshape(-1, n_objs, 1), min=1)  # [n_pos, T, c]
+    mu = cropped_track_data.sum(dim=(-2, -3)) / torch.clamp(n_pixels.reshape(n_objs, -1, 1), min=1)  # [n_pos, T, c]
     var = torch.sum((cropped_track_data - mu[:, :, None, None, :]) ** 2, dim=(-2, -3))               # [n_pos, T, c]
 
     return mu, var

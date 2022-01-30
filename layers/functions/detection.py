@@ -12,7 +12,7 @@ class Detect(object):
 
     # TODO: Refactor this whole class away. It needs to go.
 
-    def __init__(self, cfg, display=False):
+    def __init__(self, cfg):
         self.cfg = cfg
         self.train_masks = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
         self.use_dynamic_mask = cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK
@@ -26,17 +26,14 @@ class Detect(object):
             raise ValueError('nms_threshold must be non negative.')
         self.conf_thresh = cfg.TEST.NMS_CONF_THRESH
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-
-        if display:  # or cfg.DATASETS.TYPE == 'coco':
-            self.use_cross_class_nms = True
-        else:
-            self.use_cross_class_nms = False
         self.use_cico = cfg.CiCo.ENGINE
         self.img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
         if cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
             self.img_level_keys += ['track']
 
-    def __call__(self, net, predictions, inference=False):
+        self.use_cross_class_nms = True if cfg.display else False
+
+    def __call__(self, net, predictions, inference=False, display=False):
         """
         Args:
                     net:  network
@@ -84,27 +81,30 @@ class Detect(object):
                 T = candidate_cur['loc'].size(-1) // 4
                 priors = candidate_cur['priors'].repeat(1, T).reshape(-1, 4)
                 boxes = decode(candidate_cur['loc'].reshape(-1, 4), priors)
-                candidate_cur['box'] = boxes.reshape(-1, T, 4).transpose(0, 1)
+                candidate_cur['box'] = boxes.reshape(-1, T, 4)
                 candidate_cur['box_cir'] = circum_boxes(boxes.reshape(-1, T*4))
 
                 if self.train_masks:
                     proto_data, masks_coeff = candidate_cur['proto'], candidate_cur['mask_coeff']
                     boxes_cir_c = center_size(candidate_cur['box_cir'])
                     # for small objects, we set width and height of bounding boxes is 0.1
-                    boxes_cir_c[:, 2:] = torch.clamp(boxes_cir_c[:, 2:] * 1.2, min=0.1)
-                    boxes_cir_expand = point_form(boxes_cir_c)
 
                     if self.use_dynamic_mask:
-                        pred_masks = net.ProtoNet.DynamicMaskHead(proto_data.permute(2, 3, 0, 1), masks_coeff,
-                                                                  candidate_cur['box_cir'], fpn_levels)
+                        boxes_cir_c[:, 2:] = torch.clamp(boxes_cir_c[:, 2:] * 1.5, min=0.1)
+                        boxes_cir_expand = point_form(boxes_cir_c)
+                        pred_masks = net.DynamicMaskHead(proto_data.permute(2, 3, 0, 1), masks_coeff,
+                                                         candidate_cur['box_cir'], fpn_levels)
                         if not self.cfg.MODEL.MASK_HEADS.LOSS_WITH_DICE_COEFF:
                             pred_masks = crop(pred_masks.permute(2, 3, 1, 0).contiguous(), boxes_cir_expand)
                             pred_masks = pred_masks.permute(2, 3, 0, 1).contiguous()
+                        pred_masks = pred_masks.transpose(0, 1)
 
                     else:
+                        boxes_cir_c[:, 2:] = torch.clamp(boxes_cir_c[:, 2:] * 1.1, min=0.1)
+                        boxes_cir_expand = point_form(boxes_cir_c)
                         boxes_crop = boxes_cir_expand if self.cfg.MODEL.MASK_HEADS.PROTO_CROP else None
                         pred_masks = generate_mask(proto_data, masks_coeff.reshape(-1, proto_data.size(-1)),
-                                                   boxes_crop).transpose(0, 1)
+                                                   boxes_crop)
                     candidate_cur['mask'] = pred_masks
 
             result.append(self.detect(candidate_cur))
@@ -119,15 +119,15 @@ class Detect(object):
         else:
             # Remove bounding boxes whose center beyond images or mask = 0
             T, n_objs, _ = candidate['box'].size()
-            boxes_c = center_size(candidate['box'].reshape(-1, 4)).reshape(T, n_objs, 4)
+            boxes_c = center_size(candidate['box'].reshape(-1, 4)).reshape(n_objs, T, 4)
             keep = ((boxes_c[..., :2] > 0) & (boxes_c[..., :2] < 1)).sum(-1) == 2
             keep = keep.sum(dim=0) >= max(keep.size(0)//2, 1)
             if self.train_masks:
-                non_empty_mask = (candidate['mask'].gt(0.5).sum(dim=[-1, -2]) > 1).sum(dim=0) > 0
+                non_empty_mask = (candidate['mask'].gt(0.5).sum(dim=[-1, -2]) > 1).sum(dim=1) > 0
                 keep = keep & non_empty_mask
             for k, v in candidate.items():
                 if k not in self.img_level_keys:
-                    candidate[k] = v[:, keep] if k in {'box', 'mask'} else v[keep]
+                    candidate[k] = v[keep]
 
             if candidate['box'].nelement() == 0:
                 out_aft_nms = self.return_empty_out()
@@ -148,14 +148,14 @@ class Detect(object):
         scores = candidate['conf']
         if not self.use_focal_loss:
             scores = scores[..., 1:]
-        rescores = candidate['centerness'].mean(-1).reshape(-1, 1) * scores if 'centerness' in candidate.keys() else scores
+        rescores = candidate['centerness'].min(-1)[0].reshape(-1, 1) * scores if 'centerness' in candidate.keys() else scores
         rescores, classes = rescores.max(dim=1)
 
         _, idx = rescores.sort(0, descending=True)
         idx = idx[:top_k]
 
         # Compute the pairwise IoU between the boxes
-        boxes_idx = candidate['box'][:, idx]
+        boxes_idx = candidate['box'][idx].transpose(0, 1)
         box_iou = jaccard(boxes_idx, boxes_idx)
         boxes_cir_idx = candidate['box_cir'][idx]
         box_cir_iou = jaccard(boxes_cir_idx, boxes_cir_idx)
@@ -163,7 +163,7 @@ class Detect(object):
         if not self.train_masks:
             iou = 0.5 * box_iou.mean(0) + 0.5 * box_cir_iou
         else:
-            masks_idx = candidate['mask'][:, idx].gt(0.5).float()
+            masks_idx = candidate['mask'][idx].gt(0.5).float().transpose(0, 1)
             flag = masks_idx.sum(dim=[-1, -2]) > 5                           # [T, n]
             flag = flag.unsqueeze(-1) * flag.unsqueeze(-2)
 
@@ -194,8 +194,8 @@ class Detect(object):
 
         out_after_NMS = {'score': scores[idx_out, classes[idx_out]], 'class': classes[idx_out]+1}
         for k, v in candidate.items():
-            if k not in self.img_level_keys and k not in {'conf', 'loc'}:
-                out_after_NMS[k] = v[:, idx_out] if k in {'box', 'mask'} else v[idx_out]
+            if k in {'box', 'mask', 'track', 'box_cir', 'mask_coeff', 'prior_levels'}:
+                out_after_NMS[k] = v[idx_out]
 
         return out_after_NMS
 
@@ -204,37 +204,37 @@ class Detect(object):
         scores = candidate['conf'].t()
         if not self.use_focal_loss:
             scores = scores[1:]
-        rescores = candidate['centerness'].mean(-1).reshape(1, -1) * scores if 'centerness' in candidate.keys() else scores
+        rescores = candidate['centerness'].min(-1)[0].reshape(1, -1) * scores if 'centerness' in candidate.keys() else scores
         rescores, idx = rescores.sort(1, descending=True)                                 # [n_classes, n_dets]
         idx = idx[:, :top_k].contiguous()
         rescores = rescores[:, :top_k].contiguous()
 
         num_classes, n_objs = idx.size()
-        boxes_idx = candidate['box']
+        boxes_idx = candidate['box'].transpose(0, 1)
         box_iou_ori = jaccard(boxes_idx, boxes_idx)        # [n_classes, n_dets, n_dets]
         boxes_cir_idx = candidate['box_cir'][idx.view(-1)].reshape(-1, n_objs, 4)
         box_cir_iou = jaccard(boxes_cir_idx, boxes_cir_idx)
 
         if not self.train_masks:
             box_iou_ori = box_iou_ori.mean(0)
-            box_iou = torch.stack([box_iou_ori[idx[c]][:, idx[c]] for c in range(idx.size(0))], dim=0)
+            box_iou = torch.stack([box_iou_ori[idx[c]][:, idx[c]] for c in range(num_classes)], dim=0)
             iou = 0.5 * box_iou.mean(0) + 0.5 * box_cir_iou
         else:
 
-            masks = candidate['mask'].gt(0.5).float()
+            masks = candidate['mask'].gt(0.5).float().transpose(0, 1)
             T, _, h, w = masks.size()
             flag = masks.sum(dim=[-1, -2]) > 5
             flag = flag.unsqueeze(-1) & flag.unsqueeze(-2)  # [T, n_dets, n_dets]
 
             box_iou = (box_iou_ori * flag).sum(0) / torch.clamp(flag.sum(0), min=1)
-            box_iou = torch.stack([box_iou[idx[c]][:, idx[c]] for c in range(idx.size(0))])
+            box_iou = torch.stack([box_iou[idx[c]][:, idx[c]] for c in range(num_classes)])
             iou = 0.5 * box_iou + 0.5 * box_cir_iou
 
             if self.nms_with_miou:
                 # In case of out of memory when the length of the clip T >= 5
-                miou_ori = torch.stack([mask_iou(masks[i], masks[i]) for i in range(masks.size(0))])
+                miou_ori = torch.stack([mask_iou(masks[t], masks[t]) for t in range(T)])
                 miou_ori = (miou_ori * flag).sum(0) / torch.clamp(flag.sum(0), min=1)
-                m_iou = torch.stack([miou_ori[idx[c]][:, idx[c]] for c in range(idx.size(0))])
+                m_iou = torch.stack([miou_ori[idx[c]][:, idx[c]] for c in range(num_classes)])
                 iou = iou * 0.5 + m_iou * 0.5
 
         iou.triu_(diagonal=1)
@@ -248,27 +248,24 @@ class Detect(object):
         # this increase doesn't affect us much (+0.2 mAP for 34 -> 33 fps), so we leave it out.
         # However, when you implement this in your method, you should do this second threshold.
         if second_threshold:
-            keep *= (rescores > 0.5*self.conf_thresh)
+            keep *= (rescores > self.conf_thresh)
 
         # Assign each kept detection to its corresponding class
         classes = torch.arange(num_classes, device=scores.device)[:, None].expand_as(keep)[keep]
-        scores = torch.stack([scores[c][idx[c]] for c in range(idx.size(0))], dim=0)[keep]
+        scores = torch.stack([scores[c][idx[c]] for c in range(num_classes)], dim=0)[keep]
 
         out_after_NMS = {'class': classes+1, 'score': scores}
         for k, v in candidate.items():
-            if k not in self.img_level_keys and k not in {'conf', 'loc'}:
-                if k in {'box', 'mask'}:
-                    v = v.transpose(0, 1)[idx.view(-1)].view(num_classes, n_objs, -1)[keep]
-                    v = v.reshape(-1, T, h, w) if k == 'mask' else v.reshape(-1, T, 4)
-                    out_after_NMS[k] = v.transpose(0, 1)
-                else:
-                    out_after_NMS[k] = v[idx.view(-1)].view(num_classes, n_objs, -1)[keep]
+            if k in {'mask', 'box'}:
+                v = v[idx.view(-1)].view(num_classes, n_objs, -1)[keep]
+                out_after_NMS[k] = v.reshape(-1, T, h, w) if k == 'mask' else v.reshape(-1, T, 4)
+            elif k in {'track', 'box_cir', 'mask_coeff', 'prior_levels'}:
+                out_after_NMS[k] = v[idx.view(-1)].view(num_classes, n_objs, -1)[keep]
 
         return out_after_NMS
 
     def return_empty_out(self):
-        out_aft_nms = {'box': torch.Tensor(), 'score': torch.Tensor()}
-        out_aft_nms['class'] = torch.Tensor()
+        out_aft_nms = {'box': torch.Tensor(), 'score': torch.Tensor(), 'class': torch.Tensor()}
         if self.train_masks:
             out_aft_nms['mask_coeff'] = torch.Tensor()
             out_aft_nms['mask'] = torch.Tensor()

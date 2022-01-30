@@ -19,6 +19,7 @@ CiCo = dict(
     ENGINE=True,
 
     CPH=dict(
+        TOWER_CUBIC_MODE=True,
         CUBIC_MODE=True,
         LAYER_KERNEL_SIZE=(1, 3, 3),
         LAYER_STRIDE=(1, 1, 1),

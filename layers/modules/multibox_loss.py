@@ -115,7 +115,7 @@ class MultiBoxLoss(nn.Module):
         priors, prior_levels = predictions['priors'], predictions['prior_levels']
         if self.cfg.CiCo.ENGINE and not self.cfg.CiCo.CPH.CIRCUMSCRIBED_BOXES:
             priors = priors.repeat(T_out, 1, self.clip_frames)
-            prior_levels = prior_levels.repeat(1, self.clip_frames)
+            prior_levels = prior_levels.repeat(1, T_out)
 
         # Match priors (default boxes) and ground truth boxes
         # These tensors will be created with the same device as loc_data
@@ -359,8 +359,7 @@ class MultiBoxLoss(nn.Module):
             # Instances may disappear in a frames of the clip due to occlusion or new-appeared,
             # then, we hope the Gaussian space to focus on those valid objects.
             area_masks = masks_cur.sum(dim=(-1, -2)).view(-1) > 5
-            mu, var = generate_track_gaussian(track_data[i], masks_cur.transpose(0, 1).contiguous(),
-                                              bbox_cur.transpose(0, 1).contiguous())       # [T, n, t_dim]
+            mu, var = generate_track_gaussian(track_data[i], masks_cur, bbox_cur)       # [n, T, track_dim]
             mu, var = mu.reshape(-1, t_dim), var.reshape(-1, t_dim)
             obj_ids = obj_ids.reshape(-1, 1).repeat(1, T_out).reshape(-1)
 

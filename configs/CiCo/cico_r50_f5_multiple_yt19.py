@@ -4,12 +4,16 @@ MODEL = dict(
     BACKBONE=dict(
         CONV_BODY='ResNet50',
         PATH='resnet50_coco_46.pth'),
+
+    TRACK_HEADS=dict(
+        MATCH_COEFF=[0.2, 1, 1, 0.3]),   # scores, mask_iou, box_iou, label
 )
 
 CiCo = dict(
     ENGINE=True,
 
     CPH=dict(
+        TOWER_CUBIC_MODE=True,
         CUBIC_MODE=True,
         LAYER_KERNEL_SIZE=(3, 3, 3),
         LAYER_STRIDE=(1, 1, 1),
@@ -36,7 +40,8 @@ SOLVER = dict(
 
 TEST = dict(
     IMS_PER_BATCH=1,
-    NUM_CLIP_FRAMES=5)
+    NUM_CLIP_FRAMES=5,
+    NMS_IoU_THRESH=0.5)
 
-OUTPUT_DIR = 'weights/YTVIS2019/'
+OUTPUT_DIR = 'outputs/YTVIS2019/'
 NAME = 'cico_r50_f5_multiple_yt19'
