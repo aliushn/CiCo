@@ -5,8 +5,8 @@ MODEL = dict(
         CONV_BODY='ResNet50',
         PATH='resnet50_coco_46.pth'),
 
-    TRACK_HEADS=dict(
-        MATCH_COEFF=[0.1, 0.5, 0.5, 0.3]),   # scores, mask_iou, box_iou, label
+    CLASS_HEADS=dict(
+        USE_FOCAL_LOSS=False)
 )
 
 CiCo = dict(
@@ -15,33 +15,32 @@ CiCo = dict(
     CPH=dict(
         TOWER_CUBIC_MODE=True,
         CUBIC_MODE=True,
-        LAYER_KERNEL_SIZE=(3, 3, 3),
+        LAYER_KERNEL_SIZE=(1, 3, 3),
         LAYER_STRIDE=(1, 1, 1),
         MATCHER_CENTER=False,
         CIRCUMSCRIBED_BOXES=False),
 
     CPN=dict(
-        CUBIC_MODE=True)
+        CUBIC_MODE=False)
 
 )
 
 DATASETS = dict(
     TYPE='vis',
-    NUM_CLASSES=40,
-    TRAIN='train_YouTube_VOS2019_dataset',
-    VALID_SUB='valid_sub_YouTube_VOS2019_dataset',
-    VALID='valid_YouTube_VOS2019_dataset',
-    TEST='test_YouTube_VOS2019_dataset')
+    NUM_CLASSES=25,
+    TRAIN='train_OVIS_dataset',
+    VALID_SUB='valid_sub_OVIS_dataset',
+    VALID='valid_OVIS_dataset',
+    TEST='test_OVIS_dataset')
 
 SOLVER = dict(
     IMS_PER_BATCH=4,
-    NUM_CLIP_FRAMES=5,
+    NUM_CLIP_FRAMES=2,
     NUM_CLIPS=1)
 
 TEST = dict(
     IMS_PER_BATCH=1,
-    NUM_CLIP_FRAMES=5,
-    NMS_IoU_THRESH=0.5)
+    NUM_CLIP_FRAMES=2)
 
-OUTPUT_DIR = 'outputs/YTVIS2019/'
-NAME = 'cico_r50_f5_multiple_yt19'
+OUTPUT_DIR = 'outputs/OVIS/'
+NAME = 'cico_r50_f2c2_multiple_ohem_ovis'

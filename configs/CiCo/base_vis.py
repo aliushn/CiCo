@@ -19,7 +19,7 @@ MODEL = dict(
         TRAIN_TRACK=True,
         TRACK_DIM=64,
         LOSS_ALPHA=5,
-        MATCH_COEFF=[0, 0.5, 0.5, 0.3]),   # scores, mask_iou, box_iou, label
+        MATCH_COEFF=[0.1, 0.5, 0.5, 0.3]),   # scores, mask_iou, box_iou, label
 
     MASK_HEADS=dict(
         TRAIN_MASKS=True,

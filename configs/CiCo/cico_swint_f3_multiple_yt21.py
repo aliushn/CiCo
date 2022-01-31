@@ -1,10 +1,18 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/CiCo/base_vis.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/_base_/models/swint_base.yaml',
+          'configs/CiCo/base_vis.py']
 
 MODEL = dict(
     BACKBONE=dict(
-        CONV_BODY='ResNet50',
-        PATH='resnet50_coco_46.pth'),
+        SWINT=dict(
+            path='swint_base_coco_300_576_40_320000.pth')
+    ),
 
+    FPN=dict(
+        NUM_FEATURES=256),
+
+    MASK_HEADS=dict(
+        TRAIN_MASKS=True,
+        PROTO_NET=[(192, 3, 1), (192, 3, 1), (192, 3, 1), (None, -2, {})])
 )
 
 CiCo = dict(
@@ -22,6 +30,7 @@ CiCo = dict(
         CUBIC_MODE=True)
 
 )
+
 
 DATASETS = dict(
     TYPE='vis',
@@ -41,4 +50,4 @@ TEST = dict(
     NUM_CLIP_FRAMES=3)
 
 OUTPUT_DIR = 'outputs/YTVIS2021/'
-NAME = 'cico_r50_f3_multiple_yt21'
+NAME = 'cico_swint_f3_multiple_yt21'

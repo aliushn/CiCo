@@ -117,14 +117,18 @@ class Detect(object):
             out_aft_nms = self.return_empty_out()
 
         else:
-            # Remove bounding boxes whose center beyond images or mask = 0
-            T, n_objs, _ = candidate['box'].size()
+            # Remove bounding boxes whose center beyond images or mask is blank or low cover rate between box and mask
+            n_objs, T, _ = candidate['box'].size()
             boxes_c = center_size(candidate['box'].reshape(-1, 4)).reshape(n_objs, T, 4)
             keep = ((boxes_c[..., :2] > 0) & (boxes_c[..., :2] < 1)).sum(-1) == 2
-            keep = keep.sum(dim=0) >= max(keep.size(0)//2, 1)
+            keep = keep.sum(dim=-1) >= max(T//2, 1)
             if self.train_masks:
-                non_empty_mask = (candidate['mask'].gt(0.5).sum(dim=[-1, -2]) > 1).sum(dim=1) > 0
-                keep = keep & non_empty_mask
+                h, w = candidate['mask'].size()[-2:]
+                mask_area = candidate['mask'].gt(0.5).float().sum(dim=[-1, -2])
+                non_empty_mask = (mask_area > 5).sum(dim=-1) > 0
+                cover_rate = mask_area / (h * w) / (boxes_c[..., 2] * boxes_c[..., 3])
+                non_low_cover = (cover_rate > 0.1).sum(dim=-1) > 0
+                keep = keep & non_empty_mask & non_low_cover
             for k, v in candidate.items():
                 if k not in self.img_level_keys:
                     candidate[k] = v[keep]
@@ -204,7 +208,7 @@ class Detect(object):
         scores = candidate['conf'].t()
         if not self.use_focal_loss:
             scores = scores[1:]
-        rescores = candidate['centerness'].min(-1)[0].reshape(1, -1) * scores if 'centerness' in candidate.keys() else scores
+        rescores = candidate['centerness'].mean(-1).reshape(1, -1) * scores if 'centerness' in candidate.keys() else scores
         rescores, idx = rescores.sort(1, descending=True)                                 # [n_classes, n_dets]
         idx = idx[:, :top_k].contiguous()
         rescores = rescores[:, :top_k].contiguous()

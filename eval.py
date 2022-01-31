@@ -242,9 +242,9 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
     for vdx, vid in enumerate(dataset.vid_ids):
         progress_videos = (vdx + 1) / dataset_size * 100
         # Inverse direction to process videos
-        if args.display:
-            vdx = -vdx - 1
-            vid = dataset.vid_ids[vdx]
+        # if args.display:
+        #     vdx = -vdx - 1
+        #     vid = dataset.vid_ids[vdx]
 
         vid_objs = {}
         if data_type == 'vis':
@@ -284,7 +284,7 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
             preds = net(images, img_meta=imgs_meta)
             avg_fps_wodata = 1. / ((time.time()-t) / n_frames)
             frame_times.add(timer.total_time())
-            avg_fps = 1. / (frame_times.get_avg() / clip_frames) if vdx > 0 or cdx > 0 else 0
+            avg_fps = 1.  # / (frame_times.get_avg() / clip_frames) if vdx > 0 or cdx > 0 else 0
             print('\rProcessing videos:  %2d / %2d (%5.2f %%), clips:  %2d / %2d;  '
                   'FPS w /wo load_data: %5.2f / %5.2f fps '
                   % (vdx+1, dataset_size, progress_videos, cdx+1, len_clips, avg_fps, avg_fps_wodata), end='')
@@ -323,9 +323,8 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
         if not args.display and data_type == 'vis':
             for obj_id, vid_obj in vid_objs.items():
                 vid_obj['video_id'] = vid
-                stuff_score = np.array(vid_obj['score']).mean().item()
                 vid_obj['category_id'] = np.bincount(vid_obj['category_id']).argmax().item()
-                vid_obj['score'] = stuff_score
+                vid_obj['score'] = np.array(vid_obj['score']).mean().item()
                 assert len(vid_obj['segmentations']) == len_vid, \
                     'Different lengths between output masks and input images, please double check!!'
                 json_results.append(vid_obj)

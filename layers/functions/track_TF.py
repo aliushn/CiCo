@@ -88,7 +88,9 @@ class Track_TF(object):
 
                 img_over_idx = torch.nonzero(self.prev_candidate['img_ids'].unsqueeze(1) == candidate['img_ids'].unsqueeze(0),
                                              as_tuple=False)
+                match_coeff = list(self.match_coeff)
                 if img_over_idx.nelement() > 0:
+                    match_coeff[1:3] = [match_coeff[1] * 2, match_coeff[2] * 2]
                     # ------------------------------ overlapping clips ----------------------------------
                     prev_over_idx, cur_over_idx = img_over_idx[:, 0], img_over_idx[:, 1]
                     bbox_ious = jaccard(det_bbox[cur_over_idx].reshape(-1, n_dets, 4),
@@ -109,6 +111,7 @@ class Track_TF(object):
                     self.Naive_Tacker(candidate)
 
                 else:
+
                     # ---------------------------- non-overlapping clips ---------------------------------
                     # To track masks from previous frames to current frame in STMask
                     if self.cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
@@ -162,7 +165,7 @@ class Track_TF(object):
                                                   small_objects=small_objects,
                                                   add_bbox_dummy=True,
                                                   bbox_dummy_iou=bbox_dummy_iou,
-                                                  match_coeff=self.match_coeff)
+                                                  match_coeff=match_coeff)
                 match_likelihood, match_ids = torch.max(comp_scores, dim=1)
                 new_objs_idx = torch.arange(n_dets)[match_ids == 0]
                 _, sorted_idx = match_likelihood.sort(descending=True)
