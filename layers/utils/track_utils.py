@@ -27,10 +27,14 @@ def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta
     else:
         # match coeff needs to be length of 4
         assert (len(match_coeff) == 4)
-        return match_ll + match_coeff[0] * bbox_scores \
-               + match_coeff[1] * mask_ious \
-               + match_coeff[2] * bbox_ious \
-               + match_coeff[3] * label_delta
+        scores = match_coeff[0] * bbox_scores \
+                 + match_coeff[1] * mask_ious \
+                 + match_coeff[2] * bbox_ious \
+                 + match_coeff[3] * label_delta
+        if match_ll is None:
+            return scores
+        else:
+            return match_ll + scores
 
 
 def split_bbox(bbox, idx_bbox_ori, nums_bbox_per_layer):

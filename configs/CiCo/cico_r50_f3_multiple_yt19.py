@@ -18,7 +18,7 @@ CiCo = dict(
         CIRCUMSCRIBED_BOXES=False),
 
     CPN=dict(
-        CUBIC_MODE=False)
+        CUBIC_MODE=True)
 
 )
 

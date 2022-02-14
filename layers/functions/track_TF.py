@@ -25,6 +25,7 @@ class Track_TF(object):
         self.match_coeff = cfg.MODEL.TRACK_HEADS.MATCH_COEFF
         self.conf_thresh = cfg.TEST.NMS_CONF_THRESH
         self.train_mask = cfg.MODEL.MASK_HEADS.TRAIN_MASKS
+        self.train_track = cfg.MODEL.TRACK_HEADS.TRAIN_TRACK
         self.track_by_Gaussian = cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN
         self.use_dynamic_mask = cfg.MODEL.MASK_HEADS.USE_DYNAMIC_MASK
         self.img_level_keys = ['proto', 'fpn_feat', 'fpn_feat_temp', 'sem_seg']
@@ -53,7 +54,7 @@ class Track_TF(object):
 
         # generate mean and variance of Gaussian for objects
         if candidate['box'].nelement() > 0:
-            if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS and self.track_by_Gaussian:
+            if self.train_mask and self.train_track and self.track_by_Gaussian:
                 candidate['track_mu'], candidate['track_var'] = generate_track_gaussian(candidate['track'],
                                                                                         masks=candidate['mask'],
                                                                                         boxes=candidate['box'])
@@ -81,10 +82,12 @@ class Track_TF(object):
                 prev_bbox = self.prev_candidate['box'].transpose(0, 1)
                 candidate['tracked_mask'] = torch.zeros(n_dets)
                 label_delta = (self.prev_candidate['class'] == candidate['class'].view(-1, 1)).float()
-                if not self.track_by_Gaussian:
+                if self.train_track and not self.track_by_Gaussian:
                     cos_sim = candidate['track'] @ self.prev_candidate['track'].t()  # val in [-1, 1]
                     cos_sim = (cos_sim + 1) / 2  # val in [0, 1]
                     sim = torch.cat([torch.ones(n_dets, 1) * 0.5, cos_sim], dim=1)
+                else:
+                    sim = None
 
                 img_over_idx = torch.nonzero(self.prev_candidate['img_ids'].unsqueeze(1) == candidate['img_ids'].unsqueeze(0),
                                              as_tuple=False)
@@ -134,7 +137,7 @@ class Track_TF(object):
                         mask_ious = mask_iou(det_masks, prev_masks)
                         mask_ious = (mask_ious * flag).sum(0) / torch.clamp(flag.sum(0), min=1)
 
-                        if self.track_by_Gaussian:
+                        if self.train_track and self.track_by_Gaussian:
                             # Calculate KL divergence for Gaussian distribution of instances, value [[0, +infinite]]
                             track_dim = candidate['track'].size(-1)
                             kl_div = compute_kl_div(self.prev_candidate['track_mu'].reshape(-1, track_dim),

@@ -278,47 +278,46 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
                     imgs_meta = (imgs_meta*n_frames)[:n_frames]
                 imgs_meta = [imgs_meta] if use_cico else imgs_meta
 
-            # Interesting tests inputs with different orders
+            # Interesting tests inputs with inverse orders
             # order_idx = list(range(clip_frames))[::-1]
             # images = torch.flip(images, [0])
             preds = net(images, img_meta=imgs_meta)
             avg_fps_wodata = 1. / ((time.time()-t) / n_frames)
             frame_times.add(timer.total_time())
-            avg_fps = 1.  # / (frame_times.get_avg() / clip_frames) if vdx > 0 or cdx > 0 else 0
+            avg_fps = 1. / (frame_times.get_avg() / clip_frames) if vdx > 0 or cdx > 0 else 0
             print('\rProcessing videos:  %2d / %2d (%5.2f %%), clips:  %2d / %2d;  '
                   'FPS w /wo load_data: %5.2f / %5.2f fps '
                   % (vdx+1, dataset_size, progress_videos, cdx+1, len_clips, avg_fps, avg_fps_wodata), end='')
 
-            with timer.env('Postprocess'):
-                for tdx, pred_clip in enumerate(preds):
-                    interval = n_newly_frames if use_cico else clip_frames
-                    left, right = tdx * interval, (tdx+1) * interval
-                    clip_frame_ids_cur = clip_frame_ids[left:min(right, len_vid - left)]
-                    images_cur = images[left:min(right, len_vid - left)]
-                    if use_cico:
-                        imgs_meta_cur = imgs_meta[tdx]
-                        for k, v in pred_clip.items():
-                            if k in {'box', 'mask'} and v.nelement() > 0:
-                                pred_clip[k] = v[:, left:min(right, len_vid - left)]
-                            elif k in {'img_ids'}:
-                                pred_clip[k] = v[left:min(right, len_vid - left)]
-                    else:
-                        imgs_meta_cur = imgs_meta[left:min(right, len_vid - left)]
-                    pred_clip_pp = postprocess_ytbvis(pred_clip, imgs_meta_cur, train_masks=train_masks,
-                                                      visualize_lincomb=args.display_lincomb,
-                                                      output_file=args.save_folder)
+            for tdx, pred_clip in enumerate(preds):
+                interval = n_newly_frames if use_cico else clip_frames
+                left, right = tdx * interval, (tdx+1) * interval
+                clip_frame_ids_cur = clip_frame_ids[left:min(right, len_vid - left)]
+                images_cur = images[left:min(right, len_vid - left)]
+                if use_cico:
+                    imgs_meta_cur = imgs_meta[tdx]
+                    for k, v in pred_clip.items():
+                        if k in {'box', 'mask'} and v.nelement() > 0:
+                            pred_clip[k] = v[:, left:min(right, len_vid - left)]
+                        elif k in {'img_ids'}:
+                            pred_clip[k] = v[left:min(right, len_vid - left)]
+                else:
+                    imgs_meta_cur = imgs_meta[left:min(right, len_vid - left)]
+                pred_clip_pp = postprocess_ytbvis(pred_clip, imgs_meta_cur, train_masks=train_masks,
+                                                  visualize_lincomb=args.display_lincomb,
+                                                  output_file=args.save_folder)
 
-                    if args.display:
-                        prep_display(pred_clip_pp, images_cur, img_meta=imgs_meta_cur)
+                if args.display:
+                    prep_display(pred_clip_pp, images_cur, img_meta=imgs_meta_cur)
 
+                else:
+                    if data_type == 'vid' and use_vid_metric:
+                        for k, v in pred_clip_pp.items():
+                            pred_clip_pp[k] = v.tolist()
+                        pred_clip_pp['video_id'] = vid
+                        json_results.append(pred_clip_pp)
                     else:
-                        if data_type == 'vid' and use_vid_metric:
-                            for k, v in pred_clip_pp.items():
-                                pred_clip_pp[k] = v.tolist()
-                            pred_clip_pp['video_id'] = vid
-                            json_results.append(pred_clip_pp)
-                        else:
-                            bbox2result_video(vid_objs, pred_clip_pp, clip_frame_ids_cur, types=args.eval_types)
+                        bbox2result_video(vid_objs, pred_clip_pp, clip_frame_ids_cur, types=args.eval_types)
 
         if not args.display and data_type == 'vis':
             for obj_id, vid_obj in vid_objs.items():

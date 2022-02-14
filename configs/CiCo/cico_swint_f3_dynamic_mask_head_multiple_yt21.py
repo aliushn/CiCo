@@ -4,7 +4,7 @@ _base_ = ['configs/_base_/models/r50_base.yaml', 'configs/_base_/models/swint_ba
 MODEL = dict(
     BACKBONE=dict(
         SWINT=dict(
-            path='swint_base_coco_dynamic_mask_head_300_576_21_420000.pth')
+            path='swint_base_coco_dynamic_mask_head_300_640_35_230000.pth')
     ),
 
     PREDICTION_HEADS=dict(

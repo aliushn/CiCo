@@ -64,14 +64,16 @@ class CoreNet(nn.Module):
                 self.track_conv, _ = make_net(self.fpn_num_features, track_arch, use_3D=self.use_3D,
                                               norm_type='batch_norm', include_last_relu=False)
 
-            self.Track = Track_TF(self, cfg)
-
             if cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
                 # A Temporal Fusion built on two adjacent frames for tracking in STMask, clik here for more details
                 # https://arxiv.org/abs/2104.05606
                 self.TF_correlation_selected_layer = cfg.STMASK.T2S_HEADS.CORRELATION_SELECTED_LAYER
                 corr_channels = 2*self.fpn_num_features + cfg.STMASK.T2S_HEADS.CORRELATION_PATCH_SIZE**2
                 self.T2S_Head = T2S_Head(cfg.STMASK.T2S_HEADS, corr_channels, self.mask_dim)
+
+        # Tracking for inference
+        if cfg.DATASETS.TYPE == 'vis':
+            self.Track = Track_TF(self, cfg)
 
         if cfg.MODEL.MASK_HEADS.TRAIN_MASKS and cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS:
             sem_seg_head = [(self.fpn_num_features, 3, 1)]*2 + [(cfg.DATASETS.NUM_CLASSES, 1, 0)]
@@ -114,7 +116,7 @@ class CoreNet(nn.Module):
         self.load_state_dict(state_dict, strict=True)
 
     def init_weights_coco(self, backbone_path, local_rank=1):
-        """ Initialize weights for training. """
+        """ Initialize weights for training, pre-training on CoCo. """
         print('Initialize weights from:', backbone_path)
         state_dict = torch.load(backbone_path, map_location=torch.device('cpu'))
         for key in list(state_dict.keys()):
@@ -184,7 +186,7 @@ class CoreNet(nn.Module):
         self.load_state_dict(model_dict, strict=True)
 
     def init_weights(self, backbone_path, local_rank=1):
-        """ Initialize weights for training. """
+        """ Initialize weights for training, pre-training on ImageNet-1K"""
         # Initialize the backbone with the pretrained weights.
         print('Initialize weights from:', backbone_path)
         self.backbone.init_backbone(backbone_path)
@@ -301,7 +303,7 @@ class CoreNet(nn.Module):
                 pred_outs_after_NMS = self.Detect(self, pred_outs, use_cross_class_nms)
 
             # track instances frame-by-frame
-            if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
+            if self.cfg.DATASETS.TYPE == 'vis':
                 with timer.env('Track_TF'):
                     pred_outs_after_track = self.Track(pred_outs_after_NMS, img_meta, x)
                 return pred_outs_after_track

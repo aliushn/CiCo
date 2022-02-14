@@ -409,6 +409,8 @@ def compute_validation_map_coco(net, epoch, iteration, log: Log = None):
 
 def setup_eval(epoch):
     eval_type = 'bbox' if cfg.DATASETS.TYPE == 'vid' else 'segm'
+    if cfg.DATASETS.TYPE == 'vis' and not cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
+        cfg.TEST.OVERLAP_FRAMES = max(cfg.TEST.OVERLAP_FRAMES, 1)
     eval_script.parse_args(['--batch_size=' + str(cfg.TEST.IMS_PER_BATCH),
                             '--eval_types=' + eval_type,
                             '--epoch=' + str(epoch),

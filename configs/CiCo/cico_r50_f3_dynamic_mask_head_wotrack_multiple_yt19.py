@@ -1,18 +1,19 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/_base_/models/swint_base.yaml',
-          'configs/CiCo/base_vis.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/CiCo/base_vis.py']
 
 MODEL = dict(
     BACKBONE=dict(
-        SWINT=dict(
-            path='swint_base_coco_dynamic_mask_head_300_640_35_230000.pth')
-    ),
+        CONV_BODY='ResNet50',
+        PATH='r50_base_coco_dynamic_mask_head_300_640_32_220000.pth'),
 
+    TRACK_HEADS=dict(
+        TRAIN_TRACK=False
+    ),
+    
     MASK_HEADS=dict(
         TRAIN_MASKS=True,
         USE_DYNAMIC_MASK=True,
         LOSS_WITH_DICE_COEFF=False,
-        MASK_DIM=8,
-        PROTO_NET=[(192, 3, 1), (192, 3, 1), (192, 3, 1), (None, -2, {})])
+        MASK_DIM=8)
 )
 
 CiCo = dict(
@@ -49,4 +50,4 @@ TEST = dict(
     NUM_CLIP_FRAMES=3)
 
 OUTPUT_DIR = 'outputs/YTVIS2019/'
-NAME = 'cico_swint_f3_dynamic_mask_head_multiple_yt19_pergpu3'
+NAME = 'cico_r50_f3_dynamic_mask_head_wotrack_multiple_yt19'
