@@ -45,7 +45,7 @@ def parse_args():
                              'determined from the file name.')
     parser.add_argument('--keep_latest', dest='keep_latest', action='store_true',
                         help='Only keep the latest checkpoint instead of each one.')
-    parser.add_argument('--keep_latest_interval', default=100000, type=int,
+    parser.add_argument('--keep_latest_interval', default=10000, type=int,
                         help='When --keep_latest is on, don\'t delete the latest file at these intervals. This should be a multiple of save_interval or 0.')
     parser.add_argument('--no_log', dest='log', action='store_false',
                         help='Don\'t log per iteration information into log_folder.')

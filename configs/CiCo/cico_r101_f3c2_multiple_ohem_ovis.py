@@ -8,4 +8,5 @@ MODEL = dict(
 )
 
 OUTPUT_DIR = 'outputs/OVIS/'
-NAME = 'cico_r101_f3c2_multiple_ohem_ovis'
+# NAME = 'cico_r101_f3c2_multiple_ohem_ovis'
+NAME = 'r101_base_OVIS_cubic_3D_c3s2_indbox_multiple_ohem_1X'

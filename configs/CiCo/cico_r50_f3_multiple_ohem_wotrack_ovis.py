@@ -1,18 +1,15 @@
-_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/_base_/models/swint_base.yaml',
-          'configs/CiCo/base_vis.py']
+_base_ = ['configs/_base_/models/r50_base.yaml', 'configs/CiCo/base_vis.py']
 
 MODEL = dict(
     BACKBONE=dict(
-        SWINT=dict(
-            path='swint_base_coco_300_576_40_320000.pth')
-    ),
+        CONV_BODY='ResNet50',
+        PATH='resnet50_coco_46.pth'),
 
-    FPN=dict(
-        NUM_FEATURES=256),
+    CLASS_HEADS=dict(
+        USE_FOCAL_LOSS=False),
 
-    MASK_HEADS=dict(
-        TRAIN_MASKS=True,
-        PROTO_NET=[(192, 3, 1), (192, 3, 1), (192, 3, 1), (None, -2, {})])
+    TRACK_HEADS=dict(
+        TRAIN_TRACK=False)
 )
 
 CiCo = dict(
@@ -42,11 +39,12 @@ DATASETS = dict(
 SOLVER = dict(
     IMS_PER_BATCH=4,
     NUM_CLIP_FRAMES=3,
-    NUM_CLIPS=2)
+    NUM_CLIPS=1)
 
 TEST = dict(
     IMS_PER_BATCH=1,
-    NUM_CLIP_FRAMES=3)
+    NUM_CLIP_FRAMES=3,
+    NMS_CONF_THRESH=0.1)
 
 OUTPUT_DIR = 'outputs/OVIS/'
-NAME = 'cico_swint_f3_multiple_ovis'
+NAME = 'cico_r50_f3_multiple_ohem_wotrack_ovis'
