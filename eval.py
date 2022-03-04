@@ -50,8 +50,6 @@ def parse_args(argv=None):
                         help='Use cuda to evaulate model')
     parser.add_argument('--display_single_mask', default=False, type=str2bool,
                         help='Whether or not to display masks over bounding boxes')
-    parser.add_argument('--display_single_mask_occlusion', default=True, type=str2bool,
-                        help='Whether or not to display masks over bounding boxes')
     parser.add_argument('--display_masks', default=True, type=str2bool,
                         help='Whether or not to display masks over bounding boxes')
     parser.add_argument('--display_bboxes', default=True, type=str2bool,
@@ -64,6 +62,8 @@ def parse_args(argv=None):
                         help='Whether or not to display scores in addition to classes')
     parser.add_argument('--display_fpn_outs', default=True, type=str2bool,
                         help='Whether or not to display outputs after fpn')
+    parser.add_argument('--display_bg', default=True, type=str2bool,
+                        help='Display qualitative results instead of quantitative ones.')
     parser.add_argument('--display', dest='display', action='store_true',
                         help='Display qualitative results instead of quantitative ones.')
     parser.add_argument('--save_folder', default='weights/prototypes/', type=str,
@@ -97,11 +97,14 @@ def prep_display(dets_out, imgs, img_meta=None, undo_transform=True, mask_alpha=
     if not os.path.exists(root_dir):
         os.makedirs(root_dir)
 
-    if undo_transform:
-        imgs_numpy = undo_image_transformation(imgs, ori_h, ori_w, img_h, img_w)
-        imgs_gpu = torch.Tensor(imgs_numpy).cuda()
+    if args.display_bg:
+        if undo_transform:
+            imgs_numpy = undo_image_transformation(imgs, ori_h, ori_w, img_h, img_w)
+            imgs_gpu = torch.Tensor(imgs_numpy).cuda()
+        else:
+            imgs_gpu = imgs / 255.0
     else:
-        imgs_gpu = imgs / 255.0
+        imgs_gpu = torch.ones(imgs.size(0), ori_h, ori_w, 3)
 
     # torch.cuda.synchronize()
     if dets_out['box'].nelement() == 0:
@@ -124,16 +127,37 @@ def prep_display(dets_out, imgs, img_meta=None, undo_transform=True, mask_alpha=
         for t in range(imgs_gpu.size(0)):
             img_gpu = imgs_gpu[t]
             boxes = dets_out['box'][:args.top_k, t].detach().cpu().numpy()
-            if 'mask' in dets_out.keys():
+            if args.display_masks:
                 masks = dets_out['mask'][:args.top_k, t]
+                # After this, mask is of size [num_dets, h, w, 1]
+                masks = masks[:num_dets_to_consider, :, :, None]
+
+            if args.display_single_mask:
+                for j in range(num_dets_to_consider):
+                    # Prepare the RGB images for each mask given their color (size [num_dets, h, w, 1])
+                    color = get_color(j, color_type, on_gpu=img_gpu.device.index,
+                                      undo_transform=undo_transform).view(1, 1, 3)
+
+                    mask_color = masks[j].repeat(1, 1, 3) * color * mask_alpha
+
+                    # This is 1 everywhere except for 1-mask_alpha where the mask is
+                    inv_alph_masks = masks[j] * (-mask_alpha) + 1
+                    img_gpu_single = img_gpu * inv_alph_masks + mask_color
+
+                    # Then draw the stuff that needs to be done on the cpu
+                    # Note, make sure this is a uint8 tensor or opencv will not anti alias text for whatever reason
+                    img_numpy_single = (img_gpu_single * 255).byte().cpu().numpy()
+
+                    plt.imshow(img_numpy_single)
+                    plt.axis('off')
+                    plt.savefig('/'.join([root_dir, str(img_meta[t]['frame_id'])+'_'+str(j)+'.jpg']),
+                                bbox_inches='tight', pad_inches=0)
+                    plt.clf()
 
             # First, draw the masks on the GPU where we can do it really fast
             # Beware: very fast but possibly unintelligible mask-drawing code ahead
             # I wish I had access to OpenGL or Vulkan but alas, I guess Pytorch tensor operations will have to suffice
             if args.display_masks:
-                # After this, mask is of size [num_dets, h, w, 1]
-                masks = masks[:num_dets_to_consider, :, :, None]
-
                 # Prepare the RGB images for each mask given their color (size [num_dets, h, w, 1])
                 colors = torch.cat(
                     [get_color(j, color_type, on_gpu=img_gpu.device.index, undo_transform=undo_transform).view(1, 1, 1, 3)
@@ -158,7 +182,7 @@ def prep_display(dets_out, imgs, img_meta=None, undo_transform=True, mask_alpha=
             img_numpy = (img_gpu * 255).byte().cpu().numpy()
 
             if args.display_text or args.display_bboxes:
-                for j in reversed(range(num_dets_to_consider)):
+                for j in range(num_dets_to_consider):
                     color = get_color(j, color_type)
                     # get the bbox_idx to know box's layers (after FPN): p3-p7
                     # if 'priors' in dets_out.keys():
@@ -212,14 +236,9 @@ def prep_display(dets_out, imgs, img_meta=None, undo_transform=True, mask_alpha=
 
             plt.imshow(img_numpy)
             plt.axis('off')
-            plt.savefig(''.join([root_dir, '/', str(img_meta[t]['frame_id']), '.jpg']), bbox_inches='tight', pad_inches=0)
+            plt.savefig(''.join([root_dir, '/', str(img_meta[t]['frame_id'])+str(j), '.jpg']),
+                        bbox_inches='tight', pad_inches=0)
             plt.clf()
-
-
-def temp(targets, h, w, img_metas):
-    gt_masks, gt_boxes, gt_labels, _ = targets
-
-    gt_masks, gt_bboxes, img_metas = GtList_from_tensor(h, w, gt_masks, gt_boxes, img_metas)
 
 
 def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None, clip_frames=1, use_cico=False):
@@ -242,9 +261,9 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
     for vdx, vid in enumerate(dataset.vid_ids):
         progress_videos = (vdx + 1) / dataset_size * 100
         # Inverse direction to process videos
-        # if args.display:
-        #     vdx = -vdx - 1
-        #     vid = dataset.vid_ids[vdx]
+        if args.display:
+            vdx = -vdx - 1
+            vid = dataset.vid_ids[vdx]
 
         vid_objs = {}
         if data_type == 'vis':
@@ -284,7 +303,7 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
             preds = net(images, img_meta=imgs_meta)
             avg_fps_wodata = 1. / ((time.time()-t) / n_frames)
             frame_times.add(timer.total_time())
-            avg_fps = 1. / (frame_times.get_avg() / clip_frames) if vdx > 0 or cdx > 0 else 0
+            avg_fps = 1. / max((frame_times.get_avg() / clip_frames, 1e-2))
             print('\rProcessing videos:  %2d / %2d (%5.2f %%), clips:  %2d / %2d;  '
                   'FPS w /wo load_data: %5.2f / %5.2f fps '
                   % (vdx+1, dataset_size, progress_videos, cdx+1, len_clips, avg_fps, avg_fps_wodata), end='')

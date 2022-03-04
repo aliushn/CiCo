@@ -58,56 +58,55 @@ class ClipPredictionModule(nn.Module):
         # self.priors = torch.cat(self.priors, dim=1).cpu()
         # self.prior_levels = torch.cat(self.prior_levels, dim=1).cpu()
 
-        if cfg.CiCo.CPH.CUBIC_MODE:
-            self.conv_type, conv = 'conv3d', nn.Conv3d
-            if self.cfg.CiCo.CPH.MATCHER_CENTER:
-                kernel_size, padding, stride = (self.clip_frames, 3, 3), (0, 1, 1), (1, 1, 1)
-            else:
-                kernel_size, padding = cfg.CiCo.CPH.LAYER_KERNEL_SIZE, cfg.CiCo.CPH.LAYER_PADDING
-                stride = cfg.CiCo.CPH.LAYER_STRIDE
+        CPH = cfg.CiCo.CPH
+        if CPH.CUBIC_MODE and CPH.MATCHER_MULTIPLE:
+            self.conv = nn.Conv3d
+            kernel_size, padding = cfg.CiCo.CPH.LAYER_KERNEL_SIZE, cfg.CiCo.CPH.LAYER_PADDING
+            stride = cfg.CiCo.CPH.LAYER_STRIDE
         else:
-            self.conv_type, conv = 'conv2d', nn.Conv2d
-            kernel_size, padding, stride = (3, 3), (1, 1), (1, 1)
+            self.conv = nn.Conv2d
+            kernel_size, padding, stride = 3, 1, 1
 
         if cfg.MODEL.MASK_HEADS.TRAIN_MASKS and cfg.CiCo.CPH.CIRCUMSCRIBED_BOXES:
-            self.bbox_layer = conv(self.in_channels, self.num_priors*4,
-                                   kernel_size=kernel_size, padding=padding, stride=stride)
+            self.bbox_layer = self.conv(self.in_channels, self.num_priors*4,
+                                        kernel_size=kernel_size, padding=padding, stride=stride)
         else:
-            self.bbox_layer = conv(self.in_channels, self.num_priors*4*self.clip_frames,
-                                   kernel_size=kernel_size, padding=padding, stride=stride)
+            self.bbox_layer = self.conv(self.in_channels, self.num_priors*4*self.clip_frames,
+                                        kernel_size=kernel_size, padding=padding, stride=stride)
 
         if cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
-            self.centerness_layer = conv(self.in_channels, self.num_priors,
-                                         kernel_size=kernel_size, padding=padding, stride=stride)
+            self.centerness_layer = self.conv(self.in_channels, self.num_priors,
+                                              kernel_size=kernel_size, padding=padding, stride=stride)
 
         if cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
-            self.conf_layer = conv(self.in_channels, self.num_priors*self.num_classes,
-                                   kernel_size=kernel_size, padding=padding, stride=stride)
+            self.conf_layer = self.conv(self.in_channels, self.num_priors*self.num_classes,
+                                        kernel_size=kernel_size, padding=padding, stride=stride)
 
         if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-            self.track_layer = conv(self.in_channels, self.num_priors*self.track_dim,
-                                    kernel_size=kernel_size, padding=padding, stride=stride)
+            self.track_layer = self.conv(self.in_channels, self.num_priors*self.track_dim,
+                                         kernel_size=kernel_size, padding=padding, stride=stride)
 
         if cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-            self.mask_layer = conv(self.in_channels, self.num_priors*self.mask_dim,
-                                   kernel_size=kernel_size, padding=padding, stride=stride)
+            self.mask_layer = self.conv(self.in_channels, self.num_priors*self.mask_dim,
+                                        kernel_size=kernel_size, padding=padding, stride=stride)
 
         # What is this ugly lambda doing in the middle of all this clean prediction module code?
-        self.conv_tower_type, conv_tower = ('conv3d', nn.Conv3d) if cfg.CiCo.CPH.TOWER_CUBIC_MODE else ('conv2d', nn.Conv2d)
-        def make_extra(num_layers, in_channels):
+        def make_extra(num_layers, in_channels, conv_tower):
             if num_layers == 0:
                 return lambda x: x
             else:
                 # Looks more complicated than it is. This just creates an array of num_layers alternating conv-relu
-                return nn.Sequential(*sum([[
-                    conv_tower(in_channels, in_channels, kernel_size=3, padding=1),
-                    nn.ReLU(inplace=True)
-                ] for _ in range(num_layers)], []))
+                return nn.Sequential(*sum([[conv_tower(in_channels, in_channels, kernel_size=3, padding=1),
+                                            nn.ReLU(inplace=True)]
+                                           for _ in range(num_layers)], []))
 
-        self.bbox_extra = make_extra(cfg.MODEL.BOX_HEADS.TOWER_LAYERS, self.in_channels)
-        self.conf_extra = make_extra(cfg.MODEL.CLASS_HEADS.TOWER_LAYERS, self.in_channels)
+        self.conv_tower_box = nn.Conv3d if CPH.CUBIC_MODE and CPH.CUBIC_BOX_HEAD else nn.Conv2d
+        self.conv_tower_conf = nn.Conv3d if CPH.CUBIC_MODE and CPH.CUBIC_CLASS_HEAD else nn.Conv2d
+        self.conv_tower_track = nn.Conv3d if CPH.CUBIC_MODE and CPH.CUBIC_TRACK_HEAD else nn.Conv2d
+        self.bbox_extra = make_extra(cfg.MODEL.BOX_HEADS.TOWER_LAYERS, self.in_channels, self.conv_tower_box)
+        self.conf_extra = make_extra(cfg.MODEL.CLASS_HEADS.TOWER_LAYERS, self.in_channels, self.conv_tower_conf)
         if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-            self.track_extra = make_extra(cfg.MODEL.TRACK_HEADS.TOWER_LAYERS, self.in_channels)
+            self.track_extra = make_extra(cfg.MODEL.TRACK_HEADS.TOWER_LAYERS, self.in_channels, self.conv_tower_track)
 
     def forward(self, fpn_outs):
         """
@@ -140,11 +139,11 @@ class ClipPredictionModule(nn.Module):
             preds['prior_levels'] += [prior_levels]
 
             x = fpn_outs[idx]
-            x = self.unfold_tensor(x) if self.conv_tower_type == 'conv3d' else x
+            x_fold = self.fold_tensor(x)
 
             # bounding boxes regression
-            bbox_x = self.bbox_extra(x)
-            bbox_x = self.unfold_tensor(bbox_x) if self.conv_type != self.conv_tower_type else bbox_x
+            bbox_x = self.bbox_extra(x_fold) if self.conv_tower_box == nn.Conv3d else self.bbox_extra(x)
+            bbox_x = self.unfold_tensor(bbox_x) if self.conv != self.conv_tower_box else bbox_x
             bbox = self.permute_channels(self.bbox_layer(bbox_x))
             bs = bbox.size(0) * bbox.size(1) if bbox.dim() == 5 else bbox.size(0)
             preds['loc'] += [bbox.reshape(bs, n_proposals, -1)]
@@ -156,8 +155,8 @@ class ClipPredictionModule(nn.Module):
 
             # Classification
             if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
-                conf_x = self.conf_extra(x)
-                conf_x = self.unfold_tensor(conf_x) if self.conv_type != self.conv_tower_type else conf_x
+                conf_x = self.conf_extra(x_fold) if self.conv_tower_conf == nn.Conv3d else self.conf_extra(x)
+                conf_x = self.unfold_tensor(conf_x) if self.conv != self.conv_tower_conf else conf_x
                 conf = self.permute_channels(self.conf_layer(conf_x))
                 preds['conf'] += [conf.reshape(bs, n_proposals, -1)]
 
@@ -169,8 +168,8 @@ class ClipPredictionModule(nn.Module):
 
             # Tracking
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-                track_x = self.track_extra(x)
-                track_x = self.unfold_tensor(track_x) if self.conv_type != self.conv_tower_type else track_x
+                track_x = self.track_extra(x_fold) if self.conv_tower_track == nn.Conv3d else self.track_extra(x)
+                track_x = self.unfold_tensor(track_x) if self.conv != self.conv_tower_track else track_x
                 track = self.permute_channels(self.track_layer(track_x))
                 preds['track'] += [F.normalize(track.reshape(bs, n_proposals, -1), dim=-1)]
 
@@ -179,9 +178,13 @@ class ClipPredictionModule(nn.Module):
 
         return preds
 
-    def unfold_tensor(self, x):
+    def fold_tensor(self, x):
         _, c, h, w = x.size()
         return x.reshape(-1, self.clip_frames, c, h, w).transpose(1, 2)
+
+    def unfold_tensor(self, x):
+        _, c, _, h, w = x.size()
+        return x.transpose(1, 2).reshape(-1, c, h, w)
 
     def permute_channels(self, x):
         return x.permute(0, 2, 3, 1).contiguous() if x.dim() == 4 else x.permute(0, 2, 3, 4, 1).contiguous()

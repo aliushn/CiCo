@@ -30,7 +30,7 @@ def make_net(in_channels, conf, use_3D=False, norm_type=None, include_last_relu=
             num_channels = layer_cfg[0]
             kernel_size = layer_cfg[1]
 
-            if kernel_size > 0:
+            if isinstance(kernel_size, tuple) or (isinstance(kernel_size, int) and kernel_size > 0):
                 conv = nn.Conv3d if use_3D else nn.Conv2d
                 layer1 = conv(in_channels, num_channels, kernel_size, padding=layer_cfg[2])
                 if norm_type is None:

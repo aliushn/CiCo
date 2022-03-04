@@ -39,6 +39,7 @@ datasets/cocovis.py
 layers/modules/NonLocalBlock.py
 layers/modules/SpatioTemporalBlock.py
 layers/functions/track_TF_within_clip.py
+*.sh
 
 # dirs
 web/

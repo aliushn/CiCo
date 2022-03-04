@@ -179,7 +179,7 @@ class CoreNet(nn.Module):
                             if [kh_p, kw_p] == [kh, kw] and c_out % c_out_p == 0:
                                 print('load 3D parameters from pre-trained models:', key)
                                 scale = c_out // c_out_p
-                                model_dict[key] = state_dict[key].unsqueeze(2).repeat(scale,1,t,1,1).to(device)/scale/t
+                                model_dict[key] = state_dict[key].unsqueeze(2).repeat(scale,1,t,1,1).to(device)/t
                             else:
                                 print('Size is different in pre-trained model and current model:', key)
 

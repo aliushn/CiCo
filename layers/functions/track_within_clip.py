@@ -89,7 +89,7 @@ class Track_TF(object):
                 else:
                     sim = None
 
-                img_over_idx = torch.nonzero(self.prev_candidate['img_ids'].view(-1, 1) == candidate['img_ids'].view(1, -1),
+                img_over_idx = torch.nonzero(self.prev_candidate['img_ids'].unsqueeze(1) == candidate['img_ids'].unsqueeze(0),
                                              as_tuple=False)
                 match_coeff = list(self.match_coeff)
                 if img_over_idx.nelement() > 0:
@@ -185,8 +185,7 @@ class Track_TF(object):
 
                 # Choose objects detected and segmented by frame-level prediction head
                 # Whether add some objects whose masks are tracked form previous frames by Temporal Fusion Module
-                cond1 = self.prev_candidate['tracked_mask'] <= max(3, 15//self.num_clip_frames) if self.use_naive_track \
-                    else self.prev_candidate['tracked_mask'] == 0
+                cond1 = self.prev_candidate['tracked_mask'] <= 3 if self.use_naive_track else self.prev_candidate['tracked_mask'] == 0
                 # a declining weights to remove some false positives that cased by consecutively track to segment
                 cond2 = self.prev_candidate['score'].clone().detach() > self.conf_thresh
                 keep = cond1 & cond2

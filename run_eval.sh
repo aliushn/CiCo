@@ -14,7 +14,19 @@
 
 # CUDA_VISIBLE_DEVICES=0 python eval.py --config=configs/CiCo/cico_r101_f3c2_multiple_ohem_ovis.py  --trained_model=outputs/OVIS/cico_r101_f3c2_multiple_ohem_ovis/cico_r101_f3c2_multiple_ohem_ovis_11_55000.pth --eval_data=valid --batch_size=1 --overlap_frames=1 --epoch=11
 
-CUDA_VISIBLE_DEVICES=0 python eval.py --config=configs/CiCo/cico_r50_f5_multiple_yt21.py  --trained_model=outputs/YTVIS2021/cico_r50_f5_multiple_yt21/cico_r50_f5_multiple_yt21_10_60000.pth --eval_data=valid --batch_size=1 --overlap_frames=2 --epoch=1
+# CUDA_VISIBLE_DEVICES=0 python eval.py --config=configs/CiCo/cico_r50_f6_multiple_ohem_ovis.py  --trained_model=outputs/OVIS/cico_r50_f6_multiple_ohem_ovis/cico_r50_f6_multiple_ohem_ovis_11_40000.pth --eval_data=valid --batch_size=1 --overlap_frames=2 --epoch=2
 
-# CUDA_VISIBLE_DEVICES=0 python eval.py --config=configs/CiCo/cico_r50_f5c2_multiple_ohem_ovis.py  --trained_model=outputs/OVIS/cico_r50_f5c2_multiple_ohem_ovis/cico_r50_f5c2_multiple_ohem_ovis_17_50000.pth --eval_data=valid --batch_size=1 --overlap_frames=1 --epoch=1
+# CUDA_VISIBLE_DEVICES=0 python eval.py --config=configs/CiCo/cico_r50_f7_multiple_yt19.py  --trained_model=outputs/YTVIS2019/cico_r50_f7_multiple_yt19/cico_r50_f7_multiple_yt19_10_55000.pth --eval_data=valid --batch_size=1 --overlap_frames=0 --epoch=1 --display
+
+# CUDA_VISIBLE_DEVICES=0 python eval.py --config=configs/CiCo/cico_r50_f5_multiple_sparse_yt19.py  --trained_model=outputs/YTVIS2019/cico_r50_f5_multiple_sparse_yt19/cico_r50_f5_multiple_sparse_yt19_11_45000.pth --eval_data=valid --batch_size=1 --overlap_frames=1 --epoch=1
+
+iCUDA_VISIBLE_DEVICES=0 python eval.py --config=configs/CiCo/cico_r50_f6_multiple_sparse_yt19.py  --trained_model=outputs/YTVIS2019/cico_r50_f6_multiple_sparse_yt19/cico_r50_f6_multiple_sparse_yt19_11_60000.pth --eval_data=valid --batch_size=1 --overlap_frames=0 --epoch=1
+
+# CUDA_VISIBLE_DEVICES=0 python eval.py --config=configs/CiCo/cico_r50_f5c2_multiple_ohem_ovis.py  --trained_model=outputs/OVIS/cico_r50_f5c2_multiple_ohem_ovis/cico_r50_f5c2_multiple_ohem_ovis_11_60000.pth --eval_data=valid --batch_size=1 --overlap_frames=1 --epoch=11
+
+# CUDA_VISIBLE_DEVICES=0 python eval.py --config=configs/CiCo/cico_r50_f4c2_multiple_ohem_ovis.py  --trained_model=outputs/OVIS/cico_r50_f4c2_multiple_ohem_ovis/cico_r50_f4c2_multiple_ohem_ovis_11_40000.pth --eval_data=valid --batch_size=1 --overlap_frames=2 --epoch=12
+
+# CUDA_VISIBLE_DEVICES=0 python eval.py --config=configs/CiCo/cico_r50_f5c2_multiple_ohem_ovis.py  --trained_model=outputs/OVIS/cico_r50_f5c2_multiple_ohem_ovis/cico_r50_f5c2_multiple_ohem_ovis_11_60000.pth --eval_data=valid --batch_size=1 --overlap_frames=3 --epoch=13
+
+# CUDA_VISIBLE_DEVICES=0 python eval.py --config=configs/CiCo/cico_r50_f5c2_multiple_ohem_ovis.py  --trained_model=outputs/OVIS/cico_r50_f5c2_multiple_ohem_ovis/cico_r50_f5c2_multiple_ohem_ovis_11_60000.pth --eval_data=valid --batch_size=1 --overlap_frames=4 --epoch=14
 

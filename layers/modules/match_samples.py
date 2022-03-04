@@ -151,23 +151,18 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
         The matched indices corresponding to 1)location and 2)confidence preds.
     """
     gt_labels = gt_labels.long()
-    n_proposals = loc_data.size(0)
-    n_objs, n_clip_frames, _ = gt_boxes.size()
+    n_proposals, n_clip_frames = loc_data.size(0), gt_boxes.size(1)
 
     ind_range = [jdx] if ind_range is None else ind_range
-    gt_boxes_hw = gt_boxes[:, ind_range, 2:]-gt_boxes[:, ind_range, :2]
-    # At least occur once in the selected frames
-    valid = ((gt_boxes_hw > 0).reshape(n_objs, -1, 2).sum(dim=-1) == 2).sum(dim=-1) > 0
-    if valid.sum() > 0:
-        if (~valid).sum() > 0:
-            valid_gt_boxes = gt_boxes[valid]
-            n_objs = valid_gt_boxes.size(0)
-            valid_idx = torch.nonzero(valid, as_tuple=False).reshape(-1)
-        else:
-            valid_gt_boxes = gt_boxes
+    gt_boxes_hw = gt_boxes[:, jdx, 2:]-gt_boxes[:, jdx, :2]
+    # Must occur in the current central frame
+    valid = (gt_boxes_hw > 0).sum(dim=-1) == 2
+    n_objs = valid.sum()
+    if n_objs > 0:
+        valid_idx = torch.nonzero(valid, as_tuple=False).reshape(-1)
+        valid_gt_boxes = gt_boxes[valid]
 
-        # ------- Introducing smallest enclosing boxes of multiple boxes in the clip to define positive/negative samples
-        # gt_boxes_min_area = torch.prod(gt_boxes[:, :, 2:]-gt_boxes[:, :, :2], dim=-1).min(dim=-1)[1]
+        # Introducing smallest enclosing boxes of multiple boxes in the clip to define positive/negative samples
         gt_boxes_cir = circum_boxes(valid_gt_boxes[:, ind_range].reshape(n_objs, -1))
 
         # decoded_priors [cx, cy, w, h] => [x1, y1, x2, y2]
@@ -213,17 +208,16 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
         # print(ind_range, keep_pos_cir.sum(), n_objs)
         # print(best_truth_idx_cir[keep_pos_cir], best_truth_overlap_cir[keep_pos_cir])
 
-        valid_best_truth_idx_cir = valid_idx[best_truth_idx_cir] if (~valid).sum() > 0 else best_truth_idx_cir
-        conf_t[idx][keep_pos_cir] = gt_labels[valid_best_truth_idx_cir[keep_pos_cir]]  # label as positive samples
-        conf_t[idx][keep_neg_cir] = 0                                                  # label as background
+        best_truth_idx_cir_pos = best_truth_idx_cir[keep_pos_cir]
+        conf_t[idx][keep_pos_cir] = gt_labels[valid][best_truth_idx_cir_pos]   # label as positive samples
+        conf_t[idx][keep_neg_cir] = 0                                          # label as background
 
         if use_cir_boxes:
-            matches = circum_boxes(valid_gt_boxes.reshape(n_objs, -1))[valid_best_truth_idx_cir]
-            loc_pos = encode(matches[keep_pos_cir], priors[keep_pos_cir, :4])
+            matches = circum_boxes(valid_gt_boxes.reshape(n_objs, -1))[best_truth_idx_cir_pos]
+            loc_pos = encode(matches, priors[keep_pos_cir, :4])
         else:
-            matches = gt_boxes[valid_best_truth_idx_cir][keep_pos_cir]
-            T_out = matches.size(1)
-            loc_pos = encode(matches.reshape(-1, 4), priors[keep_pos_cir].reshape(-1, 4)).reshape(keep_pos_cir.sum(), T_out*4)
+            matches = valid_gt_boxes[best_truth_idx_cir_pos]
+            loc_pos = encode(matches.reshape(-1, 4), priors[keep_pos_cir].reshape(-1, 4)).reshape(keep_pos_cir.sum(), -1)
 
         # Please Triple check to avoid Nan and Inf
         keep = (torch.isinf(loc_pos).sum(-1) + torch.isnan(loc_pos).sum(-1)) > 0
@@ -238,6 +232,6 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
             conf_t[idx][keep] = -1
 
         loc_t[idx, keep_pos_cir] = loc_pos
-        idx_t[idx] = valid_best_truth_idx_cir.view(-1)
+        idx_t[idx] = valid_idx[best_truth_idx_cir].view(-1)
         if gt_obj_ids is not None:
-            obj_ids_t[idx] = gt_obj_ids[valid_best_truth_idx_cir]
+            obj_ids_t[idx] = gt_obj_ids[valid][best_truth_idx_cir]

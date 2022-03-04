@@ -45,7 +45,7 @@ def parse_args():
                              'determined from the file name.')
     parser.add_argument('--keep_latest', dest='keep_latest', action='store_true',
                         help='Only keep the latest checkpoint instead of each one.')
-    parser.add_argument('--keep_latest_interval', default=10000, type=int,
+    parser.add_argument('--keep_latest_interval', default=100000, type=int,
                         help='When --keep_latest is on, don\'t delete the latest file at these intervals. This should be a multiple of save_interval or 0.')
     parser.add_argument('--no_log', dest='log', action='store_false',
                         help='Don\'t log per iteration information into log_folder.')
@@ -125,6 +125,7 @@ def train(cfg):
     iteration = max(args.start_iter, 0)
     start_epoch = max(args.start_epoch, 0)
     adj_lr_times = sum([1 for step in list(cfg.SOLVER.LR_STEPS) if step <= start_epoch])
+    print(adj_lr_times)
     cur_lr = cfg.SOLVER.LR * (cfg.SOLVER.GAMMA ** adj_lr_times)
     # Which learning rate adjustment step are we on? lr' = lr * gamma ^ step_index
     step_index = adj_lr_times
@@ -249,12 +250,12 @@ def train(cfg):
 
                 last_time = cur_time
                 # Save models and run valid set
-                if iteration % cfg.SOLVER.SAVE_INTERVAL == 0 and iteration > 0 and args.local_rank == 0:
+                if iteration % int(0.5*cfg.SOLVER.SAVE_INTERVAL) == 0 and iteration > 0:
                     if args.keep_latest:
                         latest = SavePath.get_latest(cfg.OUTPUT_DIR, cfg.DATASETS.TYPE)
-
-                    print('Saving state, epoch:', epoch)
-                    torch.save(net.state_dict(), save_path(epoch, iteration))
+                    if epoch > 5:
+                        print('Saving state, epoch:', epoch)
+                        torch.save(net.state_dict(), save_path(epoch, iteration))
 
                     if args.keep_latest and latest is not None:
                         if args.keep_latest_interval <= 0 or iteration % args.keep_latest_interval != cfg.SOLVER.SAVE_INTERVAL:
@@ -273,9 +274,9 @@ def train(cfg):
                             valid_sub_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.VALID_SUB, cfg.INPUT,
                                                             cfg.TEST.NUM_CLIP_FRAMES, num_clips=1, inference=True)
                             compute_validation_map(net, valid_sub_dataset)
-
+                             
                             # valid or test datasets
-                            if cfg.DATASETS.TYPE == 'vis':
+                            if cfg.DATASETS.TYPE == 'vis' and epoch >= 7:
                                 valid_dataset = get_dataset(cfg.DATASETS.TYPE,  cfg.DATASETS.VALID, cfg.INPUT,
                                                             cfg.TEST.NUM_CLIP_FRAMES, num_clips=1, inference=True)
                                 compute_validation_map(net, valid_dataset)

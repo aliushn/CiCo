@@ -10,17 +10,16 @@ CiCo = dict(
     ENGINE=True,
 
     CPH=dict(
+        TOWER_CUBIC_MODE=True,
         CUBIC_MODE=True,
-        LAYER_KERNEL_SIZE=(1, 3, 3),
-        LAYER_STRIDE=(1, 1, 1),
-        CUBIC_CLASS_HEAD=True,
-        CUBIC_BOX_HEAD=True,
-        CUBIC_TRACK_HEAD=True,
-        MATCHER_MULTIPLE=True,
+        LAYER_KERNEL_SIZE=(3, 3, 3),
+        LAYER_PADDING=(0, 1, 1),
+        LAYER_STRIDE=(2, 1, 1),
+        MATCHER_CENTER=False,
         CIRCUMSCRIBED_BOXES=False),
 
     CPN=dict(
-        CUBIC_MODE=False)
+        CUBIC_MODE=True)
 
 )
 
@@ -34,12 +33,13 @@ DATASETS = dict(
 
 SOLVER = dict(
     IMS_PER_BATCH=4,
-    NUM_CLIP_FRAMES=3,
+    NUM_CLIP_FRAMES=7,
     NUM_CLIPS=1)
 
 TEST = dict(
     IMS_PER_BATCH=1,
-    NUM_CLIP_FRAMES=3)
+    NUM_CLIP_FRAMES=7,
+    NMS_IoU_THRESH=0.5)
 
 OUTPUT_DIR = 'outputs/YTVIS2019/'
-NAME = 'cico_r50_f3_multiple_cphmh_yt19'
+NAME = 'cico_r50_f7_multiple_yt19'

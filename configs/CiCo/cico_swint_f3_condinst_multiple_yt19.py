@@ -7,12 +7,6 @@ MODEL = dict(
             path='swint_base_coco_dynamic_mask_head_300_640_35_230000.pth')
     ),
 
-    PREDICTION_HEADS=dict(
-        CUBIC_MODE=True,
-        CUBIC_3D_MODE=True,
-        CUBIC_MODE_ON_PROTONET=True,
-        CIRCUMSCRIBED_BOXES=False),
-
     MASK_HEADS=dict(
         TRAIN_MASKS=True,
         USE_DYNAMIC_MASK=True,
@@ -22,17 +16,31 @@ MODEL = dict(
 )
 
 CiCo = dict(
-    MATCHER_CENTER=False,
-    CPH_LAYER_KERNEL_SIZE=(1, 3, 3),
-    CPH_LAYER_STRIDE=(1, 1, 1))
+    ENGINE=True,
+
+    CPH=dict(
+        CUBIC_MODE=True,
+        LAYER_KERNEL_SIZE=(1, 3, 3),
+        LAYER_STRIDE=(1, 1, 1),
+        CUBIC_CLASS_HEAD=True,
+        CUBIC_BOX_HEAD=True,
+        CUBIC_TRACK_HEAD=True,
+        MATCHER_MULTIPLE=True,
+        CIRCUMSCRIBED_BOXES=False),
+
+
+    CPN=dict(
+        CUBIC_MODE=False)
+
+)
 
 DATASETS = dict(
     TYPE='vis',
     NUM_CLASSES=40,
-    TRAIN='train_YouTube_VOS2021_dataset',
-    VALID_SUB='valid_sub_YouTube_VOS2021_dataset',
-    VALID='valid_YouTube_VOS2021_dataset',
-    TEST='test_YouTube_VOS2021_dataset')
+    TRAIN='train_YouTube_VOS2019_dataset',
+    VALID_SUB='valid_sub_YouTube_VOS2019_dataset',
+    VALID='valid_YouTube_VOS2019_dataset',
+    TEST='test_YouTube_VOS2019_dataset')
 
 SOLVER = dict(
     IMS_PER_BATCH=4,
@@ -43,5 +51,5 @@ TEST = dict(
     IMS_PER_BATCH=1,
     NUM_CLIP_FRAMES=3)
 
-OUTPUT_DIR = 'weights/YTVIS2021/'
-NAME = 'cico_swint_f3_dynamic_mask_head_multiple_yt21'
+OUTPUT_DIR = 'outputs/YTVIS2019/'
+NAME = 'cico_swint_f3_condinst_multiple_cphmh_yt19'

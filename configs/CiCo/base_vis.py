@@ -47,7 +47,7 @@ SOLVER = dict(
     LR=0.0005,
     LR_STEPS=(8, ),
     MAX_EPOCH=12,
-    SAVE_INTERVAL=10000)
+    SAVE_INTERVAL=5000)
 
 TEST = dict(
     IMS_PER_BATCH=1,

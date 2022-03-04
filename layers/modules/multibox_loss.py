@@ -143,11 +143,10 @@ class MultiBoxLoss(nn.Module):
                     kdx = idx*T_out + jdx
 
                     # To define the positive and negative matcher
-                    if self.cfg.CiCo.CPH.MATCHER_CENTER:
-                        ind_range = range(self.clip_frames//2-1, self.clip_frames//2+1) if self.clip_frames % 2 == 0 \
-                            else range(self.clip_frames//2-1, self.clip_frames//2+2)
-                    else:
+                    if self.cfg.CiCo.CPH.MATCHER_MULTIPLE:
                         ind_range = range(jdx*self.PHL_stride, jdx*self.PHL_stride+self.PHL_kernel_size)
+                    else:
+                        ind_range = range(max(jdx-1, 0), min(jdx+2, self.clip_frames))
                     match_clip(gt_boxes[idx], gt_labels[idx], gt_ids[idx], priors[kdx], loc_data[kdx],
                                loc_t, conf_t, idx_t, ids_t, kdx, jdx, self.pos_threshold,
                                self.neg_threshold, use_cir_boxes=self.use_cir_boxes, ind_range=ind_range)
