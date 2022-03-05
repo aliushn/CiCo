@@ -8,7 +8,10 @@ class LincombMaskLoss(object):
         super(LincombMaskLoss, self).__init__()
         self.cfg = cfg
         self.net = net
-    
+        self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
+        self.decay_weights = 0.9**(torch.arange(self.clip_frames).view(1, -1)
+                                   - torch.arange(self.clip_frames).view(-1, 1)).abs()
+
     def __call__(self, pos, idx_t, pred_boxes_pos, boxes_t_pos, mask_coeff, prior_levels, proto_data,
                  masks_gt, boxes_gt, obj_ids_gt, labels_gt):
         '''
@@ -41,6 +44,8 @@ class LincombMaskLoss(object):
 
                 # deal with the i-th clip
                 if pos_cur.sum() > 0:
+                    matched_frame_idx, _ = torch.nonzero(pos_cur, as_tuple=True)
+                    decay_weights = self.decay_weights[matched_frame_idx].cuda()
                     idx_t_cur = idx_t[ind_range][pos_cur]
                     mask_coeff_cur = mask_coeff[ind_range][pos_cur].reshape(-1, mask_coeff.size(-1))
                     # If the input is given frame by frame style, for example boxes_gt [n_objs, 4],
@@ -112,8 +117,8 @@ class LincombMaskLoss(object):
                         if self.cfg.MODEL.MASK_HEADS.PROTO_CROP:
                             x1, x2 = sanitize_coordinates(boxes_cur[:, 0], boxes_cur[:, 2], pred_masks.size(-1), 0, cast=True)
                             y1, y2 = sanitize_coordinates(boxes_cur[:, 1], boxes_cur[:, 3], pred_masks.size(-2), 0, cast=True)
-                            pos_gt_box_w, pos_gt_box_h = torch.clamp(x2-x1, min=1), torch.clamp(y2-y1, min=1)
-                            pre_loss = pre_loss.sum(dim=(-1, -2, -3)) / pos_gt_box_w/pos_gt_box_h/n_frames
+                            pos_gt_box_area = torch.clamp(x2-x1, min=1) * torch.clamp(y2-y1, min=1)
+                            pre_loss = pre_loss.sum(dim=(-1, -2)) / pos_gt_box_area.view(-1, 1)
                         else:
                             with torch.no_grad():
                                 # Design weights for background and objects pixels
@@ -122,7 +127,8 @@ class LincombMaskLoss(object):
                                 tar_obj_idx = crop(masks_gt_cur.new_ones(H_gt, W_gt, N_gt), boxes_gt_cir_cur)
                                 tar_obj_idx = tar_obj_idx.permute(2, 0, 1).contiguous().unsqueeze(1)
                                 masks_gt_weights += 1./N_gt/torch.sum(tar_obj_idx, dim=(-2, -1), keepdim=True) * tar_obj_idx
-                            pre_loss = (pre_loss * masks_gt_weights[idx_t_cur]).sum(dim=(-1, -2, -3)) / n_frames
+                            pre_loss = (pre_loss * masks_gt_weights[idx_t_cur]).sum(dim=(-1, -2))
+                        pre_loss = (decay_weights * pre_loss).sum(-1) / decay_weights.sum(-1)
 
                     loss += pre_loss.mean()
 

@@ -130,7 +130,7 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
 
 
 def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t, idx_t,
-               obj_ids_t, idx, jdx, pos_thresh=0.5, neg_thresh=0.3, use_cir_boxes=False, ind_range=None):
+               obj_ids_t, kdx, jdx, pos_thresh=0.5, neg_thresh=0.3, use_cir_boxes=False, ind_range=None):
     """Match each prior box with the ground truth box of the highest jaccard
     overlap, encode the bounding boxes, then return the matched indices
     corresponding to both confidence and location preds.
@@ -146,7 +146,7 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
         conf_t: (tensor) Tensor to be filled w/ matched indices for conf preds. Note: -1 means neutral.
         idx_t: (tensor) Tensor to be filled w/ the index of the matched gt box for each prior.
         obj_ids_t: (tensor) Tensor to be filled w/ the ids of the matched gt instance for each prior.
-        idx: (int) current batch index.
+        kdx: (int) current batch index.
     Return:
         The matched indices corresponding to 1)location and 2)confidence preds.
     """
@@ -163,7 +163,14 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
         valid_gt_boxes = gt_boxes[valid]
 
         # Introducing smallest enclosing boxes of multiple boxes in the clip to define positive/negative samples
-        gt_boxes_cir = circum_boxes(valid_gt_boxes[:, ind_range].reshape(n_objs, -1))
+        # gt_boxes_cir = circum_boxes(valid_gt_boxes[:, ind_range].reshape(n_objs, -1))
+        gt_boxes_cir = valid_gt_boxes[:, jdx]
+        for ind in ind_range:
+            # If objects with fast motion, temporal coherence degrades, may mix features from other objects => remove
+            keep_cir = jaccard(gt_boxes_cir, valid_gt_boxes[:, ind]).diag() > 0.5
+            if keep_cir.sum() > 0:
+                gt_boxes_cir[keep_cir] = circum_boxes(torch.cat([gt_boxes_cir[keep_cir],
+                                                                 valid_gt_boxes[keep_cir, ind]], dim=-1))
 
         # decoded_priors [cx, cy, w, h] => [x1, y1, x2, y2]
         decoded_priors = point_form(priors[:, :4])
@@ -209,8 +216,8 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
         # print(best_truth_idx_cir[keep_pos_cir], best_truth_overlap_cir[keep_pos_cir])
 
         best_truth_idx_cir_pos = best_truth_idx_cir[keep_pos_cir]
-        conf_t[idx][keep_pos_cir] = gt_labels[valid][best_truth_idx_cir_pos]   # label as positive samples
-        conf_t[idx][keep_neg_cir] = 0                                          # label as background
+        conf_t[kdx][keep_pos_cir] = gt_labels[valid][best_truth_idx_cir_pos]   # label as positive samples
+        conf_t[kdx][keep_neg_cir] = 0                                          # label as background
 
         if use_cir_boxes:
             matches = circum_boxes(valid_gt_boxes.reshape(n_objs, -1))[best_truth_idx_cir_pos]
@@ -224,14 +231,14 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
         if keep.sum() > 0:
             print('Inf or Nan occur in loc_t when matching samples:', loc_pos[keep])
             pos_ind = torch.arange(n_proposals)[keep_pos_cir]
-            conf_t[idx][pos_ind[keep]] = -1
+            conf_t[kdx][pos_ind[keep]] = -1
         # Filter out those predicted boxes with inf or nan
         keep = (torch.isinf(loc_data).sum(-1) + torch.isnan(loc_data).sum(-1)) > 0
         if keep.sum() > 0:
             print('Num of Inf or Nan in loc_data when matching samples:', len(torch.nonzero(keep, as_tuple=False)))
-            conf_t[idx][keep] = -1
+            conf_t[kdx][keep] = -1
 
-        loc_t[idx, keep_pos_cir] = loc_pos
-        idx_t[idx] = valid_idx[best_truth_idx_cir].view(-1)
+        loc_t[kdx, keep_pos_cir] = loc_pos
+        idx_t[kdx] = valid_idx[best_truth_idx_cir].view(-1)
         if gt_obj_ids is not None:
-            obj_ids_t[idx] = gt_obj_ids[valid][best_truth_idx_cir]
+            obj_ids_t[kdx] = gt_obj_ids[valid][best_truth_idx_cir]
