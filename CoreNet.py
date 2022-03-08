@@ -179,7 +179,9 @@ class CoreNet(nn.Module):
                             if [kh_p, kw_p] == [kh, kw] and c_out % c_out_p == 0:
                                 print('load 3D parameters from pre-trained models:', key)
                                 scale = c_out // c_out_p
-                                model_dict[key] = state_dict[key].unsqueeze(2).repeat(scale,1,t,1,1).to(device)/t
+                                weights = state_dict[key].unsqueeze(2).repeat(scale,1,t,1,1).to(device)
+                                model_dict[key] = weights * torch.tensor([0.125, 0.75, 0.125]).view(1, 1, -1).to(device) \
+                                    if key.startswith('ProtoNet') and t == 3 else weights/t
                             else:
                                 print('Size is different in pre-trained model and current model:', key)
 

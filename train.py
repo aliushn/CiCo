@@ -14,7 +14,6 @@ import datetime
 import torch.distributed as dist
 from configs.load_config import load_config
 
-# Oof
 import eval as eval_script
 import eval_coco as eval_coco_script
 
@@ -26,8 +25,18 @@ def str2bool(v):
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Training Script')
-    parser.add_argument('--config', default='STMask_plus_base_config',
+    parser.add_argument('--config', default='configs/CiCo/cico_yolact_r50_yt19.py',
                         help='The config object to use.')
+    parser.add_argument('--LR', default=0.001, type=float,
+                        help='learning rate')
+    parser.add_argument('--IMS_PER_BATCH', default=6, type=int,
+                        help='number of frames in a clip')
+    parser.add_argument('--NUM_CLIP_FRAMES', default=3, type=int,
+                        help='number of frames in a clip')
+    parser.add_argument('--OVERLAP_FRAMES', default=1, type=int,
+                        help='number of overlap frames during inference.')
+    parser.add_argument('--backbone_dir', default='outputs/pretrained_models/',
+                        help='The directory of storing the pretrained models.')
     parser.add_argument('--is_distributed', dest='is_distributed', action='store_true',
                         help='use distributed for training')
     parser.add_argument('--port', default=None, type=str,
@@ -45,12 +54,14 @@ def parse_args():
                              'determined from the file name.')
     parser.add_argument('--keep_latest', dest='keep_latest', action='store_true',
                         help='Only keep the latest checkpoint instead of each one.')
-    parser.add_argument('--keep_latest_interval', default=100000, type=int,
-                        help='When --keep_latest is on, don\'t delete the latest file at these intervals. This should be a multiple of save_interval or 0.')
+    parser.add_argument('--keep_latest_interval', default=10000, type=int,
+                        help='When --keep_latest is on, don\'t delete the latest file at these intervals. '
+                             'This should be a multiple of save_interval or 0.')
     parser.add_argument('--no_log', dest='log', action='store_false',
                         help='Don\'t log per iteration information into log_folder.')
     parser.add_argument('--no_autoscale', dest='autoscale', action='store_false',
-                        help='YOLACT will automatically scale the lr and the number of iterations depending on the batch size. Set this if you want to disable that.')
+                        help='CiCo will automatically scale the lr and the number of iterations depending '
+                             'on the batch size. Set this if you want to disable that.')
     parser.set_defaults(keep_latest=False, log=True, log_gpu=False, interrupt=True)
 
     args = parser.parse_args()
@@ -68,24 +79,19 @@ def train(cfg):
         torch.cuda.set_device(torch.cuda.current_device())
         device = torch.cuda.current_device()
 
-    imgs_per_gpu = cfg.SOLVER.IMS_PER_BATCH * cfg.SOLVER.NUM_CLIPS // torch.cuda.device_count()
-    if imgs_per_gpu < 5:
-        print('Per-GPU batch size is less than the recommended limit for batch norm. Disabling batch norm.')
-        cfg.freeze_bn = True
-    else:
-        cfg.freeze_bn = False
+    cfg.freeze_bn = True if cfg.SOLVER.IMS_PER_BATCH * cfg.SOLVER.NUM_CLIPS < 4 else False
+    print('Disabling batch norm:', cfg.freeze_bn)
 
     # Parallel wraps the underlying module, but when saving and loading we don't want that
     net = CoreNet(cfg)
     net.train()
 
-    cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, cfg.NAME)
-    print('Output directory {}:'.format(cfg.OUTPUT_DIR))
+    cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, cfg.NAME+'_f'+str(cfg.SOLVER.NUM_CLIP_FRAMES))
+    print('Output directory is: {}'.format(cfg.OUTPUT_DIR))
     if not os.path.exists(cfg.OUTPUT_DIR) and args.local_rank == 0:
         os.mkdir(cfg.OUTPUT_DIR)
     if args.log:
-        log = Log(cfg.NAME, cfg.OUTPUT_DIR, dict(args._get_kwargs()),
-                  overwrite=(args.resume is None), log_gpu_stats=args.log_gpu)
+        log = Log(cfg.NAME, cfg.OUTPUT_DIR, cfg, overwrite=(args.resume is None), log_gpu_stats=args.log_gpu)
 
     # I don't use the timer during training (I use a different timing method).
     # Apparently there's a race condition with multiple GPUs.
@@ -95,7 +101,7 @@ def train(cfg):
     if args.resume == 'interrupt':
         args.resume = SavePath.get_interrupt(cfg.OUTPUT_DIR)
     elif args.resume == 'latest':
-        args.resume = SavePath.get_latest(cfg.OUTPUT_DIR, cfg.NAME)
+        args.resume = SavePath.get_latest(cfg.OUTPUT_DIR)
     if args.resume is not None:
         if args.is_distributed:
             if args.local_rank == 0:
@@ -111,21 +117,19 @@ def train(cfg):
 
     else:
         bb_path = cfg.MODEL.BACKBONE.SWINT.path if cfg.MODEL.BACKBONE.SWINT.engine else cfg.MODEL.BACKBONE.PATH
-        print('Initializing weights based', bb_path)
+        bb_path = args.backbone_dir + bb_path
+        print('Initializing weights from', bb_path)
         if cfg.DATASETS.TYPE == 'coco':
             print('Initializing weights based ImageNet ...')
-            net.init_weights(backbone_path='outputs/pretrained_models/' + bb_path,
-                             local_rank=args.local_rank)
+            net.init_weights(backbone_path=bb_path, local_rank=args.local_rank)
         else:
             print('Initializing weights based COCO ...')
-            net.init_weights_coco(backbone_path='outputs/pretrained_models/' + bb_path,
-                                  local_rank=args.local_rank)
+            net.init_weights_coco(backbone_path=bb_path, local_rank=args.local_rank)
 
     # loss counters
     iteration = max(args.start_iter, 0)
     start_epoch = max(args.start_epoch, 0)
     adj_lr_times = sum([1 for step in list(cfg.SOLVER.LR_STEPS) if step <= start_epoch])
-    print(adj_lr_times)
     cur_lr = cfg.SOLVER.LR * (cfg.SOLVER.GAMMA ** adj_lr_times)
     # Which learning rate adjustment step are we on? lr' = lr * gamma ^ step_index
     step_index = adj_lr_times
@@ -141,11 +145,9 @@ def train(cfg):
                                 cfg.SOLVER.NUM_CLIP_FRAMES, cfg.SOLVER.NUM_CLIPS)
 
     if args.is_distributed:
-        cfg.SOLVER.IMS_PER_BATCH //= torch.cuda.device_count()
-        imgs_per_gpu = cfg.SOLVER.IMS_PER_BATCH * cfg.SOLVER.NUM_CLIP_FRAMES
-        if imgs_per_gpu < 8:
+        if cfg.SOLVER.IMS_PER_BATCH * cfg.SOLVER.NUM_CLIP_FRAMES < 8:
             if args.local_rank == 0:
-                print('Batch size of each gpu is:', imgs_per_gpu, 'turn on sync batchnorm for DDP')
+                print('Batch size of each gpu is lower than 8, turn on sync batchnorm for DDP')
             net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(net)
         net = torch.nn.parallel.DistributedDataParallel(net.to(device), device_ids=[args.local_rank])
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -157,13 +159,15 @@ def train(cfg):
 
     if cfg.DATASETS.TYPE == 'coco':
         detection_collate = detection_collate_coco
-    elif cfg.DATASETS.TYPE in {'vis', 'cocovis'}:
+    elif cfg.DATASETS.TYPE in {'vis'}:
         detection_collate = detection_collate_vis
     elif cfg.DATASETS.TYPE in {'vid', 'det'}:
         detection_collate = detection_collate_vid
     else:
-        RuntimeError('DATASET IS NOT AVAILABLE!!')
-    data_loader = data.DataLoader(train_dataset, cfg.SOLVER.IMS_PER_BATCH,
+        RuntimeError('Your dataset is not supported now!! Please choose from {coco, vis, vid, det}.')
+
+    batch_size = cfg.SOLVER.IMS_PER_BATCH * torch.cuda.device_count()
+    data_loader = data.DataLoader(train_dataset, batch_size,
                                   num_workers=cfg.SOLVER.NUM_WORKERS,
                                   collate_fn=detection_collate,
                                   sampler=train_sampler,
@@ -171,17 +175,14 @@ def train(cfg):
                                   pin_memory=True)
 
     last_time = time.time()
-    if args.is_distributed:
-        epoch_size = len(train_dataset) // (torch.cuda.device_count() * cfg.SOLVER.IMS_PER_BATCH)
-    else:
-        epoch_size = len(train_dataset) // cfg.SOLVER.IMS_PER_BATCH
+    epoch_size = len(train_dataset) // batch_size
     max_iter = epoch_size * cfg.SOLVER.MAX_EPOCH
     save_path = lambda epoch, iteration: SavePath(cfg.NAME, epoch, iteration).get_path(root=cfg.OUTPUT_DIR)
     time_avg = MovingAverage()
 
     global loss_types  # Forms the print order
-    loss_types = ['B', 'BIoU', 'B_cir', 'BIoU_cir', 'center', 'Rep', 'C', 'C_focal', 'stuff', 'CI', 'M_bce', 'M_dice',
-                  'M_coeff', 'M_intraclass', 'M_l1', 'T', 'T_kl', 'B_T2S', 'BIoU_T2S', 'M_T2S', 'P', 'D', 'S', 'I']
+    loss_types = ['B', 'BIoU', 'center', 'Rep', 'C', 'C_focal', 'M_bce', 'M_dice', 'M_coeff', 'T', 'T_kl',
+                  'B_T2S', 'BIoU_T2S', 'M_T2S', 'P', 'D', 'S', 'I']
     loss_avgs = {k: MovingAverage(100) for k in loss_types}
 
     if args.local_rank == 0:
@@ -225,8 +226,8 @@ def train(cfg):
                 for k in losses:
                     loss_avgs[k].add(losses[k].item())
 
-                cur_time = time.time()
-                elapsed = cur_time - last_time
+                elapsed = time.time() - last_time
+                last_time = time.time()
 
                 # Exclude graph setup from the timing information
                 if iteration != args.start_iter:
@@ -243,26 +244,24 @@ def train(cfg):
                           % tuple([epoch, iteration] + loss_labels + [total, eta_str, elapsed]), flush=True)
 
                 if args.log and iteration % 500 == 0:
-                    precision = 5
-                    loss_info = {k: round(losses[k].item(), precision) for k in losses}
-                    loss_info['Total'] = round(loss.item(), precision)
+                    loss_info = {k: round(losses[k].item(), 5) for k in losses}
+                    loss_info['Total'] = round(loss.item(), 5)
                     log.log('train', loss=loss_info, epoch=epoch, iter=iteration, lr=round(cur_lr, 10), elapsed=elapsed)
 
-                last_time = cur_time
                 # Save models and run valid set
-                if iteration % int(0.5*cfg.SOLVER.SAVE_INTERVAL) == 0 and iteration > 0:
+                if iteration % cfg.SOLVER.SAVE_INTERVAL == 0 and iteration > 0 and args.local_rank == 0:
                     if args.keep_latest:
                         latest = SavePath.get_latest(cfg.OUTPUT_DIR, cfg.DATASETS.TYPE)
-                    if epoch > 5:
-                        print('Saving state, epoch:', epoch)
-                        torch.save(net.state_dict(), save_path(epoch, iteration))
+
+                    print('Saving state, epoch:', epoch)
+                    torch.save(net.state_dict(), save_path(epoch, iteration))
 
                     if args.keep_latest and latest is not None:
                         if args.keep_latest_interval <= 0 or iteration % args.keep_latest_interval != cfg.SOLVER.SAVE_INTERVAL:
                             print('Deleting old save...')
                             os.remove(latest)
 
-                    do_inference = False if 'DET' in args.config or 'cocovis' in args.config else True
+                    do_inference = False if 'DET' in args.config else True
                     if do_inference:
                         if cfg.DATASETS.TYPE == 'coco':
                             setup_eval_coco()
@@ -274,9 +273,9 @@ def train(cfg):
                             valid_sub_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.VALID_SUB, cfg.INPUT,
                                                             cfg.TEST.NUM_CLIP_FRAMES, num_clips=1, inference=True)
                             compute_validation_map(net, valid_sub_dataset)
-                             
+
                             # valid or test datasets
-                            if cfg.DATASETS.TYPE == 'vis' and epoch >= 7:
+                            if cfg.DATASETS.TYPE == 'vis':
                                 valid_dataset = get_dataset(cfg.DATASETS.TYPE,  cfg.DATASETS.VALID, cfg.INPUT,
                                                             cfg.TEST.NUM_CLIP_FRAMES, num_clips=1, inference=True)
                                 compute_validation_map(net, valid_dataset)
@@ -288,7 +287,6 @@ def train(cfg):
 
         # Delete previous copy of the interrupted network so we don't spam the weights folder
         SavePath.remove_interrupt(cfg.OUTPUT_DIR)
-
         torch.save(net.state_dict(), save_path(epoch, repr(iteration) + '_interrupt'))
         exit()
 
@@ -387,8 +385,7 @@ def compute_validation_map(net, dataset):
         net.eval()
         print()
         print("Computing validation mAP (this may take a while)...", flush=True)
-        eval_script.evaldatasets(net, dataset, cfg.DATASETS.TYPE, cfg.TEST.NUM_CLIP_FRAMES,
-                                 cfg.SOLVER.NUM_CLIPS, use_cico=cfg.CiCo.ENGINE, cfg_input=cfg.INPUT)
+        eval_script.evaldatasets(net, dataset, cfg.DATASETS.TYPE, cfg_input=cfg.INPUT, use_cico=cfg.CiCo.ENGINE)
         net.train()
 
 
@@ -416,7 +413,8 @@ def setup_eval(epoch):
                             '--eval_types=' + eval_type,
                             '--epoch=' + str(epoch),
                             '--overlap_frames=' + str(cfg.TEST.OVERLAP_FRAMES),
-                            '--save_folder=' + str(cfg.OUTPUT_DIR)])
+                            '--save_folder=' + str(cfg.OUTPUT_DIR),
+                            '--NUM_CLIP_FRAMES='+str(cfg.SOLVER.NUM_CLIP_FRAMES)])
 
 
 def setup_eval_coco():
@@ -433,10 +431,20 @@ if __name__ == '__main__':
     else:
         torch.set_default_tensor_type('torch.FloatTensor')
 
+    # Update training parameters from the config if necessary
+    def replace(name, dict_cfg):
+        if getattr(args, name) is not None: setattr(dict_cfg, name, getattr(args, name))
+
     args = parse_args()
     cfg = load_config(args.config)
-    # Update training parameters from the config if necessary
-    def replace(name):
-        if getattr(args, name) == None: setattr(args, name, getattr(cfg, name))
+    cfg.NAME = args.config.split('/')[-1][:-3]
+    replace('LR', cfg.SOLVER)
+    replace('IMS_PER_BATCH', cfg.SOLVER)
+    replace('NUM_CLIP_FRAMES', cfg.SOLVER)
+    replace('NUM_CLIP_FRAMES', cfg.TEST)
+    replace('OVERLAP_FRAMES', cfg.TEST)
+    print('Configs of SOLVER:', cfg.SOLVER)
+    print()
+    print('Configs of TEST:', cfg.TEST)
 
     train(cfg)

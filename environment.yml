@@ -4,7 +4,7 @@
 # TODO: you must additionally install nVidia drivers, eg. on Ubuntu linux
 # `apt install nvidia-driver-440` (change the 440 for whatever version you need/have).
 #
-name: cico
+name: cico-env
 
 channels:
   - conda-forge
@@ -14,9 +14,9 @@ dependencies:
   - python==3.8
   - pip
   - cython
-  - pytorch=1.7.0
-  - torchvision=0.8.0
-  - cudatoolkit=11.0
+  - pytorch=1.10.1
+  - torchvision=0.11.2
+  - cudatoolkit=11.3.1
   - cudnn
   - matplotlib
   - git

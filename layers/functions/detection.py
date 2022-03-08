@@ -256,7 +256,7 @@ class Detect(object):
             keep *= (rescores > self.conf_thresh)
 
         update = False
-        if update and keep.sum() > 0 and self.clip_frames > 3:
+        if update and keep.sum() > 0 and self.clip_frames > 5:
             out_after_NMS = {'class': [], 'score': [], 'box': [], 'mask': []}
             keep_c, keep_idx = torch.nonzero(keep, as_tuple=True)
             for c, c_idx in zip(keep_c, keep_idx):

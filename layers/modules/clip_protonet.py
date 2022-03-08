@@ -28,12 +28,12 @@ class ClipProtoNet(nn.Module):
         # The include_last_relu=false here is because we might want to change it to another function
         norm_type = 'batch_norm' if cfg.MODEL.MASK_HEADS.USE_BN else None
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
-        self.use_3D = True if cfg.CiCo.CPN.CUBIC_MODE else False
-        self.proto_net, proto_channels = make_net(in_channels, cfg.MODEL.MASK_HEADS.PROTO_NET, use_3D=self.use_3D,
+        self.proto_net, proto_channels = make_net(in_channels, cfg.MODEL.MASK_HEADS.PROTO_NET,
+                                                  use_3D=self.cfg.CiCo.CPN.CUBIC_MODE,
                                                   norm_type=norm_type, include_last_relu=True)
-        # the last two Conv layers for predicting prototypes
+        # Last two Conv layers for predicting prototypes
         proto_arch = [(proto_channels, 3, 1), (self.mask_dim, 1, 0)]
-        self.proto_conv, _ = make_net(proto_channels, proto_arch, use_3D=self.use_3D, norm_type=norm_type,
+        self.proto_conv, _ = make_net(proto_channels, proto_arch, norm_type=norm_type,
                                       include_last_relu=False)
 
     def forward(self, x, fpn_outs, img_meta=None):
@@ -57,24 +57,26 @@ class ClipProtoNet(nn.Module):
 
         bs, C_in, H_in, W_in = proto_x.size()
         bs = bs // self.clip_frames
-        if self.use_3D:
+        if self.cfg.CiCo.CPN.CUBIC_MODE:
             # Unfold inputs from 4D to 5D: [bs*T, C, H, W]=>[bs, C, T, H, W]
-            proto_x = proto_x.reshape(-1, self.clip_frames, C_in, H_in, W_in).permute(0, 2, 1, 3, 4).contiguous()
-        proto_out_features = self.proto_net(proto_x)
+            proto_x_fold = proto_x.reshape(-1, self.clip_frames, C_in, H_in, W_in).permute(0, 2, 1, 3, 4).contiguous()
+            proto_out_fold = self.proto_net(proto_x_fold)
+            H_out, W_out = proto_out_fold.size()[-2:]
+            proto_out = proto_out_fold.permute(0, 2, 1, 3, 4).contiguous().reshape(-1, C_in, H_out, W_out)
+        else:
+            proto_out = self.proto_net(proto_x)
+
         # Activation function is Relu
-        prototypes = F.relu(self.proto_conv(proto_out_features))
+        prototypes = F.relu(self.proto_conv(proto_out))
         # display_cubic_weights(prototypes, 0, type=2, name='prototypes', img_meta=img_meta)
 
         H_out, W_out = prototypes.size()[-2:]
-        if self.use_3D:
-            # Fold 5D t0 4D: [bs, C, T, H, W] => [bs*T, C, H, W]
-            prototypes = prototypes.permute(0, 2, 1, 3, 4).contiguous().reshape(-1, self.mask_dim, H_out, W_out)
         # Move the features last so the multiplication is easy
         prototypes = prototypes.reshape(bs, -1, self.mask_dim, H_out, W_out).permute(0, 3, 4, 1, 2).contiguous()
 
         display_weights = False
         if display_weights:
-            display_cubic_weights(proto_out_features, 0, type=2, name='proto', img_meta=img_meta)
+            display_cubic_weights(proto_out, 0, type=2, name='proto', img_meta=img_meta)
             for jdx in range(0,9,3):
                 display_cubic_weights(self.proto_net[jdx].weight, jdx, type=1, name='protonet')
             for jdx in range(0,6,3):

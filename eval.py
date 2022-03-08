@@ -1,6 +1,6 @@
 from datasets import *
 from CoreNet import CoreNet
-from utils.functions import MovingAverage, ProgressBar
+from utils.functions import MovingAverage
 from utils import timer
 from utils.functions import SavePath
 from layers.utils.output_utils import postprocess_ytbvis, undo_image_transformation
@@ -8,7 +8,6 @@ from layers.visualization_temporal import draw_dotted_rectangle, get_color
 from configs.load_config import load_config
 
 import time
-import mmcv
 import torch
 import torch.backends.cudnn as cudnn
 import argparse
@@ -34,20 +33,20 @@ def str2bool(v):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='STMask Evaluation in video domain')
-    parser.add_argument('--epoch', default=0, type=int)
+    parser.add_argument('--config', default=None,
+                        help='The config object to use.')
+    parser.add_argument('--epoch', default=-1, type=int)
     parser.add_argument('--batch_size', default=1, type=int,
                         help='Batch size for training')
     parser.add_argument('--trained_model',
-                        default='weights/ssd300_mAP_77.43_v2.pth', type=str,
+                        default='path to your trained models', type=str,
                         help='Trained state_dict file path to open. If "interrupt", this will open the interrupt file.')
-    parser.add_argument('--eval_data', default='valid', type=str, help='data type')
-    parser.add_argument('--eval', default=True, type=str2bool,
-                        help='False, only calculate metrics between ground truth annotations and prediction json file.')
-    parser.add_argument('--overlap_frames', default=0, type=int, help='the overlapped frames between two video clips')
+    parser.add_argument('--NUM_CLIP_FRAMES', default=3, type=int,
+                        help='number of frames in a clip')
     parser.add_argument('--top_k', default=100, type=int,
                         help='Further restrict the number of predictions to parse')
-    parser.add_argument('--cuda', default=True, type=str2bool,
-                        help='Use cuda to evaulate model')
+    parser.add_argument('--eval_data', default='valid', type=str, help='data type')
+    parser.add_argument('--overlap_frames', default=0, type=int, help='the overlapped frames between two video clips')
     parser.add_argument('--display_single_mask', default=False, type=str2bool,
                         help='Whether or not to display masks over bounding boxes')
     parser.add_argument('--display_masks', default=True, type=str2bool,
@@ -66,18 +65,10 @@ def parse_args(argv=None):
                         help='Display qualitative results instead of quantitative ones.')
     parser.add_argument('--display', dest='display', action='store_true',
                         help='Display qualitative results instead of quantitative ones.')
-    parser.add_argument('--save_folder', default='weights/prototypes/', type=str,
+    parser.add_argument('--save_folder', default='outputs/', type=str,
                         help='The output file for coco bbox results if --coco_results is set.')
-    parser.add_argument('--config', default=None,
-                        help='The config object to use.')
     parser.add_argument('--display_lincomb', dest='display_lincomb', action='store_true',
                         help='If the config uses lincomb masks, output a visualization of how those masks are created.')
-    parser.add_argument('--image', default=None, type=str,
-                        help='A path to an image to use for display.')
-    parser.add_argument('--images', default=None, type=str,
-                        help='An input folder of images and output folder to save detected images. Should be in the format input->output.')
-    parser.add_argument('--video', default=None, type=str,
-                        help='A path to a video to evaluate on. Passing in a number will use that index webcam.')
     parser.add_argument('--eval_types', default=['segm'], type=str, nargs='+', choices=['bbox', 'segm'], help='eval types')
     parser.set_defaults(display=False, resume=False, detect=False)
 
@@ -352,82 +343,21 @@ def evaluate_clip(net: CoreNet, dataset, data_type='vis', pad_h=None, pad_w=None
     return json_results
 
 
-def evaluate_single(net: CoreNet, im_path=None, save_path=None, idx=None):
-    im = mmcv.imread(im_path)
-    ori_shape = im.shape
-    im, w_scale, h_scale = mmcv.imresize(im, (640, 360), return_scale=True)
-    img_shape = im.shape
+def evaldatasets(net: CoreNet, val_dataset, data_type, cfg_input=None, use_cico=False):
+    pad_h, pad_w = (cfg_input.MIN_SIZE_TEST, cfg_input.MAX_SIZE_TEST) if cfg_input is not None else (None, None)
+    json_path = '/'.join([args.save_folder, 'results_'+str(args.epoch)+'.json']) if args.epoch >= 0 \
+        else '/'.join([args.save_folder, 'results.json'])
 
-    if cfg.backbone.transform.normalize:
-        im = (im - MEANS) / STD
-    elif cfg.backbone.transform.subtract_means:
-        im = (im - MEANS)
-    elif cfg.backbone.transform.to_float:
-        im = im / 255.
-    im = mmcv.impad_to_multiple(im, 32)
-    pad_shape = im.shape
-    im = torch.tensor(im).permute(2, 0, 1).contiguous().unsqueeze(0).float().cuda()
-    pad_h, pad_w = im.size()[2:4]
-    img_meta = {'ori_shape': ori_shape, 'img_shape': img_shape, 'pad_shape': pad_shape}
-    if idx is not None:
-        img_meta['frame_id'] = idx
-    if idx is None or idx == 0:
-        img_meta['is_first'] = True
-    else:
-        img_meta['is_first'] = False
+    print('Begin Inference!')
+    results = evaluate_clip(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,
+                            clip_frames=args.NUM_CLIP_FRAMES, use_cico=use_cico)
 
-    preds = net(im, img_meta=[img_meta])
-    preds[0]['detection']['box_ids'] = torch.arange(preds[0]['detection']['box'].size(0))
-    cfg.preserve_aspect_ratio = True
-    img_numpy = prep_display(preds[0], im[0], pad_h, pad_w, img_meta=img_meta)
-    if save_path is None:
-        plt.imshow(img_numpy)
-        plt.axis('off')
-        plt.show()
-    else:
-        cv2.imwrite(save_path, img_numpy)
-
-
-def evalimages(net: CoreNet, input_folder: str, output_folder: str):
-    if not os.path.exists(output_folder):
-        os.mkdir(output_folder)
-
-    print()
-    path_list = os.listdir(input_folder)
-    path_list.sort(key=lambda x:int(x[:-4]))
-    for idx, p in enumerate(path_list):
-        path = str(p)
-        name = os.path.basename(path)
-        name = '.'.join(name.split('.')[:-1]) + '.png'
-        out_path = os.path.join(output_folder, name)
-        in_path = os.path.join(input_folder, path)
-
-        evaluate_single(net, in_path, out_path, idx)
-        print(path + ' -> ' + out_path)
-    print('Done.')
-
-
-def evalvideo(net: CoreNet, input_folder: str, output_folder: str):
-    return
-
-
-def evaldatasets(net: CoreNet, val_dataset, data_type, eval_clip_frames=1, n_clips=1, use_cico=False, cfg_input=None):
-    if cfg_input is not None:
-        pad_h, pad_w = cfg_input.MIN_SIZE_TEST, cfg_input.MAX_SIZE_TEST
-    else:
-        pad_h, pad_w = None, None
-    json_path = os.path.join(args.save_folder, 'results_' + str(args.epoch) + '.json')
-    if args.eval:
-        print('Begin Inference!')
-        results = evaluate_clip(net, val_dataset, data_type=data_type, pad_h=pad_h, pad_w=pad_w,
-                                clip_frames=eval_clip_frames, use_cico=use_cico)
-
-        if not args.display:
-            print()
-            print('Save predictions into {} :'.format(json_path))
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(results, f)
-            print('Finish save!')
+    if not args.display:
+        print()
+        print('Save predicted results into {} for evaluation on Codelab:'.format(json_path))
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(results, f)
+        print('Finish save!')
 
     if val_dataset.has_gt:
         print('Begin calculate metrics!')
@@ -443,85 +373,54 @@ def evaldatasets(net: CoreNet, val_dataset, data_type, eval_clip_frames=1, n_cli
 
     print('Finish!')
 
+# Update training parameters from the config if necessary
+def replace(name, dict_cfg):
+    if getattr(args, name) is not None: setattr(dict_cfg, name, getattr(args, name))
+
 
 if __name__ == '__main__':
     parse_args()
 
-    if args.config is not None:
-        cfg = load_config(args.config)
-    else:
-        model_path = SavePath.from_str(args.trained_model)
-        # TODO: Bad practice? Probably want to do a name lookup instead.
-        args.config = model_path.model_name + '_config'
-        print('Config not specified. Parsed %s from the file name.\n' % args.config)
-        cfg = load_config(args.config)
-    cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, cfg.NAME)
-    args.save_folder = cfg.OUTPUT_DIR
+    model_path = SavePath.from_str(args.trained_model)
+    # TODO: Bad practice? Probably want to do a name lookup instead.
+    args.config = '/'.join(['configs/CiCo', '_'.join(model_path.model_name.split('_')[:4])]) \
+        if args.config is None else args.config
+    print('Parsed %s from the file name.\n' % args.config)
+    cfg = load_config(args.config)
+    replace('NUM_CLIP_FRAMES', cfg.SOLVER)
+    replace('NUM_CLIP_FRAMES', cfg.TEST)
+
+    args.save_folder = '/'.join(args.trained_model.split('/')[:-1])
     cfg.display = args.display
     global class_names
     class_names = get_dataset_config(cfg.DATASETS.TRAIN, cfg.DATASETS.TYPE)['class_names']
 
-    if args.image is None and args.images is None:
-        print('Load dataset:', cfg.DATASETS, args.eval_data)
-        if args.eval_data == 'train':
-            val_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.TRAIN, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES, 
-                                      inference=True)
-
-        elif args.eval_data == 'valid_sub':
-            val_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.VALID_SUB, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES, 
-                                      inference=True)
-
-        elif args.eval_data == 'valid':
-            val_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.VALID, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES,
-                                      inference=True)
-        else:
-            val_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.TEST, cfg.INPUT, cfg.SOLVER.NUM_CLIP_FRAMES,
-                                      inference=True)
+    print('Load dataset:', cfg.DATASETS, args.eval_data)
+    if args.eval_data == 'train':
+        data_cfg = cfg.DATASETS.TRAIN
+    elif args.eval_data == 'valid_sub':
+        data_cfg = cfg.DATASETS.VALID_SUB
+    elif args.eval_data == 'valid':
+        data_cfg = cfg.DATASETS.VALID
     else:
-        val_dataset = None
+        data_cfg = cfg.DATASETS.TEST
+    val_dataset = get_dataset(cfg.DATASETS.TYPE, data_cfg, cfg.INPUT, args.NUM_CLIP_FRAMES, inference=True)
 
     with torch.no_grad():
         if not os.path.exists('results'):
             os.makedirs('results')
 
-        if args.cuda:
-            cudnn.benchmark = True
-            cudnn.fastest = True
-            torch.set_default_tensor_type('torch.cuda.FloatTensor')
-        else:
-            torch.set_default_tensor_type('torch.FloatTensor')
-
+        cudnn.benchmark = True
+        cudnn.fastest = True
+        torch.set_default_tensor_type('torch.cuda.FloatTensor')
         print('Loading model from {}'.format(args.trained_model))
         net = CoreNet(cfg)
         net.load_weights(args.trained_model)
         net.eval()
         print('Loading model Done.')
 
-        if args.cuda:
-            net = net.cuda()
-
-        if args.image is not None:
-            save_path = os.path.join(os.path.split(args.image[0]), 'out')
-            evaluate_single(net, args.image, save_path)
-
-        elif args.images is not None:
-            if ':' in args.images:
-                inp, out = args.images.split(':')
-                evalimages(net, inp, out)
-            else:
-                out = args.images + '_out'
-                evalimages(net, args.images, out)
-
-        elif args.video is not None:
-            if ':' in args.video:
-                inp, out = args.video.split(':')
-                evalvideo(net, inp, out)
-            else:
-                evalvideo(net, args.video)
-
-        else:
-            evaldatasets(net, val_dataset, cfg.DATASETS.TYPE, cfg.TEST.NUM_CLIP_FRAMES,
-                         cfg.SOLVER.NUM_CLIPS, cfg.CiCo.ENGINE, cfg.INPUT)
+        net = net.cuda()
+        evaldatasets(net, val_dataset, cfg.DATASETS.TYPE, cfg.INPUT, cfg.CiCo.ENGINE)
 
 
 

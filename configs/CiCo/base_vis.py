@@ -41,11 +41,11 @@ INPUT = dict(
     SIZE_DIVISOR=32)
 
 SOLVER = dict(
-    IMS_PER_BATCH=8,
+    IMS_PER_BATCH=6,
     NUM_CLIP_FRAMES=1,
-    NUM_CLIPS=2,
+    NUM_CLIPS=1,
     LR=0.0005,
-    LR_STEPS=(8, ),
+    LR_STEPS=(8, 11),
     MAX_EPOCH=12,
     SAVE_INTERVAL=5000)
 
