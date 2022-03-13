@@ -12,16 +12,19 @@ from .losses import LincombMaskLoss, T2SLoss
 class MultiBoxLoss(nn.Module):
     """SSD Weighted Loss Function
     Compute Targets:
-        1) Produce Confidence Target Indices by matching  ground truth boxes
-           with (default) 'priorboxes' that have jaccard index > threshold parameter
+        1) Produce Confidence Target Indices by matching ground truth boxes
+           with (default) 'prior boxes' that have jaccard index > threshold parameter
            (default threshold: 0.5).
         2) Produce localization target by 'encoding' variance into offsets of ground
-           truth boxes and their matched  'priorboxes'.
-        3) Hard negative mining to filter the excessive number of negative examples
+           truth boxes and their matched  'prior boxes'.
+        3) Focal loss or Hard negative mining to filter the excessive number of negative examples
            that comes with using a large number of default bounding boxes.
            (default negative:positive ratio 3:1)
+        4) Generate instance masks by clip-level prototypes and box-level mask parameters
+        5) Produce box-level track embeddings
+
     Objective Loss:
-        L(x,c,l,g) = (Lconf(x, c) + αLloc(x,l,g)) / N
+        L(x,c,l,g) = α1(x, c)/N + α2Lloc(x,l,g)/N + α3Lmask(m)/N_pos + α4Ltrack(e_i,e_j)/N_pos
         Where, Lconf is the CrossEntropy Loss and Lloc is the SmoothL1 Loss
         weighted by α which is set to 1 by cross val.
     """
@@ -42,7 +45,8 @@ class MultiBoxLoss(nn.Module):
         self.LincombMaskLoss = LincombMaskLoss(cfg, net)
 
     def forward(self, predictions, gt_boxes, gt_labels, gt_masks, gt_ids, num_crowds):
-        """Multibox Loss
+        """
+        Multibox Loss
         Args:
             predictions (tuple): A tuple containing loc preds, conf preds,
             mask preds, and prior boxes from SSD net.
@@ -72,9 +76,11 @@ class MultiBoxLoss(nn.Module):
             # In video domain, we load GT annotations as [n_objs, n_clips*n_clip_frames, ...],
             # So we have to unfold them in the temporal dim (2-th) as [n_objs, n_clips, n_clip_frames, ...]
             if self.cfg.SOLVER.NUM_CLIPS > 1:
-                gt_boxes = sum([split_squeeze(boxes, length=self.cfg.SOLVER.NUM_CLIP_FRAMES, dim=1) for boxes in gt_boxes], [])
+                gt_boxes = sum([self.split_squeeze(boxes, length=self.cfg.SOLVER.NUM_CLIP_FRAMES, dim=1)
+                                for boxes in gt_boxes], [])
                 if None not in gt_masks:
-                    gt_masks = sum([split_squeeze(masks, length=self.cfg.SOLVER.NUM_CLIP_FRAMES, dim=1) for masks in gt_masks], [])
+                    gt_masks = sum([self.split_squeeze(masks, length=self.cfg.SOLVER.NUM_CLIP_FRAMES, dim=1)
+                                    for masks in gt_masks], [])
                 gt_labels = sum([[labels]*self.cfg.SOLVER.NUM_CLIPS for labels in gt_labels], [])
                 gt_ids = sum([[ids]*self.cfg.SOLVER.NUM_CLIPS for ids in gt_ids], [])
                 num_crowds = sum([[num]*self.cfg.SOLVER.NUM_CLIPS for num in num_crowds], [])
@@ -124,7 +130,7 @@ class MultiBoxLoss(nn.Module):
         idx_t = loc_data.new(num_bsT, num_priors).long()
         ids_t = loc_data.new(num_bsT, num_priors).long() if gt_ids is not None else None  # object ids for tracking
 
-        # --------------------------- Matcher: assign positive samples ------------------------------
+        # -------------- Matcher: assign positive and negative samples ----------------
         crowd_boxes = None
         for idx in range(batch_size):
             # Split the crowd annotations because they come bundled in
@@ -139,6 +145,7 @@ class MultiBoxLoss(nn.Module):
                     _, gt_masks[idx] = split(gt_masks[idx])
 
             if self.cfg.CiCo.ENGINE:
+                # clip-level matcher for clip-in clip-out VIS methods
                 for jdx in range(T_out):
                     kdx = idx*T_out + jdx
 
@@ -152,6 +159,7 @@ class MultiBoxLoss(nn.Module):
                                self.neg_threshold, use_cir_boxes=self.use_cir_boxes, ind_range=ind_range)
 
             else:
+                # frame-level matcher for frame-level methods on CoCo or VIS datasets
                 gt_ids_cur = gt_ids[idx] if gt_ids is not None else None
                 match(self.cfg, gt_boxes[idx], gt_labels[idx], gt_ids_cur, crowd_boxes, priors[idx], loc_data[idx],
                       loc_t, conf_t, idx_t, ids_t, idx, self.pos_threshold, self.neg_threshold)
@@ -168,7 +176,7 @@ class MultiBoxLoss(nn.Module):
         pos = conf_t > 0
         if pos.sum() > 0:
             # ---------------------------  Localization Loss (Smooth L1) -------------------------------------------
-            losses_loc, pred_boxes_p, gt_boxes_p = self.loclization_loss(pos, priors, loc_data, loc_t, centerness_data)
+            losses_loc, pred_boxes_p, gt_boxes_p = self.locolization_loss(pos, priors, loc_data, loc_t, centerness_data)
             losses.update(losses_loc)
             
             # Split boxes of positive samples frame-by-frame to form a list
@@ -176,19 +184,20 @@ class MultiBoxLoss(nn.Module):
             pred_boxes_p_split = torch.split(pred_boxes_p.reshape(-1, box_dim), num_objs_per_frame, dim=0)
             gt_boxes_p_split = torch.split(gt_boxes_p.reshape(-1, box_dim), num_objs_per_frame, dim=0)
 
-            # --------------------------------  Mask Loss  -----------------------------------------------------
+            # ----------------------------  Instance Mask Loss  -----------------------------------------------------
             if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
+                # LincombMaskLoss provides mask loss of Yolact and CondInst
                 loss_m = self.LincombMaskLoss(pos, idx_t, pred_boxes_p_split, gt_boxes_p_split, predictions['mask_coeff'],
                                               prior_levels, predictions['proto'], gt_masks, gt_boxes, gt_ids, gt_labels)
                 losses.update(loss_m)
 
-                # These losses also don't depend on anchors
+                # These losses also don't depend on anchors, only used on CoCo like Yolact
                 if self.cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS:
                     losses['S'] = self.semantic_segmentation_loss(predictions['sem_seg'], gt_masks, gt_labels)
 
-            # --------------------------------- Confidence loss ------------------------------------------------
+            # ------------------------------ Confidence Loss ------------------------------------------------
             # Focal loss for COCO (crowded objects > 10),
-            # Ohem loss for OVIS dataset
+            # Ohem loss for OVIS dataset, otherwise focal loss
             if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
                 conf_t_unfold = conf_t.reshape(-1)
                 pos_unfold = pos.float().reshape(-1)
@@ -217,12 +226,13 @@ class MultiBoxLoss(nn.Module):
             # --------------------------------- Tracking loss ------------------------------------------------
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
                 if self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
+                    # TODO: need to double check
                     losses_track = self.track_gauss_loss(track_data, gt_masks, gt_boxes, gt_ids, pos, ids_t, idx_t)
                 else:
                     losses_track = self.track_loss(track_data, pos, ids_t, T_out)
                 losses.update(losses_track)
 
-            # ------------------------------- Track to segment -----------------------------------------------
+            # ----------------------------- STMask: track to segment ----------------------------------------
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and self.cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
                 losses_t2s = self.T2SLoss(predictions['fpn_feat'], gt_boxes, gt_masks, predictions['proto'])
                 losses.update(losses_t2s)
@@ -263,7 +273,16 @@ class MultiBoxLoss(nn.Module):
 
         return neg
     
-    def loclization_loss(self, pos, priors, loc_data, loc_t, centerness_data):
+    def localization_loss(self, pos, priors, loc_data, loc_t, centerness_data):
+        '''
+        Loss for bounding boxes regression, including SmoothL1 and BIoU loss
+        :param pos:
+        :param priors:
+        :param loc_data:
+        :param loc_t:
+        :param centerness_data:
+        :return:
+        '''
         loc_p = loc_data[pos].reshape(-1, 4)
         loc_t = loc_t[pos].reshape(-1, 4)
         pos_priors = priors[pos].reshape(-1, 4)
@@ -289,45 +308,24 @@ class MultiBoxLoss(nn.Module):
             
         return losses, decoded_loc_p, decoded_loc_t
 
-    def repulsion_loss(self, pos, idx_t, decoded_loc_p, gt_boxes):
-        batch_size = pos.size(0)
-        rep_loss = torch.tensor(0.0, device=pos.device)
-        n = 0.
-
-        for idx in range(batch_size):
-            n_gt_cur = gt_boxes[idx].size(0)
-            n_pos_cur = decoded_loc_p.size(0)
-            # the overlaps between predicted boxes and ground-truth boxes
-            overlaps_cur = jaccard(decoded_loc_p, gt_boxes[idx]).detach()  # [n_pos, n_gt]
-
-            # matched ground-truth bounding box idx with each predicted boxes
-            idx_t_cur = idx_t[idx][pos[idx]]
-            # to find surrounding boxes, we assign the overlaps of matched idx as -1
-            for j in range(pos[idx].sum()):
-                overlaps_cur[j, idx_t_cur[j]] = -1
-
-            # Crowd occlusion: BIoU greater than 0.1
-            keep = (overlaps_cur > 0.1).view(-1)
-            if len(torch.nonzero(keep)) > 0:
-                n += 1
-                rep_decoded_loc_p = decoded_loc_p.unsqueeze(1).repeat(1, n_gt_cur, 1).view(-1, 4)[keep]
-                rep_gt_boxes = gt_boxes[idx].unsqueeze(0).repeat(n_pos_cur, 1, 1).view(-1, 4)[keep]
-                rep_IoU = 1. - giou_loss(rep_decoded_loc_p, rep_gt_boxes, reduction='none')
-                rep_loss += rep_IoU.mean() * self.cfg.MODEL.BOX_HEADS.BIoU_ALPHA
-
-        return rep_loss / max(n, 1.)
-
     def track_loss(self, track_data, pos, ids_t=None, T_out=1):
-        n_clips = self.cfg.SOLVER.NUM_CLIPS
-        if self.cfg.DATASETS.TYPE != 'cocovis':
-            n_clips *= T_out
+        '''
+        loss for track embeddings, if they are the same instance, use cosine distance,
+        else use consine similarity.
+        :param track_data: track embeddings from CPH
+        :param pos:        the flag of positive or negative samples
+        :param ids_t:      ground-truth instance ids
+        :param T_out:      the channels of temporal dim
+        :return:
+        '''
+        n_clips = self.cfg.SOLVER.NUM_CLIPS * T_out
         bs = max(track_data.size(0) // n_clips, 1.)
 
         loss = torch.tensor(0., device=track_data.device)
         for i in range(bs):
             pos_cur = pos[i*n_clips:(i+1)*n_clips]
             pos_track_data = track_data[i*n_clips:(i+1)*n_clips][pos_cur]
-            cos_sim = pos_track_data @ pos_track_data.t()    # [n_pos, n_ref_pos]
+            cos_sim = pos_track_data @ pos_track_data.t()                               # [n_pos, n_ref_pos]
             # Rescale to be between 0 and 1
             cos_sim = (cos_sim + 1) / 2
 
@@ -344,6 +342,11 @@ class MultiBoxLoss(nn.Module):
         return {'T': loss / bs * self.cfg.MODEL.TRACK_HEADS.LOSS_ALPHA}
 
     def track_gauss_loss(self, track_data, gt_masks, gt_boxes, gt_ids, pos, ids_t, idx_t):
+        # TODO: double check whether it works or not
+        '''
+        Map instances to Gaussian distributions, if they are the same instance,
+        their kl divergence should close to 0, else close to +infinity.
+        '''
         from ..utils import generate_track_gaussian, compute_kl_div
         bs, T_out, track_h, track_w, t_dim = track_data.size()
         if idx_t.dim() == 2:
@@ -380,41 +383,12 @@ class MultiBoxLoss(nn.Module):
 
         return losses
 
-    def interclips_classification_loss(self, pos, gt_labels, conf_feats, idx_t):
-        '''
-        :param pos: [bs*n_clips, n_priors]
-        :param gt_labels: List[label_1, ...], the total length is n_clips
-        :param conf_feats: [bs*n_clips, n_priors, n_clip_frames*d]
-        :return:
-        '''
-        n_clips = self.cfg.SOLVER.NUM_CLIPS
-        pos_list = split_squeeze(pos, length=n_clips, dim=0)
-        idx_t_list = split_squeeze(idx_t, length=n_clips, dim=0)
-        conf_feats_list = split_squeeze(conf_feats, length=n_clips, dim=0)
-        bs = len(conf_feats_list)
-
-        losses = torch.tensor(0., device=pos.device)
-        for k in range(bs):
-            loss_cur = torch.tensor(0., device=pos.device)
-            gt_labels_cur = gt_labels[k*n_clips]
-            pos_cur = pos_list[k].reshape(-1)                # [n_clips, n_priors]
-            idx_t_cur = idx_t_list[k].reshape(-1)[pos_cur]            # [n_clips, n_priors]
-            conf_feats_cur = conf_feats_list[k].reshape(-1, conf_feats.size(-1))[pos_cur]
-
-            # Find all positive samples for each instance clip by clip
-            for i, label in enumerate(gt_labels_cur):
-                keep = idx_t_cur == i
-                conf_feats_cur_obj = conf_feats_cur[keep]
-                n_samples = keep.sum()
-                iters = max(n_samples//n_clips, 1)
-                selected_idx = torch.randint(n_samples, (iters, n_clips))
-                conf_data = self.net.InterclipsClass(conf_feats_cur_obj[selected_idx.reshape(-1)].reshape(iters, -1))
-                loss_cur += F.cross_entropy(conf_data, (label-1).reshape(-1).repeat(iters))
-
-            losses += loss_cur / max(len(gt_labels_cur), 1)
-        return losses / bs
-
     def _mask_iou(self, mask1, mask2):
+        '''
+        :param mask1: [n, h, w]
+        :param mask2: [n, h, w]
+        :return: miou: [n]
+        '''
         intersection = torch.sum(mask1*mask2, dim=(1, 2))
         area1 = torch.sum(mask1, dim=(1, 2))
         area2 = torch.sum(mask2, dim=(1, 2))
@@ -424,6 +398,7 @@ class MultiBoxLoss(nn.Module):
 
     def semantic_segmentation_loss(self, segment_data, mask_t, class_t, interpolation_mode='bilinear', focal_loss=False):
         '''
+        Yolact on CoCo dataset
         :param segment_data: [bs, h, w, num_class]
         :param mask_t: a list of groundtruth masks
         :param class_t: a list of groundtruth clsses: begin with 1
@@ -463,9 +438,8 @@ class MultiBoxLoss(nn.Module):
 
         return sem_loss / float(bs) * self.cfg.MODEL.MASK_HEADS.USE_SEMANTIC_SEGMENTATION_LOSS
 
-
-def split_squeeze(x, length=1, dim=-1):
-    x_list = list(torch.split(x, length, dim=dim))
-    for i in range(len(x_list)):
-        x_list[i] = x_list[i].squeeze(dim)
-    return x_list
+    def split_squeeze(self, x, length=1, dim=-1):
+        x_list = list(torch.split(x, length, dim=dim))
+        for i in range(len(x_list)):
+            x_list[i] = x_list[i].squeeze(dim)
+        return x_list

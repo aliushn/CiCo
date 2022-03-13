@@ -118,10 +118,9 @@ class SavePath:
 
         if file_name.endswith('interrupt'):
             params = params[:-1]
-        
-        model_name = '_'.join(params[:-2])
-        epoch = params[-2]
-        iteration = params[-1]
+
+        iteration, epoch = (params[-1], params[-2]) if len(params) > 5 else (0, 0)
+        model_name = '_'.join(params[:5])
         
         return SavePath(model_name, int(epoch), int(iteration))
 
@@ -141,7 +140,7 @@ class SavePath:
         """ Note: config should be config.name. """
         max_iter = -1
         max_name = None
-
+        temp = Path(save_folder).glob(config + '_*')
         for p in Path(save_folder).glob(config + '_*'):
             path_name = str(p)
 

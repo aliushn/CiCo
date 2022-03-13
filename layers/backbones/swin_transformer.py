@@ -17,7 +17,7 @@ from utils.load_checkpoint import load_checkpoint
 
 
 class Mlp(nn.Module):
-    """ Multilayer perceptron."""
+    """ Multilayer perceptron. https://github.com/microsoft/Swin-Transformer """
 
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()

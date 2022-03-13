@@ -11,9 +11,6 @@ from .augmentations_coco import SSDAugmentation, BaseTransform_coco, FastBaseTra
 from .coco import COCODetection
 from .coco import detection_collate as detection_collate_coco
 from .coco import prepare_data as prepare_data_coco
-from .cocovis import COCOVISDetection
-from .cocovis import detection_collate as detection_collate_cocovis
-from .cocovis import prepare_data as prepare_data_cocovis
 from .VID import VIDDataset
 from .VID import detection_collate as detection_collate_vid
 from .VID import prepare_data as prepare_data_vid
@@ -31,7 +28,6 @@ __all__ = [
     'random_scale', 'show_ann', 'prepare_data_vis', 'ImageList_from_tensors', 'GtList_from_tensor', 'prepare_data_coco',
     'SSDAugmentation', 'BaseTransform_coco', 'FastBaseTransform', 'BaseTransform_vis',
     'VIDDataset', 'detection_collate_vid', 'prepare_data_vid',
-    'COCOVISDetection', 'detection_collate_cocovis', 'prepare_data_cocovis',
     'NetLoss', 'CustomDataParallel'
 ]
 

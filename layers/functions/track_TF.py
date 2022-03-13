@@ -10,13 +10,12 @@ class Track_TF(object):
     """
     At test time, track is the final part of VIS. We expend the tracking of MaskTrack R-CNN as a clip-level tracking.
     (https://openaccess.thecvf.com/content_ICCV_2019/papers/Yang_Video_Instance_Segmentation_ICCV_2019_paper.pdf)
-    1. MaskTrack R-CNN combines the similarity of embedding vectors, bou IoU, Mask IoU and classes between objects
+    1. MaskTrack R-CNN combines the similarity of embedding vectors, Box IoU, Mask IoU and classes between objects
     of two frames to compute matching scores.
     2. STMask adds a temporal fusion module to track and detect objects from previous frames to current frame,
     which effectively reduce missed objects for challenging cases. (https://arxiv.org/abs/2104.05606)
-    3. CiCo also extend it as clip-level tracking between two clips.
+    3. CiCo also extend it as clip-level online tracking between two clips.
     """
-    # TODO: Refactor this whole class away. It needs to go.
 
     def __init__(self, net, cfg):
         self.net = net
@@ -34,14 +33,14 @@ class Track_TF(object):
         self.num_clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
         self.use_naive_track = True
 
-    def __call__(self, candidates, imgs_meta, img=None):
+    def __call__(self, candidates, imgs_meta):
         outputs_aft_track = []
         for batch_idx in range(len(candidates)):
-            outputs_aft_track.append(self.track(candidates[batch_idx], imgs_meta[batch_idx], img=img[batch_idx]))
+            outputs_aft_track.append(self.track(candidates[batch_idx], imgs_meta[batch_idx]))
 
         return outputs_aft_track
 
-    def track(self, candidate, img_meta, img=None, bbox_dummy_iou=0.3):
+    def track(self, candidate, img_meta, bbox_dummy_iou=0.3):
         # only support batch_size = 1 for video test
         if isinstance(img_meta, list):
             is_first = img_meta[0]['is_first']

@@ -10,7 +10,7 @@ def point_form(boxes):
     Return:
         boxes: (tensor) Converted xmin, ymin, xmax, ymax form of boxes.
     """
-    return torch.cat((boxes[:, :2] - boxes[:, 2:]/2,     # xmin, ymin
+    return torch.cat((boxes[:, :2] - boxes[:, 2:]/2,      # xmin, ymin
                       boxes[:, :2] + boxes[:, 2:]/2), 1)  # xmax, ymax
 
 
@@ -170,10 +170,12 @@ def decode(loc, priors):
     # [x1, y1, x2, y2]
     return boxes
 
+
 def circum_boxes(boxes):
     '''
-    :param boxes: [n, 4*T], [x1^t,y1^t,x2^t,y2^t,x1^(t+1), y1^(t+1), x2^(t+1), y2^(t+1)]
-    :return: [n, 4]
+    :param boxes: bounding boxes of objects over a video clip with shape [n, 4*T],
+                  where [x1^t,y1^t,x2^t,y2^t,x1^(t+1), y1^(t+1), x2^(t+1), y2^(t+1),...]
+    :return: circumscribed boxes with the shape [n, 4]
     '''
     cir_boxes = torch.stack([boxes[..., ::2].min(-1)[0], boxes[..., 1::2].min(-1)[0],
                              boxes[..., ::2].max(-1)[0], boxes[..., 1::2].max(-1)[0]], dim=-1)
@@ -341,24 +343,35 @@ def index2d(src, idx):
 
 
 def gaussian_kl_divergence(bbox_gt, bbox_pred):
-    cwh_gt = bbox_gt[:, 2:] - bbox_gt[:, :2]
-    cwh_pred = bbox_pred[:, 2:] - bbox_pred[:, :2]
+    '''
+    Compute the KL_divergence of two Gaussian distributions in term of ground-truth bbox and predicted bbox based,
+    which is based on the coordinates.
+    :param bbox_gt: ground truth bounding boxes with the format [x1, y1, x2, y2]
+    :param bbox_pred: predicted bounding boxes with the format [x1, y1, x2, y2]
+    :return:
+    '''
+    # Obtain width and height
+    wh_gt = bbox_gt[:, 2:] - bbox_gt[:, :2]
+    wh_pred = bbox_pred[:, 2:] - bbox_pred[:, :2]
 
-    mu_gt = bbox_gt[:, :2] + 0.5 * cwh_gt
-    mu_pred = bbox_pred[:, :2] + 0.5 * cwh_pred
-    sigma_gt = cwh_gt / 4.0
-    sigma_pred = cwh_pred / 4.0
+    # Mean is the center pixel of bounding boxes
+    mu_gt, mu_pred = bbox_gt[:, :2] + 0.5 * wh_gt, bbox_pred[:, :2] + 0.5 * wh_pred
 
-    kl_div0 = (sigma_pred / sigma_gt)**2 + (mu_pred - mu_gt)**2 / sigma_gt**2 - 1 + 2 * torch.log(sigma_gt / sigma_pred)
-    kl_div1 = (sigma_gt / sigma_pred) ** 2 + (mu_gt - mu_pred) ** 2 / sigma_pred ** 2 - 1 + 2 * torch.log(
-        sigma_pred / sigma_gt)
-    loss = 0.25 * (kl_div0 + kl_div1).sum(-1)
+    # According to the 3 sigma rule of Gaussian distribution: F(u-3sigma <x < u+3sigma) = 99.73%
+    # Variance in x axis should be set as 6*sigma_x = w, we expand it as sigma_x = w/4
+    sigma_gt, sigma_pred = wh_gt / 4.0, wh_pred / 4.0
 
-    return loss
+    # Calculate KL divergence: https://en.wikipedia.org/wiki/Kullback%E2%80%93Leibler_divergence
+    kl_div0 = (sigma_pred/sigma_gt)**2 + (mu_pred-mu_gt)**2 / sigma_gt**2-1 + 2*torch.log(sigma_gt/sigma_pred)
+    kl_div1 = (sigma_gt/sigma_pred)**2 + (mu_gt-mu_pred)**2 / sigma_pred**2-1 + 2*torch.log(sigma_pred/sigma_gt)
+    kl_div = 0.25 * (kl_div0 + kl_div1).sum(-1)
+
+    return kl_div
 
 
 def compute_DIoU(boxes_a, boxes_b, eps: float = 1e-7):
     '''
+    compute distance IoU of bounding boxes.
     :param boxes_a: [n_a, 4]
     :param boxes_b: [n_b, 4]
     :return: [n_a, n_b]

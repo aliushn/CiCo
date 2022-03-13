@@ -2,15 +2,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .make_net import make_net
 from ..utils import aligned_bilinear
-from ..visualization_temporal import display_cubic_weights
 
 
 class ClipProtoNet(nn.Module):
+    """
+    The feature maps of FPN layers {P3, P4, P5} are passed through a 2D conv layer
+    and upsampled to the same resolution as P3 layer, the sum of which will be fed
+    to the clip-level protonet to generate clip-level feature maps.
+    Args:
+        - in_channels: The input feature size.
+        - mask_dim:    The number of prototypes
+    """
     def __init__(self, cfg, in_channels, mask_dim):
         super().__init__()
         self.cfg = cfg
         self.mask_dim = mask_dim
 
+        # build mask refine convs
         self.proto_src = cfg.MODEL.MASK_HEADS.PROTO_SRC
         if self.proto_src is not None and len(self.proto_src) > 1:
             if cfg.MODEL.MASK_HEADS.USE_BN:
@@ -37,6 +45,7 @@ class ClipProtoNet(nn.Module):
                                       include_last_relu=False)
 
     def forward(self, x, fpn_outs, img_meta=None):
+        # to upsample {P3, P4, P5} FPN layers to the same resolution as P3 layer
         if self.proto_src is None:
             proto_x = x
         else:
@@ -58,7 +67,7 @@ class ClipProtoNet(nn.Module):
         bs, C_in, H_in, W_in = proto_x.size()
         bs = bs // self.clip_frames
         if self.cfg.CiCo.CPN.CUBIC_MODE:
-            # Unfold inputs from 4D to 5D: [bs*T, C, H, W]=>[bs, C, T, H, W]
+            # Unfold inputs from 4D to 5D: [bs*T, C, H, W] => [bs, C, T, H, W]
             proto_x_fold = proto_x.reshape(-1, self.clip_frames, C_in, H_in, W_in).permute(0, 2, 1, 3, 4).contiguous()
             proto_out_fold = self.proto_net(proto_x_fold)
             H_out, W_out = proto_out_fold.size()[-2:]
@@ -68,18 +77,8 @@ class ClipProtoNet(nn.Module):
 
         # Activation function is Relu
         prototypes = F.relu(self.proto_conv(proto_out))
-        # display_cubic_weights(prototypes, 0, type=2, name='prototypes', img_meta=img_meta)
-
         H_out, W_out = prototypes.size()[-2:]
         # Move the features last so the multiplication is easy
         prototypes = prototypes.reshape(bs, -1, self.mask_dim, H_out, W_out).permute(0, 3, 4, 1, 2).contiguous()
-
-        display_weights = False
-        if display_weights:
-            display_cubic_weights(proto_out, 0, type=2, name='proto', img_meta=img_meta)
-            for jdx in range(0,9,3):
-                display_cubic_weights(self.proto_net[jdx].weight, jdx, type=1, name='protonet')
-            for jdx in range(0,6,3):
-                display_cubic_weights(self.proto_conv[jdx].weight, jdx, type=1, name='protoconv')
 
         return prototypes

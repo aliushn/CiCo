@@ -65,8 +65,8 @@ An offical code repository for our paper submitted in ECCV2022
 | R50         |Yolact    | 37.1 |[cico_yolact_r50_yt19_f3.pth](https://drive.google.com/file/d/1tCxL1FbzhoSH9Dv2nPx2fG2KBb7HUoAB/view?usp=sharing)   | [stdout.txt](https://drive.google.com/file/d/11V_u5leyq2qqv50f1_tA99bYxeAncr76/view?usp=sharing)
 | R50         |CondInst  | 37.3 |[cico_CondInst_r50_yt19_f3.pth](https://drive.google.com/file/d/1-pPSs4TFsttlOvd1YVX2heCimG0Dcyda/view?usp=sharing) | [stdout.txt](https://drive.google.com/file/d/11MBBchibbokVpqbLKIapSVWGuTYg9pdT/view?usp=sharing)
 | R101        |Yolact    | 39.6 |
-| R101        |CondInst  | 39.6 |
-| Swin-tiny   |Yoalct    | 41.8 |   |[stdout.txt](https://drive.google.com/file/d/1IpSLVYbqYa-C2ZQ9vKQmNTMbmTGH1Cdk/view?usp=sharing)
+| R101        |CondInst  | 39.6 |[cico_CondInst_r101_yt19_f3.pth](https://drive.google.com/file/d/1h-i9LzZ1ThdI_AXQDyWmRyPGS-fMqPW1/view?usp=sharing)| [stdout.txt](https://drive.google.com/file/d/1z_XFMA_bllIFw-rPLjntC-XbiMpgp0it/view?usp=sharing)
+| Swin-tiny   |Yoalct    | 41.8 |[cico_CondInst_yolact_yt19_f3.pth]()   |[stdout.txt](https://drive.google.com/file/d/1IpSLVYbqYa-C2ZQ9vKQmNTMbmTGH1Cdk/view?usp=sharing)
 | Swin-tiny   |CondInst  | 41.4 |[cico_CondInst_swint_yt19_f3.pth](https://drive.google.com/file/d/1Z4zy3L4g12TmA5wEJCFCVRcacZCDm3nA/view?usp=sharing) | [stdout.txt](https://drive.google.com/file/d/1Rx6JiYUduWjgkxRvRzA5akXdfK056BFq/view?usp=sharing)
 
 ### Quantitative Results on YTVIS2021

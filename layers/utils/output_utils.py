@@ -1,4 +1,4 @@
-""" Contains functions used to sanitize and prepare the output of Yolact. """
+""" Contains functions used to sanitize and prepare the output of CiCo. """
 import torch
 import cv2
 import torch.nn.functional as F
@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, train_masks=True, interpolation_mode='bilinear',
                 visualize_lincomb=False, score_threshold=0, output_file=None):
     """
-    Postprocesses the output of Yolact on testing mode into a format that makes sense,
+    On CoCo, Postprocesses the output of Yolact on testing mode into a format that makes sense,
     accounting for all the possible configuration settings.
 
     Args:
@@ -81,7 +81,7 @@ def postprocess(dets, ori_h, ori_w, s_h, s_w, img_id, train_masks=True, interpol
 def postprocess_ytbvis(dets_output, img_meta, train_masks=True, interpolation_mode='bilinear',
                        visualize_lincomb=False, output_file=None):
     """
-    Postprocesses the output of Yolact on testing mode into a format that makes sense,
+    For VIS, Postprocesses the output of CiCo on testing mode into a format that makes sense,
     accounting for all the possible configuration settings.
 
     Args:
@@ -89,6 +89,7 @@ def postprocess_ytbvis(dets_output, img_meta, train_masks=True, interpolation_mo
         - img_meta: a list of image shape information.
         - batch_idx: If you have multiple images for this batch, the image's index in the batch.
         - interpolation_mode: Can be 'nearest' | 'area' | 'bilinear' (see torch.nn.functional.interpolate)
+        - visualize_lincomb: display prototypes and mask coefficients on output_file.
 
     Returns 4 torch Tensors (in the following order):
         - classes [num_det]: The class idx for each detection.
@@ -96,6 +97,7 @@ def postprocess_ytbvis(dets_output, img_meta, train_masks=True, interpolation_mo
         - boxes   [num_det, 4]: The bounding box for each detection in absolute point form.
         - masks   [num_det, h, w]: Full image masks for each detection.
     """
+    # TODO: merge postprocess and postprocess_ytbvis functions
     dets = dict()
     for k, v in dets_output.items():
         if k is not None:
@@ -166,7 +168,8 @@ def postprocess_ytbvis(dets_output, img_meta, train_masks=True, interpolation_mo
 def undo_image_transformation(img, ori_h, ori_w, img_h=None, img_w=None, interpolation_mode='bilinear'):
     """
     Takes a transformed image tensor and returns a numpy ndarray that is untransformed.
-    Arguments w and h are the original height and width of the image.
+    Arguments ori_w and ori_h are the original height and width of the image,
+    while img_w and img_h are the reshaped height and width of the image without padding.
     """
 
     pad_h, pad_w = img.size()[-2:]
@@ -193,32 +196,33 @@ def undo_image_transformation(img, ori_h, ori_w, img_h=None, img_w=None, interpo
     return img_numpy.squeeze(0) if img_dim == 3 else img_numpy
 
 
-def display_lincomb(protos_data, masks_coeff=None, img_ids=None, output_file=None):
-    # From [0, +infinite] to [0, 1], 1.5 ==> 0.5
-    # protos_data = 1 - torch.exp(-0.5*protos_data)
-
+def display_lincomb(protos_data, masks_coeff=None, img_ids=None, output_file=None,
+                    display_coeff=False, display_mask=False):
+    '''
+    Display prototypes and mask coefficients into the output_file.
+    '''
     if protos_data.dim() == 3:
         protos_data = protos_data.unsqueeze(-2)
         out_masks = generate_mask(protos_data, masks_coeff)
     else:
         out_masks = generate_mask(protos_data, masks_coeff)
     protos_data = protos_data.permute(2, 0, 1, 3).contiguous()
-    bs = protos_data.size(0)
     root_dir = os.path.join(output_file, 'protos/')
     if len(img_ids) > 1:
         root_dir = ''.join([root_dir, str(img_ids[0]), '/'])
     if not os.path.exists(root_dir):
         os.makedirs(root_dir)
 
-    for kdx in range(bs):
+    for kdx in range(protos_data.size(0)):
         proto_data = protos_data[kdx]
 
+        # We set the number of prototypes is 32 as default, if you use others, please adaptively change it.
         arr_h, arr_w = (4, 8)
         proto_h, proto_w, _ = proto_data.size()
         arr_img = np.zeros([proto_h * arr_h, proto_w * arr_w])
         arr_run = np.zeros([proto_h * arr_h, proto_w * arr_w])
 
-        # plot protos
+        # plot prototypes
         for y in range(arr_h):
             for x in range(arr_w):
                 i = arr_w * y + x
@@ -238,13 +242,11 @@ def display_lincomb(protos_data, masks_coeff=None, img_ids=None, output_file=Non
         plt.imshow(arr_img)
         plt.axis('off')
         plt.title(str(img_ids[-1]))
-        plt.savefig(''.join([root_dir, str(img_ids[-1]), '.png']))
+        plt.savefig(''.join([root_dir, str(img_ids[-1]), '_protos.png']))
         plt.clf()
 
-        display_coeff = False
+        # Plot mask coeff
         if display_coeff:
-            # plot mask coeff
-            proto_data = proto_data.permute(2, 0, 1).contiguous()
             x = torch.arange(len(masks_coeff[0])).cpu().numpy()
             plt.subplots(figsize=(30, 5))
             for jdx in range(masks_coeff.size(0)):
@@ -259,53 +261,88 @@ def display_lincomb(protos_data, masks_coeff=None, img_ids=None, output_file=Non
                 plt.yticks(fontsize=18)
                 plt.ylim(-1.2, 1.2)
                 plt.xlim(-0.5, 31.5)
-                # plt.title(str(img_ids[-1]))
                 plt.savefig(''.join([root_dir, str(img_ids[-1]), str(jdx), '_mask_coeff.png']))
                 plt.clf()
 
-            display = False
-            if display:
-                # Plot protos whose mask coeffs > 0.75
-                keep = masks_coeff[jdx] > 0
-                obj_protos = proto_data[keep].reshape(keep.sum(), -1)
-                obj_protos = (obj_protos - obj_protos.min(dim=-1)[0].view(-1, 1)) / obj_protos.max(dim=-1)[0].view(-1, 1)
-                obj_protos = obj_protos.reshape(keep.sum(), proto_h, proto_w)
-                obj_protos = F.interpolate(obj_protos.unsqueeze(0), (2*proto_h, 2*proto_w)).squeeze(0)
-                obj_protos = obj_protos.permute(1, 0, 2).contiguous().reshape(2*proto_h, -1)
-                plt.imshow(obj_protos.cpu().numpy())
-                plt.axis('off')
-                plt.title(str(img_ids[-1]))
-                plt.savefig(''.join([root_dir, str(img_ids[-1]), '_', str(jdx), '_obj_protos.png']))
-                plt.clf()
-
                 # plot single mask
-                plt.imshow(out_masks[jdx, kdx].cpu().numpy())
-                plt.axis('off')
-                plt.title(str(img_ids[-1]))
-                plt.savefig(''.join([root_dir, str(img_ids[-1]), '_', str(jdx), '_mask_sparse.png']))
-                plt.clf()
+                if display_mask:
+                    plt.imshow(out_masks[jdx, kdx].cpu().numpy())
+                    plt.axis('off')
+                    plt.title(str(img_ids[-1]))
+                    plt.savefig(''.join([root_dir, str(img_ids[-1]), '_', str(jdx), '_mask.png']))
+                    plt.clf()
 
 
-def display_fpn_outs(outs, img_ids=None, mask_det_file=None):
+def draw_dotted_rectangle(img, x0, y0, x1, y1, color, thickness=1, gap=20):
+    '''
+    Draw a dotted rectangle, where x0, y0, x1, y1 are the coordinates of the top-left pixel and the bottom-right pixel.
+    gap is the interval of dotted lines.
+    '''
+    draw_dotted_line(img, (x0, y0), (x0, y1), color, thickness, gap, vertical=True)
+    draw_dotted_line(img, (x0, y0), (x1, y0), color, thickness, gap)
+    draw_dotted_line(img, (x0, y1), (x1, y1), color, thickness, gap)
+    draw_dotted_line(img, (x1, y0), (x1, y1), color, thickness, gap, vertical=True)
 
-    for batch_idx in range(outs[0].size(0)):
-        for idx in range(len(outs)):
-            cur_out = outs[idx][batch_idx]
-            import matplotlib.pyplot as plt
-            arr_h, arr_w = (4, 4)
-            _, h, w = cur_out.size()
-            arr_img = np.zeros([h * arr_h, w * arr_w])
 
-            for y in range(arr_h):
-                for x in range(arr_w):
-                    i = arr_w * y + x
-                    arr_img[y * h:(y + 1) * h, x * w:(x + 1) * w] = cur_out[i, :, :].cpu().numpy()
+def draw_dotted_line(img, pt1, pt2, color, thickness=1, gap=20, vertical=False):
+    '''
+    Draw dotted a line, where pt1, pt2 are the locations of the beginning and end points.
+    '''
+    dist = ((pt1[0]-pt2[0])**2 + (pt1[1]-pt2[1])**2)**.5
+    pts = []
+    for i in range(0, int(dist), gap):
+        r = i/dist
+        x = int((pt1[0]*(1-r)+pt2[0]*r)+.5)
+        y = int((pt1[1]*(1-r)+pt2[1]*r)+.5)
+        p = (x, y)
+        pts.append(p)
 
-            plt.imshow(arr_img)
-            if img_ids is not None:
-                plt.title(str(img_ids))
-                plt.savefig(''.join([mask_det_file, str(img_ids), 'outs', str(batch_idx), str(idx), '.png']))
-            plt.show()
+    for p in pts:
+        if vertical:
+            cv2.line(img, p, (p[0], p[1] + int(gap//3)), color, thickness)
+        else:
+            cv2.line(img, p, (p[0] + int(gap//3), p[1]), color, thickness)
+
+
+# for making bounding boxes pretty when display in eval.py
+COLORS = ((244,  67,  54),
+          (233,  30,  99),
+          (156,  39, 176),
+          (103,  58, 183),
+          ( 63,  81, 181),
+          ( 33, 150, 243),
+          (  3, 169, 244),
+          (  0, 188, 212),
+          (  0, 150, 136),
+          ( 76, 175,  80),
+          (139, 195,  74),
+          (205, 220,  57),
+          (255, 235,  59),
+          (255, 193,   7),
+          (255, 152,   0),
+          (255,  87,  34),
+          (121,  85,  72),
+          (158, 158, 158),
+          ( 96, 125, 139))
+
+
+# Quick and dirty lambda for selecting the color for a particular index
+# Also keeps track of a per-gpu color cache for maximum speed
+def get_color(j, color_type=None, on_gpu=None, undo_transform=True):
+    if color_type is None:
+        color_idx = j * 5 % len(COLORS)
+    else:
+        color_idx = color_type[j] * 5 % len(COLORS)
+
+    color = COLORS[color_idx]
+    if not undo_transform:
+        # The image might come in as RGB or BRG, depending
+        color = (color[2], color[1], color[0])
+    if on_gpu is not None:
+        color = torch.Tensor(color).to(on_gpu).float() / 255.
+
+    return color
+
 
 
 

@@ -4,6 +4,9 @@ from mmcv.ops import DeformConv2d
 
 
 class FeatureAlign(nn.Module):
+    '''
+    Feature align module of STMask: https://github.com/MinghanLi/STMask
+    '''
     def __init__(self,
                  in_channels,
                  out_channels,

@@ -3,10 +3,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from mmcv.ops import roi_align
 from layers.utils import center_size, point_form, decode, sanitize_coordinates_hw
-from ..visualization_temporal import display_correlation_map_patch, display_box_shift
+from ..utils.visualization_utils import display_correlation_map_patch, display_box_shift
 
 
 class TemporalFusionNet(nn.Module):
+    '''
+    Temporal fusion net of STMask https://github.com/MinghanLi/STMask
+    The input is the concatenated features of the reference frame, the target frame
+    and their correlation maps.
+    The outputs includes the offsets of bounding boxes and mask coefficients between
+    the reference frame and the target frame.
+    '''
     def __init__(self, args, in_channels=256, n_mask_protos=32):
 
         super().__init__()
@@ -39,8 +46,9 @@ class TemporalFusionNet(nn.Module):
 
 def correlate_operator(x1, x2, patch_size=11, kernel_size=1, stride=1, dilation_patch=1):
     """
-    :param x1: features 1
-    :param x2: features 2
+    compute the correlation maps between two frames
+    :param x1: features of the reference frame
+    :param x2: features of the target frame
     :param patch_size: the size of whole patch is used to calculate the correlation
     :return:
     """
@@ -65,8 +73,10 @@ def correlate_operator(x1, x2, patch_size=11, kernel_size=1, stride=1, dilation_
 
 def bbox_feat_extractor(feature_maps, boxes_w_norm, h, w, pool_size):
     """
-        feature_maps: size:1*C*h*w
-        boxes_w_norm: Mx5 float box with (x1, y1, x2, y2) **without normalization**
+    based on roi_align operation to extract features in bounding boxes
+    Args:
+        - feature_maps: size:1*C*h*w
+        - boxes_w_norm: Mx5 float box with (x1, y1, x2, y2) **without normalization**
     """
     # Currently only supports batch_size 1, rescale from [0, 1] to [0, h or w]
     # TODO: Double check [0, 1] or [0, h/w] in different mmcv versions
@@ -90,9 +100,12 @@ def bbox_feat_extractor(feature_maps, boxes_w_norm, h, w, pool_size):
 
 
 class T2S_Head(nn.Module):
+    '''
+    track-to-segment module of STMask https://github.com/MinghanLi/STMask
+    '''
     def __init__(self, args, in_channels=256, n_mask_protos=32):
         super(T2S_Head, self).__init__()
-        self.args = args    # args = cfg.STMASK.T2S_HEADS
+        self.args = args
         self.in_channels = in_channels
         self.n_mask_protos = n_mask_protos
         self.TemporalFusionNet = TemporalFusionNet(args, in_channels, n_mask_protos)
@@ -103,7 +116,7 @@ class T2S_Head(nn.Module):
         feat_tar = feat_tar.unsqueeze(0) if feat_tar.dim() == 3 else feat_tar
         feat_h, feat_w = feat_ref.size()[-2:]
 
-        # Compute teh correlation of features of two adjacent frames, inspired by Optical Flow
+        # Compute the features correlation between two adjacent frames, inspired by Optical Flow
         corr = correlate_operator(feat_ref, feat_tar,
                                   patch_size=self.args.CORRELATION_PATCH_SIZE,
                                   kernel_size=1)

@@ -33,6 +33,12 @@ def parse_dynamic_params(params, channels, weight_nums, bias_nums):
 
 
 class DynamicMaskHead(nn.Module):
+    '''
+    Dynamic mask head in CondInst, there are two options for relative coordinates:
+    generate_rel_coord and generate_rel_coord_gauss in layers/utils/mask_utils.py.
+    The former is the same as CondIns, whereas the latter is defined by Gaussian
+    distribution.
+    '''
     def __init__(self, cfg):
         super(DynamicMaskHead, self).__init__()
         self.cfg = cfg
@@ -41,6 +47,7 @@ class DynamicMaskHead(nn.Module):
         self.in_channels = cfg.MODEL.MASK_HEADS.MASK_DIM
         self.disable_rel_coords = cfg.MODEL.MASK_HEADS.DISABLE_REL_COORDS
 
+        # Build the total numbers of weights and bias in dynamic filters of FCN
         weight_nums, bias_nums = [], []
         for l in range(self.num_layers):
             if l == 0:
@@ -63,7 +70,7 @@ class DynamicMaskHead(nn.Module):
 
     def mask_heads_forward(self, features, weights, biases, num_insts):
         '''
-        :param features
+        :param features: features from clip-level protonet
         :param weights: [w0, w1, ...]
         :param bias: [b0, b1, ...]
         :return:
@@ -84,15 +91,17 @@ class DynamicMaskHead(nn.Module):
 
     def __call__(self, mask_feats, mask_head_params, det_bbox, fpn_levels):
         '''
-        :param mask_feats: [t, 8, h, w]
-        :param mask_head_params: [n, 169]
+        :param mask_feats: features from clip-level mask heads [T, 8, h, w]
+        :param mask_head_params: coefficients from clip-level prediction heads [n, 169]
         :param det_bbox:[n, 4]
         :return:
         '''
         n_inst, _ = mask_head_params.size()
         H, W = mask_feats.size()[-2:]
+        # Split mask_head_params to two parts: weights and bias
         weights, biases = parse_dynamic_params(mask_head_params, self.channels,
                                                self.weight_nums, self.bias_nums)
+        # Repeat mask features for processing multiple instances in parallel
         T = mask_feats.size(0)
         if T > 1:
             weights = [weight.unsqueeze(-1) for weight in weights]
@@ -101,18 +110,20 @@ class DynamicMaskHead(nn.Module):
             mask_feats = mask_feats.repeat(n_inst, 1, 1, 1)
 
         if not self.disable_rel_coords:
-            # TODO: Circumscribed boxes or individual boxes for frames of the clip?
+            # TODO: build relative coordinates by circumscribed boxes
+            #  or individual boxes of all frames in the clip
             relative_coords = generate_rel_coord_gauss(det_bbox, H, W).unsqueeze(1).detach()
+            # You can use the original relative coordinates by following codes
+            # relative_coords = generate_rel_coord(det_bbox, fpn_levels.tolist(), self.sizes_of_interest, H, W).detach()
             if mask_feats.dim() == 5:
                 relative_coords = relative_coords.unsqueeze(-3).repeat(1, 1, T, 1, 1)
-            # relative_coords = generate_rel_coord(det_bbox, fpn_levels.tolist(), self.sizes_of_interest, H, W).detach()
-            # print(mask_feats.min(), mask_feats.max(), relative_coords.max())
             mask_head_inputs = torch.cat([relative_coords, mask_feats], dim=1)
         else:
             mask_head_inputs = mask_feats
 
         mask_head_inputs = mask_head_inputs.reshape(1, -1, H, W).contiguous() if mask_head_inputs.dim() == 4 \
             else mask_head_inputs.reshape(1, -1, T, H, W).contiguous()
+        # clip-level generation by feeding mask head inputs and weights (bias) into a FCN
         mask_logits = self.mask_heads_forward(mask_head_inputs, weights, biases, n_inst).squeeze(0)
         mask_logits = mask_logits if mask_logits.dim() == 4 else mask_logits.unsqueeze(1)
 

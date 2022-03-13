@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# Convert detection or segmentation results to a list of numpy arrays for evaluation on Codelab
 import numpy as np
 import mmcv
 import os
@@ -12,7 +13,7 @@ from datasets.vid_eval import do_vid_evaluation
 
 
 def bbox2result_with_id(preds, img_meta):
-    """Convert detection results to a list of numpy arrays.
+    """Convert detection results to a list of numpy arrays for CoCo dataset.
 
     Args:
         preds (Tensor): shape (n, 5)
@@ -108,7 +109,7 @@ def results2json_videoseg(results, out_file):
 
 
 def bbox2result_video(results, preds, frame_ids, types=None):
-    """Convert detection results to a list of numpy arrays.
+    """Convert detection or segmentation results to a list of numpy arrays for VIS datasets.
 
     Args:
         preds (Tensor): shape (n, 5)
@@ -164,7 +165,16 @@ def bbox2result_video(results, preds, frame_ids, types=None):
 
 
 def calc_metrics(anno_file, dt_file, output_file=None, iouType='segm', data_type='vis', use_vid_metric=True):
-    # iouType is 'segm' or 'bbox'
+    '''
+    calculate metrics based on the two .json files: ground-truth annotation and predicted results.
+    :param anno_file: path of ground-truth annotation .json file
+    :param dt_file: path of predicted .json file
+    :param output_file: the output file to save the metric results
+    :param iouType: 'segm' or 'bbox'
+    :param data_type: 'vis' or 'vid'
+    :param use_vid_metric:
+    :return:
+    '''
     if data_type == 'vis':
         ytvosGt = YTVOS(anno_file)
         ytvosDt = ytvosGt.loadRes(dt_file)
@@ -193,6 +203,14 @@ def calc_metrics(anno_file, dt_file, output_file=None, iouType='segm', data_type
 
 
 def ytvos_eval(result_file, result_types, ytvos, max_dets=(100, 300, 1000), save_path_valid_metrics=None):
+    '''
+    :param result_file: path of .json file with predicted results
+    :param result_types: a list including 'bbox' or 'segm'
+    :param ytvos:
+    :param max_dets:
+    :param save_path_valid_metrics:
+    :return:
+    '''
     if mmcv.is_str(ytvos):
         ytvos = YTVOS(ytvos)
     assert isinstance(ytvos, YTVOS)

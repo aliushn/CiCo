@@ -1,9 +1,10 @@
 from datasets import *
 from CoreNet import CoreNet
 from utils.functions import MovingAverage, ProgressBar, SavePath
-from layers.utils import jaccard, mask_iou, postprocess, undo_image_transformation
+from layers.utils import jaccard, mask_iou, postprocess, undo_image_transformation, get_color
+from configs.load_config import load_config
+from configs._base_.datasets import get_dataset_config
 from utils import timer
-from layers.visualization_temporal import get_color
 import pycocotools
 import torch.utils.data as data
 import numpy as np
@@ -19,11 +20,8 @@ import os
 from collections import defaultdict
 from pathlib import Path
 from collections import OrderedDict
-
 import matplotlib.pyplot as plt
 import cv2
-from configs.load_config import load_config
-from configs._base_.datasets import get_dataset_config
 
 
 def str2bool(v):
@@ -1055,7 +1053,7 @@ if __name__ == '__main__':
         if args.cuda:
             net = net.cuda()
 
-        # TODO Currently we do not support Fast Mask Re-scroing in evalimage, evalimages, and evalvideo
+        # TODO: Currently we do not support Fast Mask Re-scroing in evalimage, evalimages, and evalvideo
         if args.image is not None:
             if ':' in args.image:
                 inp, out = args.image.split(':')

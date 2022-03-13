@@ -1,11 +1,13 @@
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-from ...utils import encode, decode, center_size, point_form, DIoU_loss, generate_mask
-from fvcore.nn import giou_loss
+from ...utils import encode, center_size, generate_mask
 
 
 class T2SLoss(nn.Module):
+    '''Track-to-segment Loss
+    To compile temporal fusion module of STMask in CVPR2021 (https://github.com/MinghanLi/STMask)
+    '''
     def __init__(self, cfg, net):
         super(T2SLoss, self).__init__()
         self.cfg = cfg
@@ -21,7 +23,6 @@ class T2SLoss(nn.Module):
     def forward(self, features, gt_boxes_unflod, gt_masks_unfold, prototypes):
         '''
         To compile temporal fusion module of STMask in CVPR2021 (https://github.com/MinghanLi/STMask)
-        Track to segment Loss
         :param features: features used to compute correlation of two frame
         :param gt_boxes_unflod: List[torch.tensor], [a1, a2, b1, b2, c1,c2]
         :param gt_masks_unfold: List[torch.tensor]

@@ -13,7 +13,6 @@ import argparse
 import datetime
 import torch.distributed as dist
 from configs.load_config import load_config
-
 import eval as eval_script
 import eval_coco as eval_coco_script
 
@@ -71,6 +70,7 @@ def parse_args():
 
 def train(cfg):
     if args.is_distributed:
+        # TODO: distributed training may degrade performance, test them
         os.environ['MASTER_PORT'] = args.port
         dist.init_process_group(backend='nccl', init_method='env://')
         torch.cuda.set_device(args.local_rank)
@@ -86,7 +86,9 @@ def train(cfg):
     net = CoreNet(cfg)
     net.train()
 
-    cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, cfg.NAME+'_f'+str(cfg.SOLVER.NUM_CLIP_FRAMES))
+    # Update configs
+    cfg.NAME = cfg.NAME+'_f'+str(cfg.SOLVER.NUM_CLIP_FRAMES)
+    cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, cfg.NAME)
     print('Output directory is: {}'.format(cfg.OUTPUT_DIR))
     if not os.path.exists(cfg.OUTPUT_DIR) and args.local_rank == 0:
         os.mkdir(cfg.OUTPUT_DIR)
@@ -101,7 +103,7 @@ def train(cfg):
     if args.resume == 'interrupt':
         args.resume = SavePath.get_interrupt(cfg.OUTPUT_DIR)
     elif args.resume == 'latest':
-        args.resume = SavePath.get_latest(cfg.OUTPUT_DIR)
+        args.resume = SavePath.get_latest(cfg.OUTPUT_DIR, cfg.NAME)
     if args.resume is not None:
         if args.is_distributed:
             if args.local_rank == 0:
@@ -140,7 +142,6 @@ def train(cfg):
                              num_classes=cfg.DATASETS.NUM_CLASSES,
                              pos_threshold=cfg.MODEL.PREDICTION_HEADS.POSITIVE_IoU_THRESHOLD,
                              neg_threshold=cfg.MODEL.PREDICTION_HEADS.NEGATIVE_IoU_THRESHOLD)
-
     train_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.TRAIN, cfg.INPUT,
                                 cfg.SOLVER.NUM_CLIP_FRAMES, cfg.SOLVER.NUM_CLIPS)
 
@@ -152,11 +153,13 @@ def train(cfg):
         net = torch.nn.parallel.DistributedDataParallel(net.to(device), device_ids=[args.local_rank])
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
+        # We use customed dataparallel to balance memory of multiple GPUs
+        # net = torch.nn.DataParallel(net, device_ids=range(torch.cuda.device_count()))
         netloss = CustomDataParallel(NetLoss(net, criterion))
         netloss = netloss.cuda()
-        # net = torch.nn.DataParallel(net, device_ids=range(torch.cuda.device_count()))
         train_sampler = None
 
+    # We support train models on coco, vis and vid datasets now, please give a specific data type
     if cfg.DATASETS.TYPE == 'coco':
         detection_collate = detection_collate_coco
     elif cfg.DATASETS.TYPE in {'vis'}:
@@ -249,7 +252,7 @@ def train(cfg):
                     log.log('train', loss=loss_info, epoch=epoch, iter=iteration, lr=round(cur_lr, 10), elapsed=elapsed)
 
                 # Save models and run valid set
-                if iteration % cfg.SOLVER.SAVE_INTERVAL == 0 and iteration > 0 and args.local_rank == 0:
+                if iteration % int(0.5*cfg.SOLVER.SAVE_INTERVAL) == 0 and iteration > 0 and args.local_rank == 0:
                     if args.keep_latest:
                         latest = SavePath.get_latest(cfg.OUTPUT_DIR, cfg.DATASETS.TYPE)
 
@@ -275,7 +278,7 @@ def train(cfg):
                             compute_validation_map(net, valid_sub_dataset)
 
                             # valid or test datasets
-                            if cfg.DATASETS.TYPE == 'vis':
+                            if cfg.DATASETS.TYPE == 'vis' and epoch > 6:
                                 valid_dataset = get_dataset(cfg.DATASETS.TYPE,  cfg.DATASETS.VALID, cfg.INPUT,
                                                             cfg.TEST.NUM_CLIP_FRAMES, num_clips=1, inference=True)
                                 compute_validation_map(net, valid_dataset)
@@ -431,7 +434,7 @@ if __name__ == '__main__':
     else:
         torch.set_default_tensor_type('torch.FloatTensor')
 
-    # Update training parameters from the config if necessary
+    # Update training parameters from the args if necessary
     def replace(name, dict_cfg):
         if getattr(args, name) is not None: setattr(dict_cfg, name, getattr(args, name))
 

@@ -9,8 +9,8 @@ import torch.nn.functional as F
 
 class PredictionModule_FC(nn.Module):
     """
-    The (c) prediction module adapted from DSSD:
-    https://arxiv.org/pdf/1701.06659.pdf
+    The prediction module with spatial feature calibration by deformable convolutions
+    proposed in STMask https://github.com/MinghanLi/STMask
 
     Note that this is slightly different to the module in the paper
     because the Bottleneck block actually has a 3x3 convolution in
@@ -19,17 +19,6 @@ class PredictionModule_FC(nn.Module):
     better.
     Args:
         - in_channels:   The input feature size.
-        - out_channels:  The output feature size (must be a multiple of 4).
-        - aspect_ratios: A list of lists of priorbox aspect ratios (one list per scale).
-        - scales:        A list of priorbox scales relative to this layer's convsize.
-                         For instance: If this layer has convouts of size 30x30 for
-                                       an image of size 600x600, the 'default' (scale
-                                       of 1) for this layer would produce bounding
-                                       boxes with an area of 20x20px. If the scale is
-                                       .5 on the other hand, this layer would consider
-                                       bounding boxes with area 10x10px, etc.
-        - parent:        If parent is a PredictionModule, this module will use all the layers
-                         from parent instead of from this module.
     """
 
     def __init__(self, cfg, in_channels, mask_dim=32, deform_groups=1):
@@ -37,7 +26,8 @@ class PredictionModule_FC(nn.Module):
 
         self.cfg = cfg
         self.in_channels = in_channels
-        self.num_classes = cfg.DATASETS.NUM_CLASSES if cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS else cfg.DATASETS.NUM_CLASSES + 1
+        self.num_classes = cfg.DATASETS.NUM_CLASSES if cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS \
+            else cfg.DATASETS.NUM_CLASSES + 1
         self.mask_dim = mask_dim
         self.track_dim = cfg.MODEL.TRACK_HEADS.TRACK_DIM
         self.deform_groups = deform_groups
@@ -67,7 +57,6 @@ class PredictionModule_FC(nn.Module):
                                              kernel_size=kernel_size, padding=padding))
 
             if cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
-                # self.DIoU_layer.append(nn.Conv2d(self.out_channels, self.num_priors, **cfg.head_layer_params[k]))
                 self.centerness_layer.append(nn.Conv2d(self.in_channels, self.num_priors*self.clip_frames,
                                                        kernel_size=kernel_size, padding=padding))
 
@@ -129,8 +118,8 @@ class PredictionModule_FC(nn.Module):
     def forward(self, fpn_outs):
         """
         Args:
-            - x: The convOut from a layer in the backbone network
-                 Size: [batch_size, in_channels, conv_h, conv_w])
+            - fpn_outs: A list of the multi-scale features after FPN, including {P3, P4, P5, P6, P7}
+                        Size: [batch_size, in_channels, conv_h, conv_w])
 
         Returns a tuple (bbox_coords, class_confs, mask_output, prior_boxes) with sizes
             - bbox_coords: [batch_size, conv_h*conv_w*num_priors, 4]
@@ -164,7 +153,9 @@ class PredictionModule_FC(nn.Module):
             if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
                 track_x = self.track_extra(x)
                 track = []
-        
+
+            # To keep spatial feature calibration between anchors and filters,
+            # we adopt 3*3, 3*5, 5*3 kernel sizes and select corresponding area as anchors
             bbox, centerness_data, mask, = [], [], []
             for k in range(len(self.pred_conv_kernels)):
                 if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
@@ -175,21 +166,24 @@ class PredictionModule_FC(nn.Module):
                 bbox.append(bbox_cur.permute(0, 2, 3, 1).contiguous())
         
                 if self.cfg.MODEL.CLASS_HEADS.TRAIN_CLASS:
-                    conf_cur = self.conf_layer[k](conf_x, bbox_cur.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_CLASS else self.conf_layer[k](conf_x)
+                    conf_cur = self.conf_layer[k](conf_x, bbox_cur.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_CLASS \
+                        else self.conf_layer[k](conf_x)
                     conf.append(conf_cur.permute(0, 2, 3, 1).contiguous())
                 else:
                     stuff_cur = self.stuff_layer[k](conf_x)
                     stuff.append(stuff_cur.permute(0, 2, 3, 1).contiguous())
         
                 if self.cfg.MODEL.MASK_HEADS.TRAIN_MASKS:
-                    mask_cur = self.mask_layer[k](bbox_x, bbox_cur.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_MASK else self.mask_layer[k](bbox_x)
+                    mask_cur = self.mask_layer[k](bbox_x, bbox_cur.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_MASK \
+                        else self.mask_layer[k](bbox_x)
                     mask.append(mask_cur.permute(0, 2, 3, 1).contiguous())
         
                 if self.cfg.MODEL.TRACK_HEADS.TRAIN_TRACK and not self.cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
-                    track_cur = self.track_layer[k](track_x, bbox_cur.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_TRACK else self.track_layer[k](track_x)
+                    track_cur = self.track_layer[k](track_x, bbox_cur.detach()) if self.cfg.STMASK.FC.FCB_USE_DCN_TRACK \
+                        else self.track_layer[k](track_x)
                     track.append(track_cur.permute(0, 2, 3, 1).contiguous())
 
-            # cat for all anchors
+            # stack all anchors in different FPN scales
             preds['loc'] += [torch.cat(bbox, dim=-1).view(x.size(0), -1, 4*self.clip_frames)]
             if self.cfg.MODEL.BOX_HEADS.TRAIN_CENTERNESS:
                 preds['centerness'] += [torch.cat(centerness_data, dim=1).sigmoid().view(x.size(0), -1, self.clip_frames)]
@@ -219,7 +213,7 @@ class PredictionModule_FC(nn.Module):
                 y = (j + 0.5) / conv_h
 
                 for ar in self.pred_conv_kernels:
-                    # Replece original aspect ratios [1, 0.5, 2] with kernel size [3, 3], [3, 5], [5, 3]
+                    # Replace original aspect ratios [1, 0.5, 2] with kernel size [3, 3], [3, 5], [5, 3]
                     for scale in self.pred_scales[idx]:
                         arh, arw = ar
                         ratio = scale / self.pred_scales[idx][-1]

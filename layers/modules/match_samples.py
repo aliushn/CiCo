@@ -4,9 +4,10 @@ from ..utils import point_form, decode, center_size, jaccard, compute_DIoU, enco
 
 def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, idx_t, ids_t, idx,
           pos_thresh=0.5, neg_thresh=0.3):
-    """Match each prior box with the ground truth box of the highest jaccard
-    overlap, encode the bounding boxes, then return the matched indices
-    corresponding to both confidence and location preds.
+    """
+    frame-level matcher: Match each prior box with the ground truth box of the highest jaccard
+    overlap, encode the bounding boxes, then return the matched indices corresponding to both
+    confidence and location predictions.
     Args:
         pos_thresh: (float) IoU > pos_thresh ==> positive.
         neg_thresh: (float) IoU < neg_thresh ==> negative.
@@ -131,9 +132,10 @@ def match(cfg, bbox, labels, ids, crowd_boxes, priors, loc_data, loc_t, conf_t, 
 
 def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t, idx_t,
                obj_ids_t, kdx, jdx, pos_thresh=0.5, neg_thresh=0.3, use_cir_boxes=False, ind_range=None):
-    """Match each prior box with the ground truth box of the highest jaccard
-    overlap, encode the bounding boxes, then return the matched indices
-    corresponding to both confidence and location preds.
+    """
+    clip-level matcher: Match each prior box with the ground truth box of the highest jaccard
+    overlap, encode the bounding boxes, then return the matched indices corresponding to both
+    confidence and location predictions.
     Args:
         pos_thresh: (float) IoU > pos_thresh ==> positive.
         neg_thresh: (float) IoU < neg_thresh ==> negative.
@@ -226,7 +228,7 @@ def match_clip(gt_boxes, gt_labels, gt_obj_ids, priors, loc_data, loc_t, conf_t,
             matches = valid_gt_boxes[best_truth_idx_cir_pos]
             loc_pos = encode(matches.reshape(-1, 4), priors[keep_pos_cir].reshape(-1, 4)).reshape(keep_pos_cir.sum(), -1)
 
-        # Please Triple check to avoid Nan and Inf
+        # Just Triple check to avoid Nan and Inf
         keep = (torch.isinf(loc_pos).sum(-1) + torch.isnan(loc_pos).sum(-1)) > 0
         if keep.sum() > 0:
             print('Inf or Nan occur in loc_t when matching samples:', loc_pos[keep])

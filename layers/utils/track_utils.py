@@ -9,8 +9,20 @@ from .box_utils import center_size, decode,  point_form, crop
 
 def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta, small_objects=None,
                         add_bbox_dummy=False, bbox_dummy_iou=0, match_coeff=None):
-    # compute comprehensive matching score based on matchig likelihood,
-    # bbox confidence, and ious
+    '''
+    compute comprehensive matching score based on matching likelihood, bbox confidence, box iou and mask iou.
+    Please refer to MaskTrack R-CNN for more details.
+    :param match_ll:
+    :param bbox_scores:
+    :param bbox_ious:
+    :param mask_ious:
+    :param label_delta:
+    :param small_objects:
+    :param add_bbox_dummy:
+    :param bbox_dummy_iou:
+    :param match_coeff:
+    :return:
+    '''
     if add_bbox_dummy:
         bbox_iou_dummy = torch.ones(bbox_ious.size(0), 1,
                                     device=torch.cuda.current_device()) * bbox_dummy_iou
@@ -37,48 +49,24 @@ def compute_comp_scores(match_ll, bbox_scores, bbox_ious, mask_ious, label_delta
             return match_ll + scores
 
 
-def split_bbox(bbox, idx_bbox_ori, nums_bbox_per_layer):
-    num_layers = len(nums_bbox_per_layer)
-    num_bboxes = len(idx_bbox_ori)
-    for i in range(1, num_layers):
-        nums_bbox_per_layer[i] = nums_bbox_per_layer[i-1] + nums_bbox_per_layer[i]
-
-    split_bboxes = [[] for _ in range(num_layers)]
-    split_bboxes_idx = [[] for _ in range(num_layers)]
-    for i in range(num_bboxes):
-        for j in range(num_layers):
-            if idx_bbox_ori[i] < nums_bbox_per_layer[j]:
-                split_bboxes[j].append(bbox[i].unsqueeze(0))
-                split_bboxes_idx[j].append(i)
-                break
-
-    for j in range(num_layers):
-        if len(split_bboxes[j]) > 0:
-            split_bboxes[j] = torch.cat(split_bboxes[j])
-        if j > 0:
-            split_bboxes_idx[0] += split_bboxes_idx[j]
-
-    return split_bboxes, split_bboxes_idx[0]
-
-
 def generate_track_gaussian(track_data, masks=None, boxes=None):
     '''
-    :param track_data: [h, w, c] or [n, h, w, c]
-    :param masks: [n, T, h, w]
-    :param boxes: [n, T, 4]
+    For an instance, we use the embeddings of pixels belonging to the instance to generate a gaussian distribution,
+    i.e., mean and variance. We provide two options: masks or boxes, to select the pixels of instances.
+    We hope the kl divergence of gaussian distribution belonging to the same instances should close to 0.
+    :param track_data: embedding vectors of tracking [h, w, c] or [n, h, w, c]
+    :param masks: predicted instance masks [n, T, h, w]
+    :param boxes: predicted bounding boxes [n, T, 4]
     :return: [n, T, c]
-    the means and variances of multi-vairants Gaussian distribution for tracking
+    the means and variances of multi-variants Gaussian distribution for tracking
     '''
-
     n_objs = boxes.size(1)
-    dim = len(track_data.size())
-    if dim == 3:
+    if len(track_data.size()) == 3:
         track_data = track_data.unsqueeze(0)
     _, h, w, c = track_data.size()
     track_data = track_data.unsqueeze(0).repeat(n_objs, 1, 1, 1, 1)
 
     assert masks is not None or boxes is not None
-
     if masks is not None:
         # use pred masks as the fired area to crop track_data and evaluate multi-vairants Gaussian distribution
         used_masks = F.interpolate(masks.float(), (h, w), mode='bilinear', align_corners=False).gt(0.5)
@@ -93,9 +81,10 @@ def generate_track_gaussian(track_data, masks=None, boxes=None):
         n_pixels = c_boxes[:, 2] * c_boxes[:, 3] * h * w
         boxes = point_form(c_boxes).reshape(n_objs, -1, 4)
         cropped_track_data = crop(track_data.reshape(-1, h, w, c).permute(1, 2, 3, 0).contiguous(),
-                                  boxes.reshape(-1, 4))                   # [h, w, c, n_pos*T]
+                                  boxes.reshape(-1, 4))                                             # [h, w, c, n_pos*T]
         cropped_track_data = cropped_track_data.permute(3, 0, 1, 2).contiguous().reshape(n_objs, -1, h, w, c)
 
+    # compute mean and variance
     mu = cropped_track_data.sum(dim=(-2, -3)) / torch.clamp(n_pixels.reshape(n_objs, -1, 1), min=1)  # [n_pos, T, c]
     var = torch.sum((cropped_track_data - mu[:, :, None, None, :]) ** 2, dim=(-2, -3))               # [n_pos, T, c]
 
@@ -131,6 +120,7 @@ def compute_kl_div(p_mu, p_var, q_mu=None, q_var=None):
     p_var = torch.clamp(p_var, min=1e-5)
     q_var = torch.clamp(q_var, min=1e-5)
 
+    # we split kl divergence into three terms for convenience
     first_term = torch.sum(q_var.log(), dim=-1).unsqueeze(2) \
                  - torch.sum(p_var.log(), dim=-1).unsqueeze(1) - p_mu.size(2)     # [bs, nq, np]
     # ([bs, 1, np, c] - [bs, nq, 1, c]) * [bs, 1, np, c] => [bs, nq, np]

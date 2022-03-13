@@ -5,7 +5,7 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 from .augmentations_vis import BaseTransform_vis
-from .augmentations_coco import BaseTransform_coco, SSDAugmentation
+from .augmentations_coco import BaseTransform_coco
 from .augmentations_vid import BaseTransform_vid
 import torch.nn.functional as F
 

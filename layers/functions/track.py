@@ -1,7 +1,6 @@
 import torch
 import numpy as np
-from layers.utils import jaccard, mask_iou, compute_comp_scores, generate_track_gaussian, compute_kl_div, generate_mask
-from utils import timer
+from layers.utils import jaccard, mask_iou, compute_comp_scores, generate_track_gaussian, compute_kl_div
 
 import pyximport
 pyximport.install(setup_args={"include_dirs":np.get_include()}, reload_support=True)
@@ -43,7 +42,6 @@ class Track(object):
         return results
 
     def track(self, detection, img_metas):
-
         # only support batch_size = 1 for video test
         is_first = img_metas[0]['is_first']
         if is_first:

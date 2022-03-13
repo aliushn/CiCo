@@ -11,6 +11,7 @@ from layers.functions import Detect, Track_TF
 # See the bug report here: https://github.com/pytorch/pytorch/issues/17108
 torch.cuda.current_device()
 prior_cache = defaultdict(lambda: None)
+# TODO: Track by gaussian needs to double check
 
 
 class CoreNet(nn.Module):
@@ -19,7 +20,7 @@ class CoreNet(nn.Module):
 
         self.cfg = cfg
 
-        # ------------ build Backbone ------------
+        # ------------ build ResNet or SwinT Backbones ------------
         if self.cfg.MODEL.BACKBONE.SWINT.engine:
             self.backbone = SwinTransformer(depths=cfg.MODEL.BACKBONE.SWINT.depths)
             bb_embed_dim = self.cfg.MODEL.BACKBONE.SWINT.embed_dim
@@ -33,7 +34,7 @@ class CoreNet(nn.Module):
         self.fpn_num_downsample = cfg.MODEL.FPN.NUM_DOWNSAMPLE
         self.clip_frames = cfg.SOLVER.NUM_CLIP_FRAMES
 
-        # ------------ build ProtoNet ------------
+        # ------------ build clip-level ProtoNet ------------
         self.mask_dim = cfg.MODEL.MASK_HEADS.MASK_DIM
         if cfg.MODEL.MASK_HEADS.USE_SIPMASK:
             self.mask_dim = self.mask_dim * cfg.MODEL.MASK_HEADS.SIPMASK_HEAD
@@ -45,7 +46,7 @@ class CoreNet(nn.Module):
             else:
                 self.mask_coeff_dim = self.mask_dim
 
-        # ------- Build multi-scales prediction head  ------------
+        # ------- Build multi-scales clip-level prediction head  ------------
         self.num_priors = len(cfg.MODEL.BACKBONE.PRED_SCALES[0]) * len(cfg.MODEL.BACKBONE.PRED_ASPECT_RATIOS[0])
         # prediction layers for loc, conf, mask, track
         if cfg.STMASK.FC.USE_FCA:
@@ -53,10 +54,10 @@ class CoreNet(nn.Module):
         else:
             self.prediction_layers = ClipPredictionModule(cfg, self.fpn_num_features, self.mask_coeff_dim, deform_groups=1)
 
-        # ---------------- Build detection ----------------
+        # ---------------- Build detection for inference ---------------------------
         self.Detect = Detect(cfg)
 
-        # ---------------- Build track head ----------------
+        # ---------------- Build tracking branch of STMask not CiCo ----------------
         if cfg.MODEL.TRACK_HEADS.TRAIN_TRACK:
             if cfg.MODEL.TRACK_HEADS.TRACK_BY_GAUSSIAN:
                 self.use_3D = True if cfg.MODEL.CiCo.CPN.CUBIC_MODE else False
@@ -148,7 +149,6 @@ class CoreNet(nn.Module):
                 if name+'.weight' not in state_dict.keys():
                     print('parameters in current model but not in pre-trained model:', name)
         print('Finish init all weights by Xavier.')
-        print()
 
         model_dict = self.state_dict()
         # only update same modules and layers between pre-trained model and our model
@@ -174,6 +174,7 @@ class CoreNet(nn.Module):
                             else:
                                 print('Size is different in pre-trained model and current model:', key)
                         elif state_dict[key].dim() == 4 and model_dict[key].dim() == 5:
+                            # update 3D weights from 2D pre-trained weights
                             c_out_p, c_in_p, kh_p, kw_p = state_dict[key].size()
                             c_out, c_in, t, kh, kw = model_dict[key].size()
                             if [kh_p, kw_p] == [kh, kw] and c_out % c_out_p == 0:
@@ -281,7 +282,7 @@ class CoreNet(nn.Module):
 
         return fpn_outs, pred_outs
 
-    def forward(self, x, img_meta=None, use_cross_class_nms=False):
+    def forward(self, x, img_meta=None):
         batch_size, c, h, w = x.size()
         fpn_outs, pred_outs = self.forward_single(x, img_meta)
         # Expand data for nn.DataParallel
@@ -289,7 +290,7 @@ class CoreNet(nn.Module):
         pred_outs['prior_levels'] = pred_outs['prior_levels'].repeat(batch_size//self.clip_frames, 1)
 
         if self.cfg.STMASK.T2S_HEADS.TEMPORAL_FUSION_MODULE:
-            # calculate correlation map
+            # Calculate correlation map to feed it into the temporal fusion module
             pred_outs['fpn_feat'] = fpn_outs[self.TF_correlation_selected_layer]
 
         if self.training:
@@ -298,14 +299,14 @@ class CoreNet(nn.Module):
             pred_outs['conf'] = pred_outs['conf'].sigmoid() if self.cfg.MODEL.CLASS_HEADS.USE_FOCAL_LOSS \
                 else pred_outs['conf'].softmax(dim=-1)
 
-            # Detection
+            # Detection with NMS
             with timer.env('Detect'):
-                pred_outs_after_NMS = self.Detect(self, pred_outs, use_cross_class_nms)
+                pred_outs_after_NMS = self.Detect(self, pred_outs)
 
-            # track instances frame-by-frame
+            # Tacking: link instances frame-by-frame or clip-by-clip
             if self.cfg.DATASETS.TYPE == 'vis':
                 with timer.env('Track_TF'):
-                    pred_outs_after_track = self.Track(pred_outs_after_NMS, img_meta, x)
+                    pred_outs_after_track = self.Track(pred_outs_after_NMS, img_meta)
                 return pred_outs_after_track
             else:
                 return pred_outs_after_NMS
