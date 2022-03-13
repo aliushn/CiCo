@@ -2,7 +2,7 @@
 An offical code repository for our paper submitted in ECCV2022
 - Clip-in Clip-out: An Alignment-free One-stage Video Instance Segmentation Approach 
 
-  ![](https://github.com/MinghanLi/CiCo/tree/main/imgs/fifo_cico.png)
+  ![image](https://github.com/MinghanLi/CiCo/tree/main/imgs/fifo_cico.png)
  
 # Installation
  - Clone this repository 
@@ -47,7 +47,7 @@ An offical code repository for our paper submitted in ECCV2022
 ### Inference
    ```Shell
    # add --display to display instance masks
-   python eval.py --trained_model=path/to/your/trained/models.py --NUM_CLIP_FRAMES=3 --overlap_frames=1 
+   python eval.py --trained_model=path/to/your/trained/models.pth --NUM_CLIP_FRAMES=3 --overlap_frames=1 
    ```
 
 ### Training
