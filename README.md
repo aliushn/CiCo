@@ -3,6 +3,7 @@ An offical code repository for our paper submitted in ECCV2022
 - One-stage Video Instance Segmentation: from Frame-in Frame-out to Clip-in Clip-out 
 
   ![image](https://github.com/MinghanLi/CiCo/blob/main/imgs/fifo_cico.jpg)
+- Instance mask results
   ![ovis](https://github.com/MinghanLi/CiCo/blob/main/imgs/YT19.gif)
  
 # Installation
