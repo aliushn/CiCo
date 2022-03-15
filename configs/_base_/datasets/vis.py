@@ -50,11 +50,18 @@ class DatasetCatalog_vis(object):
         'class_names': YouTube_VOS_CLASSES,
     }
 
+    # Because the ground-truth annotations of all valid and test data in VIS task are not published,
+    # we have to submit the results into Codelab for evaluation, please refer to the official web
+    # for more details, like YTVIS2019: https://youtube-vos.org/dataset/vis/.
+    # During training, we split train data (train.json) into two parts: train_sub.json and valid_sub.json,
+    # where the former (the first nine-tenths of train data) is used for training, while the latter
+    # (the last one-tenth of train data) is used for validation.
+
     # YouTube 2019
     train_YouTube_VOS2019_dataset = copy.deepcopy(dataset_base_vis)
     train_YouTube_VOS2019_dataset['name'] = 'YTVIS2019_train'
     train_YouTube_VOS2019_dataset['img_prefix'] = 'YouTube_VOS2019/train/JPEGImages'
-    train_YouTube_VOS2019_dataset['ann_file'] = 'YouTube_VOS2019/annotations_instances/valid_sub.json'
+    train_YouTube_VOS2019_dataset['ann_file'] = 'YouTube_VOS2019/annotations_instances/train.json'
     train_YouTube_VOS2019_dataset['class_names'] = YouTube_VOS_CLASSES
 
     valid_sub_YouTube_VOS2019_dataset = copy.deepcopy(dataset_base_vis)
@@ -81,7 +88,7 @@ class DatasetCatalog_vis(object):
     train_YouTube_VOS2021_dataset = copy.deepcopy(dataset_base_vis)
     train_YouTube_VOS2021_dataset['name'] = 'YTVIS2021_train'
     train_YouTube_VOS2021_dataset['img_prefix'] = 'YouTube_VOS2021/train/JPEGImages'
-    train_YouTube_VOS2021_dataset['ann_file'] = 'YouTube_VOS2021/train/valid_sub_150.json'
+    train_YouTube_VOS2021_dataset['ann_file'] = 'YouTube_VOS2021/train/instances.json'
     train_YouTube_VOS2021_dataset['class_names'] = YouTube_VOS2021_CLASSES
 
     valid_sub_YouTube_VOS2021_dataset = copy.deepcopy(dataset_base_vis)
@@ -108,7 +115,7 @@ class DatasetCatalog_vis(object):
     train_OVIS_dataset = copy.deepcopy(dataset_base_vis)
     train_OVIS_dataset['name'] = 'OVIS_train'
     train_OVIS_dataset['img_prefix'] = 'OVIS/train'
-    train_OVIS_dataset['ann_file'] = 'OVIS/annotations_valid_sub.json'
+    train_OVIS_dataset['ann_file'] = 'OVIS/annotations_train.json'
     train_OVIS_dataset['class_names'] = OVIS_CLASSES
 
     valid_sub_OVIS_dataset = copy.deepcopy(dataset_base_vis)

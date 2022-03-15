@@ -34,10 +34,10 @@ CiCo = dict(
 DATASETS = dict(
     TYPE='vis',
     NUM_CLASSES=40,
-    TRAIN='train_YouTube_VOS2019_dataset',
-    VALID_SUB='valid_sub_YouTube_VOS2019_dataset',
-    VALID='valid_YouTube_VOS2019_dataset',
-    TEST='test_YouTube_VOS2019_dataset')
+    TRAIN='train_YouTube_VOS2021_dataset',
+    VALID_SUB='valid_sub_YouTube_VOS2021_dataset',
+    VALID='valid_YouTube_VOS2021_dataset',
+    TEST='test_YouTube_VOS2021_dataset')
 
 SOLVER = dict(
     IMS_PER_BATCH=4,

@@ -43,14 +43,17 @@ def parse_args():
     parser.add_argument('--local_rank', default=0, type=int,
                         help='local_rank for distributed training')
     parser.add_argument('--resume', default=None, type=str,
-                        help='Checkpoint state_dict file to resume training from. If this is "interrupt"' \
-                         ', the model will resume training from the interrupt file.')
+                        help='Checkpoint state_dict file to resume training from. If this is "interrupt", '
+                             'the model will resume training from the interrupt file.')
+    parser.add_argument('--do_inference', dest='do_inference', action='store_false',
+                        help='If True, you need to split the train data into two parts: train.json and valid_sub.json. '
+                             'the former for training and the latter for inference during training.')
     parser.add_argument('--start_iter', default=-1, type=int,
-                        help='Resume training at this iter. If this is -1, the iteration will be' \
-                         'determined from the file name.')
+                        help='Resume training at this iter. If this is -1, the iteration will be determined '
+                             'from the file name.')
     parser.add_argument('--start_epoch', default=-1, type=int,
-                        help='Resume training at this iter. If this is -1, the iteration will be' \
-                             'determined from the file name.')
+                        help='Resume training at this iter. If this is -1, the iteration will be determined '
+                             'from the file name.')
     parser.add_argument('--keep_latest', dest='keep_latest', action='store_true',
                         help='Only keep the latest checkpoint instead of each one.')
     parser.add_argument('--keep_latest_interval', default=10000, type=int,
@@ -159,7 +162,7 @@ def train(cfg):
         netloss = netloss.cuda()
         train_sampler = None
 
-    # We support train models on coco, vis and vid datasets now, please give a specific data type
+    # We support train models on coco, vis and vid datasets now, please indicate a specific data type
     if cfg.DATASETS.TYPE == 'coco':
         detection_collate = detection_collate_coco
     elif cfg.DATASETS.TYPE in {'vis'}:
@@ -264,29 +267,38 @@ def train(cfg):
                             print('Deleting old save...')
                             os.remove(latest)
 
-                    do_inference = False if 'DET' in args.config else True
-                    if do_inference:
+                    # Because the ground-truth annotations of all valid and test data in VIS task are not published,
+                    # we have to submit their results into Codelab for evaluation, please refer to the official web
+                    # for more details, like YTVIS2019: https://youtube-vos.org/dataset/vis/.
+                    # During training, we split train data into two parts: train and valid_sub, where the former
+                    # (the first nine-tenths of train data) is used for training, while the latter
+                    # (the last one-tenth of train data) is used for validation.
+                    if args.do_inference:
                         if cfg.DATASETS.TYPE == 'coco':
                             setup_eval_coco()
                             compute_validation_map_coco(net, epoch, iteration, log if args.log else None)
                         else:
-                            print('Inference for valid data!')
+                            print('Inference for valid_sub data!')
                             setup_eval(epoch)
-                            # valid_sub, the last one ten of training data
+                            # valid_sub, the last one ten of training data for inference
                             valid_sub_dataset = get_dataset(cfg.DATASETS.TYPE, cfg.DATASETS.VALID_SUB, cfg.INPUT,
                                                             cfg.TEST.NUM_CLIP_FRAMES, num_clips=1, inference=True)
                             compute_validation_map(net, valid_sub_dataset)
 
-                            # valid or test datasets
-                            if cfg.DATASETS.TYPE == 'vis' and epoch > 6:
-                                valid_dataset = get_dataset(cfg.DATASETS.TYPE,  cfg.DATASETS.VALID, cfg.INPUT,
-                                                            cfg.TEST.NUM_CLIP_FRAMES, num_clips=1, inference=True)
-                                compute_validation_map(net, valid_dataset)
+                    # For valid or test datasets, we generate a results_epoch.json file on the output path,
+                    # you need first move results_epoch.json to results.json and then form a .zip file,
+                    # finally upload the .zip file to the Codelab for evaluation.
+                    print('Inference for valid data!')
+                    if cfg.DATASETS.TYPE == 'vis' and epoch > 6:
+                        setup_eval(epoch)
+                        valid_dataset = get_dataset(cfg.DATASETS.TYPE,  cfg.DATASETS.VALID, cfg.INPUT,
+                                                    cfg.TEST.NUM_CLIP_FRAMES, num_clips=1, inference=True)
+                        compute_validation_map(net, valid_dataset)
 
                 iteration += 1
 
     except KeyboardInterrupt:
-        print('Stopping early. Saving network...')
+        print('Stopping early. Saving network into ', cfg.OUTPUT_DIR)
 
         # Delete previous copy of the interrupted network so we don't spam the weights folder
         SavePath.remove_interrupt(cfg.OUTPUT_DIR)
@@ -294,13 +306,6 @@ def train(cfg):
         exit()
 
     torch.save(net.state_dict(), save_path(epoch, iteration))
-
-
-def reduce_tensor(tensor: torch.Tensor):
-    rt = tensor.clone()
-    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
-    rt /= dist.get_world_size()  # 总进程数
-    return rt
 
 
 def set_lr(optimizer, new_lr):

@@ -29,7 +29,6 @@ share/python-wheels/
 MANIFEST
 
 # files
-configs/coco/
 configs/cocovis/
 configs/VID/
 configs/VIS/

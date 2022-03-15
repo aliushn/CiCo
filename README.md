@@ -1,5 +1,5 @@
 # CiCo
-An offical code repository for our paper submitted in ECCV2022
+An offical code repository for our paper
 - One-stage Video Instance Segmentation: from Frame-in Frame-out to Clip-in Clip-out 
 
   ![image](https://github.com/MinghanLi/CiCo/blob/main/imgs/fifo_cico.jpg)
@@ -37,8 +37,7 @@ An offical code repository for our paper submitted in ECCV2022
 ## Run 
 
 ### Prepare datasets and models
- - Datasets: If you'd like to train or test CiCo, please download the datasets from the official web: [YTVIS2019](https://youtube-vos.org/dataset/), [YTVIS2021](https://youtube-vos.org/dataset/vis/) and [OVIS](http://songbai.site/ovis/).
-   You can update your data path in `configs/_base_/datasets/vis.py`
+ - Datasets: If you'd like to train or test CiCo, please download the datasets from the official web: [YTVIS2019](https://youtube-vos.org/dataset/), [YTVIS2021](https://youtube-vos.org/dataset/vis/) and [OVIS](http://songbai.site/ovis/), then update your data path in `configs/_base_/datasets/vis.py`
    ```Shell
    cd CiCo
    vim configs/_base_/datasets/vis.py
@@ -68,7 +67,7 @@ An offical code repository for our paper submitted in ECCV2022
 | R50         |CondInst  | 37.3 |[cico_CondInst_r50_yt19_f3.pth](https://drive.google.com/file/d/1-pPSs4TFsttlOvd1YVX2heCimG0Dcyda/view?usp=sharing) | [stdout.txt](https://drive.google.com/file/d/11MBBchibbokVpqbLKIapSVWGuTYg9pdT/view?usp=sharing)
 | R101        |Yolact    | 39.6 |
 | R101        |CondInst  | 39.6 |[cico_CondInst_r101_yt19_f3.pth](https://drive.google.com/file/d/1h-i9LzZ1ThdI_AXQDyWmRyPGS-fMqPW1/view?usp=sharing)| [stdout.txt](https://drive.google.com/file/d/1z_XFMA_bllIFw-rPLjntC-XbiMpgp0it/view?usp=sharing)
-| Swin-tiny   |Yoalct    | 41.8 |[cico_CondInst_yolact_yt19_f3.pth]()   |[stdout.txt](https://drive.google.com/file/d/1IpSLVYbqYa-C2ZQ9vKQmNTMbmTGH1Cdk/view?usp=sharing)
+| Swin-tiny   |Yolact    | 41.8 |   |[stdout.txt](https://drive.google.com/file/d/1IpSLVYbqYa-C2ZQ9vKQmNTMbmTGH1Cdk/view?usp=sharing)
 | Swin-tiny   |CondInst  | 41.4 |[cico_CondInst_swint_yt19_f3.pth](https://drive.google.com/file/d/1Z4zy3L4g12TmA5wEJCFCVRcacZCDm3nA/view?usp=sharing) | [stdout.txt](https://drive.google.com/file/d/1Rx6JiYUduWjgkxRvRzA5akXdfK056BFq/view?usp=sharing)
 
 ### Quantitative Results on YTVIS2021
@@ -76,17 +75,17 @@ An offical code repository for our paper submitted in ECCV2022
 |:-----------:|:--------:|:----:|-----------------------------------------------------------------------------------------------------------------|-----------------|
 | R50         |Yolact    | 35.2 |[cico_yolact_r50_yt21_f3.pth](https://drive.google.com/file/d/1qSxR_otaZ7UczTNEouyb-fFqPZeTTZk2/view?usp=sharing)    |[stdout.txt](https://drive.google.com/file/d/1MFDeYcZHBT5U8aa_jbb4saPOD1BZfqWA/view?usp=sharing)
 | R50         |CondInst  | 35.4 |[cico_CondInst_r50_yt21_f3.pth](https://drive.google.com/file/d/1gT_KOXocut3pYuUUiSA-Vqz5PZ23ncms/view?usp=sharing)  |[stdout.txt](https://drive.google.com/file/d/1EhyPOyHXhdIljNk78byXaXDE2LM8y5j1/view?usp=sharing)
-| R101        |Yolact    | 36.5 |
-| R101        |CondInst  | 36.5 |
-| Swin-tiny   |Yoalct    | 38.0 |
+| R101        |Yolact    | 36.5 |[cico_yolact_r101_yt21_f3.pth](https://drive.google.com/file/d/1x4m91sAFspmzRPLUMZJ9J1q6IYvDtcLF/view?usp=sharing)   |[stdout.txt](https://drive.google.com/file/d/1hPn_0O94pOTbWC07S8vFlQ1qzv2UgL_S/view?usp=sharing)
+| R101        |CondInst  | 36.7 |[cico_CondInst_r101_yt21_f3.pth](https://drive.google.com/file/d/16TblC-8nioF0jwjfAzWtlzmhpWNemRP0/view?usp=sharing) |[stdout.txt](https://drive.google.com/file/d/19j9qcNy5FGAEC06HI0fkf5-jItWNhUqX/view?usp=sharing)
+| Swin-tiny   |Yolact    | 38.0 |
 | Swin-tiny   |CondInst  | 39.1 |[cico_CondInst_swint_yt21_f3.pth](https://drive.google.com/file/d/1cH2dK7GxmwcrC4bCKSIB0aF0E8fOXV5_/view?usp=sharing)|[stdout.txt](https://drive.google.com/file/d/1hL6hRbTTH3yG6u2tF98XEY5f72yVq7QW/view?usp=sharing)
 
 ### Quantitative Results on OVIS
 | Backbone    |FCN       | mAP  | Weights | Results|
 |:-----------:|:--------:|:----:|---------|-----------------------------------------------------------------------------------------------------------|
-| R50         |Yolact    | 17.2 |
+| R50         |Yolact    | 17.4 |[cico_yolact_r50_ovis_f3.pth](https://drive.google.com/file/d/1G753A58sXb-J_-iMsTGGLjBjAwlhDcSh/view?usp=sharing)    |[stdout.txt](https://drive.google.com/file/d/1R8XaCGQSp34BDGHZyccEbj2d0v13gCnU/view?usp=sharing)
 | R50         |CondInst  | 18.0 |
-| R101        |Yolact    | 18.7 |
-| R101        |CondInst  | 18.2 |
-| Swin-tiny   |Yoalct    | 18.0 |
-| Swin-tiny   |CondInst  | 18.2 |[cico_CondInst_swint_ovis_f3.pth](https://drive.google.com/file/d/1GEEntoC2or5LKnFPD1z49MuitcP6Xhse/view?usp=sharing)
+| R101        |Yolact    | 19.1 |[cico_yolact_r101_ovis_f3.pth](https://drive.google.com/file/d/1NVNi-7ESmMnGkPXPhqEPMP77vMJn3dSe/view?usp=sharing)   |[stdout.txt](https://drive.google.com/file/d/1ZCV0xpwNNBe3VuoDRRFAer8sVcto9WBj/view?usp=sharing)
+| R101        |CondInst  | 20.4 |[cico_condinst_r101_ovis_f3.pth](https://drive.google.com/file/d/1ztdLogYLHoIBq25tk1fK1PPHeiEC1inz/view?usp=sharing) |[stdout.txt](https://drive.google.com/file/d/1sTP94911RcHxMEhRtVCtLTIfQv45JrBE/view?usp=sharing)
+| Swin-tiny   |Yolact    | 18.0 |
+| Swin-tiny   |CondInst  | 18.2 |

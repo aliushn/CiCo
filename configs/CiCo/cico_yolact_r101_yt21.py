@@ -1,5 +1,5 @@
 _base_ = ['configs/_base_/models/r50_base.yaml',
-          'configs/_base_/models/r50_base.yaml', 'configs/CiCo/base_vis.py']
+          'configs/_base_/models/r101_base.yaml', 'configs/CiCo/base_vis.py']
 
 MODEL = dict(
     BACKBONE=dict(

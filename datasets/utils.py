@@ -149,7 +149,6 @@ def get_dataset(data_type, data_name, input, num_clip_frame, num_clips=1, infere
     from configs._base_.datasets import get_dataset_config
     from .ytvos import YTVOSDataset
     from .coco import COCODetection
-    from .cocovis import COCOVISDetection
     from .VID import VIDDataset
 
     dataset_config = get_dataset_config(data_name, data_type)
