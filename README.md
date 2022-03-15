@@ -43,7 +43,7 @@ An offical code repository for our paper
    vim configs/_base_/datasets/vis.py
    ```
 
- - CoCo-pretrained models with ResNet or Swin transformer backbones. To train, please put them in a directory, such as `outputs/pretrained_models/`.
+ - Download CoCo-pretrained models with ResNet or Swin transformer backbones from [here](https://drive.google.com/drive/folders/1DPFeUjMVmqSWnCk-sqE8PO7O3pTS_gCy?usp=sharing).  To train, please put them in a directory, such as `outputs/pretrained_models/`.
 
 ### Inference
    ```Shell
