@@ -176,8 +176,8 @@ class MultiBoxLoss(nn.Module):
         pos = conf_t > 0
         if pos.sum() > 0:
             # ---------------------------  Localization Loss (Smooth L1) -------------------------------------------
-            losses_loc, pred_boxes_p, gt_boxes_p = self.locolization_loss(pos, priors, loc_data, loc_t, centerness_data)
-            losses.update(losses_loc)
+            losses_loc, pred_boxes_p, gt_boxes_p = self.localization_loss(pos, priors, loc_data, loc_t, centerness_data)
+            losses.update(losses_loc) 
             
             # Split boxes of positive samples frame-by-frame to form a list
             num_objs_per_frame = pos.sum(dim=1).reshape(len(gt_boxes), -1).sum(-1).tolist()

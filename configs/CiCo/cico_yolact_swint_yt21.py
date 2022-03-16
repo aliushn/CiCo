@@ -6,6 +6,9 @@ MODEL = dict(
         SWINT=dict(
             path='swint_coco_yolact.pth')),
 
+    FPN=dict(
+        NUM_FEATURES=256),
+
     MASK_HEADS=dict(
         TRAIN_MASKS=True,
         MASK_DIM=32,

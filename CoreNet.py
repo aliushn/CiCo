@@ -172,7 +172,7 @@ class CoreNet(nn.Module):
                                 scale = model_dict[key].size(0)//state_dict[key].size(0)
                                 model_dict[key] = state_dict[key].repeat(scale).to(device)
                             else:
-                                print('Size is different in pre-trained model and current model:', key)
+                                print('Size is different in pre-trained and current model:', key)
                         elif state_dict[key].dim() == 4 and model_dict[key].dim() == 5:
                             # update 3D weights from 2D pre-trained weights
                             c_out_p, c_in_p, kh_p, kw_p = state_dict[key].size()
@@ -184,7 +184,7 @@ class CoreNet(nn.Module):
                                 model_dict[key] = weights * torch.tensor([0.125, 0.75, 0.125]).view(1, 1, -1).to(device) \
                                     if key.startswith('ProtoNet') and t == 3 else weights/t
                             else:
-                                print('Size is different in pre-trained model and current model:', key)
+                                print('Size is different in pre-trained and current model:', key)
 
         self.load_state_dict(model_dict, strict=True)
 

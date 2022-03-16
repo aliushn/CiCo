@@ -7,7 +7,7 @@ An offical code repository for our [paper](https://arxiv.org/abs/2203.06421)
   ![ovis](https://github.com/MinghanLi/CiCo/blob/main/imgs/YT19.gif)
 
 # News
--[15/03/2022] Release code with pre-trained models on Github and paper on arxiv 
+- [15/03/2022] Release code with pre-trained models on Github and paper on arxiv 
  
 # Installation
  - Clone this repository 

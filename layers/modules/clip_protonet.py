@@ -70,8 +70,8 @@ class ClipProtoNet(nn.Module):
             # Unfold inputs from 4D to 5D: [bs*T, C, H, W] => [bs, C, T, H, W]
             proto_x_fold = proto_x.reshape(-1, self.clip_frames, C_in, H_in, W_in).permute(0, 2, 1, 3, 4).contiguous()
             proto_out_fold = self.proto_net(proto_x_fold)
-            H_out, W_out = proto_out_fold.size()[-2:]
-            proto_out = proto_out_fold.permute(0, 2, 1, 3, 4).contiguous().reshape(-1, C_in, H_out, W_out)
+            C_out, _, H_out, W_out = proto_out_fold.size()[-4:]
+            proto_out = proto_out_fold.transpose(1, 2).reshape(-1, C_out, H_out, W_out)
         else:
             proto_out = self.proto_net(proto_x)
 
